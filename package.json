@@ -1,0 +1,22 @@
+{
+  "name": "sound-sculpture",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@types/three": "^0.184.1",
+    "sass": "^1.100.0",
+    "three": "^0.184.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.14"
+  }
+}
