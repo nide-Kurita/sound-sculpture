@@ -6,39 +6,199 @@
     <title>Sound Sculpture</title>
   </head>
   <body>
-    <main id="app">
-      <section class="intro" aria-label="Sound Sculpture controls">
+    <main id="app" class="mode-classic">
+      <header class="intro" aria-label="Sound Sculpture">
         <p class="eyebrow">Sound Sculpture</p>
-        <h1>音で彫刻する</h1>
-        <p class="description">
-          PCに入力された音を解析し、低音の圧力を不可逆な形状変化として蓄積します。
-          無音が続くと、その瞬間の形を完成作品として固定します。
+        <h1 id="intro-title">
+          <span class="intro-copy intro-copy--classic">音で彫刻する</span>
+          <span class="intro-copy intro-copy--carve">音で彫刻する（粒）</span>
+        </h1>
+        <p id="intro-description" class="description">
+          <span class="intro-copy intro-copy--classic">
+            PCに入力された音を解析し、低音の圧力を不可逆な形状変化として蓄積します。無音が続くと、その瞬間の形を完成作品として固定します。
+          </span>
+          <span class="intro-copy intro-copy--carve">
+            粘土モードと同じ音の彫刻ロジックです。彫刻の塊だけが粒で描画され、表面の光やエフェクトは現行版と同じです。
+          </span>
         </p>
-        <div class="actions">
-          <button id="start-audio" type="button">音入力を開始</button>
-          <button id="complete-sculpture" type="button" disabled>完了</button>
-          <button id="export-gltf" type="button" disabled>GLTF 出力</button>
+      </header>
+
+      <aside class="control-panel-shell" id="control-panel-shell">
+        <div
+          id="control-panel-handle"
+          class="control-panel__handle"
+          role="button"
+          tabindex="0"
+          aria-label="操作パネルをドラッグして移動"
+        >
+          <span class="control-panel__handle-dots" aria-hidden="true"></span>
         </div>
-        <p id="status" class="status">待機中</p>
-      </section>
-      <section class="viewer-controls" aria-label="Viewer controls">
-        <p class="viewer-controls__title">展示調整</p>
-        <fieldset id="viewer-control-fields" disabled>
-          <label>
-            ライト方向
-            <input id="light-azimuth" type="range" min="-180" max="180" value="35" />
-          </label>
-          <label>
-            ライト高さ
-            <input id="light-elevation" type="range" min="5" max="85" value="42" />
-          </label>
-          <label>
-            ライト強度
-            <input id="light-intensity" type="range" min="1" max="7" step="0.1" value="3.4" />
-          </label>
-          <button id="reset-view" type="button">視点を戻す</button>
-        </fieldset>
-      </section>
+        <button
+          id="toggle-control-panel"
+          type="button"
+          class="control-panel__toggle"
+          aria-expanded="true"
+          aria-controls="control-panel"
+        >
+          <span class="control-panel__toggle-label control-panel__toggle-label--hide">パネルを隠す</span>
+          <span class="control-panel__toggle-label control-panel__toggle-label--show">操作パネル</span>
+        </button>
+        <section class="control-panel" id="control-panel" aria-label="設定と操作">
+        <details class="control-group" open>
+          <summary class="control-group__summary">入力・操作</summary>
+          <div class="control-group__body">
+            <label class="sculpture-mode">
+              彫刻モード
+              <select id="sculpture-mode" class="sculpture-mode__select">
+                <option value="classic">粘土の成長（現行）</option>
+                <option value="carve">粒表示（粘土と同じ挙動）</option>
+              </select>
+            </label>
+            <div class="audio-device">
+              <label class="audio-device__label">
+                入力デバイス
+                <select id="audio-input-device" class="audio-device__select">
+                  <option value="default">既定の入力</option>
+                </select>
+              </label>
+              <button
+                id="refresh-audio-devices"
+                type="button"
+                class="audio-device__refresh"
+                data-status-success="入力デバイス一覧を更新しました"
+                data-status-error="入力デバイス一覧の更新に失敗しました"
+              >
+                再読み込み
+              </button>
+            </div>
+            <section class="audio-scope" aria-label="Audio scope">
+              <canvas id="audio-scope" width="420" height="120"></canvas>
+            </section>
+            <details class="control-group control-group--dev band-test-panel" id="band-test-panel" hidden>
+              <summary class="control-group__summary">音域テスト</summary>
+              <div class="control-group__body">
+                <p class="band-test-hint">
+                  メーターで解析結果を確認し、ソロで LIVE がどの帯域だけ効いているか切り分けます。テスト音は 80Hz → 1kHz → 7kHz を順に再生します。
+                </p>
+                <label class="band-test-solo">
+                  ソロ（LIVE 帯域の切り分け）
+                  <select id="band-solo-mode" class="band-test-solo__select">
+                    <option value="off">通常（全帯域）</option>
+                    <option value="low">低音のみ → 全体振動</option>
+                    <option value="mid">中音のみ → 表面</option>
+                    <option value="high">高音のみ → 膜</option>
+                  </select>
+                </label>
+                <button id="band-tone-test" type="button" disabled>テスト音を再生（低→中→高）</button>
+              </div>
+            </details>
+            <div class="actions">
+              <button
+                id="start-audio"
+                type="button"
+                data-status-preparing="マイク入力を準備中"
+                data-status-ready="形成中 - ドラッグで視点を回せます"
+              >
+                マイク入力を開始
+              </button>
+              <button
+                id="start-system-audio"
+                type="button"
+                data-status-preparing="PC/タブ音声を準備中"
+                data-status-ready="形成中 - ドラッグで視点を回せます"
+              >
+                PC/タブ音声を開始
+              </button>
+              <button
+                id="start-dev-audio"
+                type="button"
+                hidden
+                data-status-preparing="開発用音源を準備中"
+                data-status-ready="形成中 (s04) - ドラッグで視点を回せます"
+              >
+                開発用音源 (s04)
+              </button>
+              <button
+                id="reset-sculpture"
+                type="button"
+                disabled
+                data-status-reset="リセットしました - 形成を再開できます"
+              >
+                リセット
+              </button>
+              <button
+                id="complete-sculpture"
+                type="button"
+                disabled
+                data-status-done="完成 - マウス操作とライト調整ができます"
+              >
+                完了
+              </button>
+              <button
+                id="export-gltf"
+                type="button"
+                disabled
+                data-status-exporting="GLTF を書き出し中"
+                data-status-success="完成 - GLTF を出力しました"
+                data-status-error="GLTF 出力に失敗しました"
+              >
+                GLTF 出力
+              </button>
+            </div>
+            <p id="status" class="status" data-status-idle="待機中">待機中</p>
+          </div>
+        </details>
+
+        <details class="control-group">
+          <summary class="control-group__summary">展示調整</summary>
+          <div class="control-group__body">
+            <fieldset id="viewer-control-fields" disabled>
+              <label>
+                ライト方向
+                <input id="light-azimuth" type="range" min="-180" max="180" value="0" />
+              </label>
+              <label>
+                ライト高さ
+                <input id="light-elevation" type="range" min="5" max="85" value="85" />
+              </label>
+              <label>
+                ライト強度
+                <input id="light-intensity" type="range" min="1" max="7" step="0.1" value="3.4" />
+              </label>
+              <button id="reset-view" type="button">視点を戻す</button>
+            </fieldset>
+          </div>
+        </details>
+
+        <details class="control-group control-group--dev">
+          <summary class="control-group__summary">開発チューニング</summary>
+          <div class="control-group__body">
+            <p class="tuning-hint">
+              6項目に整理しました。<strong>LIVE・呼吸</strong>は即時反映、<strong>形成・成長</strong>はこれからの蓄積に効きます。数値はフィボナッチ比率です。
+            </p>
+            <div id="tuning-sliders" class="tuning-sliders"></div>
+            <div class="tuning-export">
+              <label class="tuning-export__label" for="tuning-export-text">
+                調整結果（コピー用）
+                <textarea id="tuning-export-text" class="tuning-export__text" rows="10" readonly></textarea>
+              </label>
+              <div class="tuning-export__actions">
+                <button
+                  id="copy-tuning"
+                  type="button"
+                  data-label-copied="コピーしました"
+                  data-status-error="クリップボードにコピーできませんでした。テキストを手動で選択してください"
+                >
+                  コピー
+                </button>
+                <button id="reset-tuning" type="button">既定値に戻す</button>
+              </div>
+            </div>
+          </div>
+        </details>
+        </section>
+      </aside>
+
       <canvas id="scene" aria-label="Sound reactive 3D sculpture"></canvas>
     </main>
     <script type="module" src="/src/main.ts"></script>
