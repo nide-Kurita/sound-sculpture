@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { SpeciesProfile } from "./species-profile";
 import type { StructureSnapshot } from "./structure-tracker";
 import { getGrowthAlgorithmId, type GrowthAlgorithmId } from "./growth-algorithm";
+import { createClayColorShift, nudgeClayColorShift } from "./clay-color";
 import { runtimeTuning } from "./sculpture-tuning";
 import {
   clamp01,
@@ -79,6 +80,7 @@ export class AmoebaSculpture implements SculptureExperience {
   private readonly clickRipples: Array<{ x: number; y: number; age: number }> = [];
 
   private growthMode: AmoebaGrowthMode = "tendril";
+  private clayColorShift = createClayColorShift();
 
   // --- Rendering (pixel texture) ---
   private readonly canvas: HTMLCanvasElement;
@@ -234,7 +236,7 @@ export class AmoebaSculpture implements SculptureExperience {
   }
 
   getPointerTargets() {
-    return [this.plane];
+    return [this.plane, this.glowPlane];
   }
 
   pokeSurface(localPoint: THREE.Vector3) {
@@ -242,6 +244,11 @@ export class AmoebaSculpture implements SculptureExperience {
     const py = (0.5 - localPoint.y / 4.2) * this.h;
     this.clickRipples.push({ x: px, y: py, age: 0 });
     this.repelAgentsAt(px, py, 34);
+    this.nudgeClayColorOnClick();
+  }
+
+  nudgeClayColorOnClick() {
+    this.clayColorShift = nudgeClayColorShift(this.clayColorShift);
   }
 
   private updateClickRipples(deltaTime: number) {
@@ -326,6 +333,7 @@ export class AmoebaSculpture implements SculptureExperience {
   reset() {
     this.completed = false;
     this.simTime = 0;
+    this.clayColorShift = createClayColorShift();
     this.clickRipples.length = 0;
     this.trail0.fill(0);
     this.trail1.fill(0);
@@ -556,7 +564,7 @@ export class AmoebaSculpture implements SculptureExperience {
     const bg = this.params.bg;
     const levels = this.params.grainLevels;
     const threshold = this.params.grainThreshold;
-    const hueBase = this.simTime * this.params.hueSpeed;
+    const hueBase = this.simTime * this.params.hueSpeed + this.clayColorShift.hue;
     const hueSpan = this.params.hueSpan;
     const sat = this.params.sat;
     const lightMin = this.params.lightMin;

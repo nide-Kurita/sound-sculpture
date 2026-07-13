@@ -139,10 +139,10 @@ const VITA: VisualStyleConfig = {
   idleWobble: 1,
   core: {
     // 頂点カラー（真珠色のムラ）と乗算されるため、単色時より明るめに設定
-    color: 0x93a9c2,
-    innerColor: 0x3c4a60,
+    color: 0x9ca8c8,
+    innerColor: 0x3e4a62,
     roughness: 0.52,
-    hueBase: 0.55,
+    hueBase: 0.62,
     hslSatBase: 0.34,
     hslLightBase: 0.54,
     shiftScale: 0.62,

@@ -72,6 +72,8 @@ export type SculptureExperience = {
   /** クリック位置で表面が少し反発する（完成後も有効） */
   getPointerTargets?(): THREE.Object3D[];
   pokeSurface?(localPoint: THREE.Vector3): void;
+  /** クリック毎に粘土色を少しずらす（全モード共通の色条件） */
+  nudgeClayColorOnClick?(): void;
   complete(): void;
   reset(): void;
   createExportGroup(): THREE.Group;

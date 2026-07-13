@@ -49,6 +49,12 @@ import {
   setGrowthAlgorithmId,
   type GrowthAlgorithmId,
 } from "./growth-algorithm";
+import {
+  clayStyleFromVisualCore,
+  createClayColorShift,
+  nudgeClayColorShift,
+  resolveClayPalette,
+} from "./clay-color";
 import { AmoebaSculpture } from "./amoeba-sculpture";
 import { CarveSculpture } from "./carve-sculpture";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
@@ -638,11 +644,12 @@ const surfaceFragmentShader = /* glsl */ `
     float dataLines = 0.0;
     float microSignals = smoothstep(0.8, 0.995, meridian) * uHigh * lineDrive * 1.2;
 
-    vec3 baseColor = vec3(0.62, 0.78, 0.94);
-    vec3 electricBlue = vec3(0.24, 0.55, 1.0);
+    vec3 baseColor = uPaletteColor;
+    vec3 electricBlue = uPaletteAccent;
     vec3 melodyGold = vec3(1.0, 0.82, 0.52);
-    vec3 color = baseColor * 0.24;
-    color += electricBlue * (fresnel * (0.95 + uHigh * 1.35));
+    vec3 color = baseColor * 0.18;
+    float idleDim = 0.4 + uLive * 0.6;
+    color += electricBlue * (fresnel * (0.95 + uHigh * 1.35)) * idleDim;
     color += melodyGold * melodyLines;
     color += melodyGold * fresnel * uMelodyFresnel * lineDrive;
     color += vec3(0.72, 0.94, 1.0) * microSignals * 0.48;
@@ -655,17 +662,17 @@ const surfaceFragmentShader = /* glsl */ `
     color += vec3(0.92, 0.96, 1.0) * ember * uGlow * uHigh * 0.65;
 
     // 透明外殻が強いと「中身が空っぽ」に見えやすいので、fresnel/ラインの寄与を抑える
-    float alpha = uOpacity + fresnel * 0.11 + melodyLines * 0.05 + microSignals * 0.05;
+    float alpha = uOpacity + fresnel * 0.11 * idleDim + melodyLines * 0.05 + microSignals * 0.05;
     alpha += hotVeins * uGlow * 0.08 + ember * uGlow * uHigh * 0.06;
     alpha += lineDrive * fresnel * uMelodyFresnel * 0.06;
     alpha *= mix(1.0, 0.58, frozen);
 
     // vita: 真珠光沢のイリデッセンス（生命スタイル）
     if (uVita > 0.5) {
-      vec3 irid = 0.5 + 0.5 * cos(6.28318 * (fresnel * 1.35 + vec3(0.0, 0.33, 0.67)) + flowTime * 0.3);
+      vec3 irid = 0.5 + 0.5 * cos(6.28318 * (fresnel * 1.35 + vec3(0.02, 0.18, 0.52)) + flowTime * 0.3);
       vec3 pearl = irid * mix(vec3(1.0), uPaletteColor * 1.7, 0.55);
-      color = mix(color, color * 0.35 + pearl * (0.4 + uBreath * 0.5), 0.8);
-      alpha += 0.045 + fresnel * 0.15 + uBreath * fresnel * 0.12;
+      color = mix(color, color * 0.35 + pearl * (0.4 + uBreath * 0.5), 0.68 * idleDim);
+      alpha += (0.03 + fresnel * 0.11 + uBreath * fresnel * 0.09) * idleDim;
     }
 
     // petrify: 下から上へ結晶化が進む（変容スタイル）
@@ -1228,6 +1235,8 @@ class SoundSculpture {
   private static readonly AFTERLIFE_BREATH_STRENGTH = 0.68;
   /** 完成後の鼓動（呼吸）のテンポ。1未満でゆっくり */
   private static readonly AFTERLIFE_BREATH_TEMPO = 0.2;
+  /** 形成開始時の膜不透明度 — 中身の粘土が主役になるよう控えめに */
+  private static readonly INITIAL_MEMBRANE_OPACITY = 0.1;
 
   readonly group = new THREE.Group();
 
@@ -1337,6 +1346,11 @@ class SoundSculpture {
   };
   private waistCenterAlong = 0;
   private morphologySeed = 0;
+  /** スタイル基準 + クリックシフトの粘土色 — core / inner / 膜 / 頂点が共有 */
+  private clayHueBase = 0.09;
+  private claySatBase = 0.18;
+  private clayLightBase = 0.78;
+  private clayColorShift = createClayColorShift();
   private readonly targetCoreColor = new THREE.Color(CLAY_CORE_COLOR);
   private readonly targetCoreEmissive = new THREE.Color(0x000000);
   private particleCursor = 0;
@@ -1432,7 +1446,7 @@ class SoundSculpture {
 
     // “粘土の中身”を感じるための内側の塊
     this.innerCoreMaterial = new THREE.MeshPhysicalMaterial({
-      color: styleCore.pearlVariation > 0 ? 0xb8c8dc : styleCore.innerColor,
+      color: CLAY_CORE_COLOR,
       emissive: 0x000000,
       emissiveIntensity: 0,
       roughness: Math.min(1, styleCore.roughness + 0.03),
@@ -1456,13 +1470,13 @@ class SoundSculpture {
         uLive: { value: 0 },
         uGlow: { value: 0 },
         // 外殻は控えめにして core の質量感を主役に
-        uOpacity: { value: 0.14 },
+        uOpacity: { value: SoundSculpture.INITIAL_MEMBRANE_OPACITY },
         uCompleted: { value: 0 },
         uPetrify: { value: 0 },
         uVita: { value: this.style.membrane.vita ? 1 : 0 },
         uBreath: { value: 0 },
-        uPaletteColor: { value: new THREE.Color(0.62, 0.78, 0.95) },
-        uPaletteAccent: { value: new THREE.Color(0.85, 0.9, 1.0) },
+        uPaletteColor: { value: new THREE.Color(0.52, 0.66, 0.82) },
+        uPaletteAccent: { value: new THREE.Color(0.72, 0.78, 0.9) },
       },
       vertexShader: surfaceVertexShader,
       fragmentShader: surfaceFragmentShader,
@@ -1657,10 +1671,12 @@ class SoundSculpture {
     this.surfaceClickRepulsion = createClickRepulsionState(this.accumulated.length);
     this.initCrystalAxes();
     this.initMorphology();
+    this.syncClayColors();
 
     if (styleCore.pearlVariation > 0) {
       this.bakeCorePearlColors(styleCore.pearlVariation);
-      this.initVitaMembranePalette();
+    } else {
+      this.bakeCoreClayMottle(0.18);
     }
   }
 
@@ -1683,9 +1699,13 @@ class SoundSculpture {
       const p1 = growthPattern(nx * 1.3, ny * 1.3, nz * 1.3, this.morphologySeed + 4.2);
       const p2 = growthPattern(nx * 2.7, ny * 2.7, nz * 2.7, this.morphologySeed + 17.8);
       const p3 = growthPattern(nx * 0.85, ny * 1.15, nz * 0.95, this.morphologySeed + 31.4);
-      const hue = (((0.5 + p1 * 0.14 + p3 * 0.08 + ny * 0.04) * amount + 0.5 * (1 - amount)) % 1 + 1) % 1;
-      const saturation = clamp01(0.26 + Math.abs(p2) * 0.28 * amount + Math.abs(p3) * 0.12 * amount);
-      const lightness = clamp01(0.54 + p1 * 0.1 * amount + p2 * 0.04 * amount);
+      const hue = (this.clayHueBase + p1 * 0.18 + p3 * 0.1 + ny * 0.05 + p2 * 0.04 + 1) % 1;
+      const saturation = clamp01(
+        this.claySatBase + (Math.abs(p2) * 0.32 + Math.abs(p3) * 0.14) * amount * 0.55,
+      );
+      const lightness = clamp01(
+        this.clayLightBase + p1 * 0.12 * amount * 0.4 + p2 * 0.05 * amount + p3 * 0.03 * amount,
+      );
       color.setHSL(hue, saturation, lightness);
       const idx = i * 3;
       colors[idx] = color.r;
@@ -1697,16 +1717,87 @@ class SoundSculpture {
     this.coreMaterial.needsUpdate = true;
   }
 
-  /** vita 膜シェーダーの初期パレットを成長パターンから導出（単色回避） */
-  private initVitaMembranePalette() {
-    const salt = this.morphologySeed;
-    const p1 = growthPattern(0.31, 0.52, 0.18, salt);
-    const p2 = growthPattern(0.62, -0.28, 0.44, salt + 11.3);
-    const hue = (((0.5 + p1 * 0.16 + p2 * 0.06) % 1) + 1) % 1;
-    const base = new THREE.Color().setHSL(hue, 0.42 + p2 * 0.12, 0.54);
-    const accent = new THREE.Color().setHSL(((hue + 0.1 + p1 * 0.04) % 1 + 1) % 1, 0.52, 0.62);
+  /** 変容・彫刻スタイル: 粘土表面にごく弱い色ムラを焼き込む */
+  private bakeCoreClayMottle(amount: number) {
+    const position = this.geometry.attributes.position;
+    const colors = new Float32Array(position.count * 3);
+    const color = new THREE.Color();
+    for (let i = 0; i < position.count; i += 1) {
+      const x = position.getX(i);
+      const y = position.getY(i);
+      const z = position.getZ(i);
+      const r = Math.hypot(x, y, z) || 1;
+      const nx = x / r;
+      const ny = y / r;
+      const nz = z / r;
+      const p1 = growthPattern(nx * 1.1, ny * 1.1, nz * 1.1, this.morphologySeed + 2.6);
+      const p2 = growthPattern(nx * 2.4, ny * 2.4, nz * 2.4, this.morphologySeed + 13.1);
+      const p3 = growthPattern(nx * 0.7, ny * 1.2, nz * 0.9, this.morphologySeed + 27.9);
+      const hue = (this.clayHueBase + p1 * 0.09 + p3 * 0.05 + ny * 0.03 + 1) % 1;
+      const saturation = clamp01(this.claySatBase + Math.abs(p2) * 0.12 * amount);
+      const lightness = clamp01(this.clayLightBase + p1 * 0.05 * amount + p2 * 0.025 * amount);
+      color.setHSL(hue, saturation, lightness);
+      const idx = i * 3;
+      colors[idx] = color.r;
+      colors[idx + 1] = color.g;
+      colors[idx + 2] = color.b;
+    }
+    this.geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    this.coreMaterial.vertexColors = true;
+    this.coreMaterial.color.set(0xffffff);
+    this.coreMaterial.needsUpdate = true;
+  }
+
+  private applyMembraneClayPalette(palette: { hue: number; sat: number; light: number }) {
+    const base = new THREE.Color().setHSL(
+      palette.hue,
+      Math.min(0.42, palette.sat * 0.85),
+      Math.min(0.72, palette.light * 0.94),
+    );
+    const accent = new THREE.Color().setHSL(
+      (palette.hue + 0.08 + 1) % 1,
+      Math.min(0.48, palette.sat * 0.95),
+      Math.min(0.68, palette.light * 0.88),
+    );
     (this.surfaceMaterial.uniforms.uPaletteColor.value as THREE.Color).copy(base);
     (this.surfaceMaterial.uniforms.uPaletteAccent.value as THREE.Color).copy(accent);
+  }
+
+  private rebakeCoreClayColors() {
+    const st = this.style.core;
+    if (st.pearlVariation > 0) {
+      this.bakeCorePearlColors(st.pearlVariation);
+      return;
+    }
+    this.bakeCoreClayMottle(0.18);
+  }
+
+  /** スタイル基準 + クリックシフトで粘土・膜の色を一括同期 */
+  private syncClayColors() {
+    const st = this.style.core;
+    const palette = resolveClayPalette(clayStyleFromVisualCore(st), this.clayColorShift);
+    this.clayHueBase = palette.hue;
+    this.claySatBase = palette.sat;
+    this.clayLightBase = palette.light;
+
+    this.innerCoreMaterial.color.setHex(palette.innerHex);
+
+    if (st.pearlVariation > 0) {
+      this.coreMaterial.color.set(0xffffff);
+    } else {
+      this.coreMaterial.color.setHex(palette.surfaceHex);
+      this.targetCoreColor.setHex(palette.surfaceHex);
+    }
+
+    if (this.style.membrane.visible) {
+      this.applyMembraneClayPalette(palette);
+    }
+  }
+
+  nudgeClayColorOnClick() {
+    this.clayColorShift = nudgeClayColorShift(this.clayColorShift);
+    this.syncClayColors();
+    this.rebakeCoreClayColors();
   }
 
   private makeCircleTexture() {
@@ -2086,7 +2177,7 @@ class SoundSculpture {
   }
 
   getPointerTargets() {
-    const targets: THREE.Object3D[] = [this.core];
+    const targets: THREE.Object3D[] = [this.core, this.innerCore];
     if (this.surface.visible) {
       targets.push(this.surface);
     }
@@ -2098,6 +2189,7 @@ class SoundSculpture {
     if (this.surface.visible) {
       pokeClickRepulsion(this.surfaceClickRepulsion, this.baseSurfacePositions, localPoint, 0.1, 0.52);
     }
+    this.nudgeClayColorOnClick();
   }
 
   /**
@@ -2476,6 +2568,7 @@ class SoundSculpture {
     this.idleWobbleAmp = 0;
     this.idlePokeImpulse = 0;
     this.audioColorBlend = 0;
+    this.clayColorShift = createClayColorShift();
     this.idleWobbleField.fill(0);
     this.idleWobbleVector.fill(0);
     resetClickRepulsionState(this.clickRepulsion);
@@ -2551,13 +2644,12 @@ class SoundSculpture {
     this.surfaceGeometry.computeVertexNormals();
 
     const styleCore = this.style.core;
-    this.coreMaterial.color.set(styleCore.pearlVariation > 0 ? 0xffffff : styleCore.color);
+    this.syncClayColors();
     this.coreMaterial.roughness = styleCore.roughness;
     this.coreMaterial.metalness = 0;
     this.coreMaterial.clearcoat = styleCore.clearcoat;
     this.coreMaterial.emissive.set(0x000000);
     this.coreMaterial.emissiveIntensity = 0;
-    this.innerCoreMaterial.color.set(styleCore.pearlVariation > 0 ? 0xb8c8dc : styleCore.innerColor);
     this.innerCoreMaterial.roughness = Math.min(1, styleCore.roughness + 0.03);
     this.innerCoreMaterial.emissive.set(0x000000);
     this.innerCoreMaterial.emissiveIntensity = 0;
@@ -2567,13 +2659,16 @@ class SoundSculpture {
     uniforms.uLive.value = 0;
     uniforms.uMelody.value = 0;
     uniforms.uGlow.value = 0;
-    uniforms.uOpacity.value = 0.22;
+    uniforms.uOpacity.value = SoundSculpture.INITIAL_MEMBRANE_OPACITY;
     uniforms.uPetrify.value = 0;
     uniforms.uBreath.value = 0;
 
     if (styleCore.pearlVariation > 0) {
       this.bakeCorePearlColors(styleCore.pearlVariation);
-      this.initVitaMembranePalette();
+    } else {
+      this.coreMaterial.vertexColors = false;
+      this.geometry.deleteAttribute("color");
+      this.bakeCoreClayMottle(0.18);
     }
   }
 
@@ -2860,14 +2955,14 @@ class SoundSculpture {
         ? Math.sin(this.idleTime * 0.21) * 0.03 + Math.sin(this.idleTime * 0.047 + 1.7) * 0.02
         : 0;
     const hue =
-      st.hueBase +
+      this.clayHueBase +
       idleHueDrift +
       bands.mid * 0.08 * shift * audioBlend +
       bands.melody * t.coreColorShift * st.shiftScale * audioBlend +
       bands.brightness * 0.48 * shift * audioBlend;
     const saturation =
-      st.hslSatBase + (bands.contrast * 0.34 + bands.high * 0.16) * shift * audioBlend;
-    const lightness = st.hslLightBase + bands.brightness * 0.1 * shift * audioBlend;
+      this.claySatBase + (bands.contrast * 0.34 + bands.high * 0.16) * shift * audioBlend;
+    const lightness = this.clayLightBase + bands.brightness * 0.1 * shift * audioBlend;
 
     this.targetCoreColor.setHSL(hue, saturation, lightness);
     this.targetCoreEmissive.setHSL(0.56 + bands.brightness * 0.08 * shift * audioBlend, 0.72, 0.18);
@@ -2969,9 +3064,12 @@ class SoundSculpture {
     const st = this.style.core;
     const shift = t.coreColorShift * st.shiftScale;
     const hue =
-      st.hueBase + bands.mid * 0.08 * shift + bands.melody * t.coreColorShift * st.shiftScale + bands.brightness * 0.48 * shift;
-    const saturation = st.hslSatBase + bands.contrast * 0.34 * shift + bands.high * 0.16 * shift;
-    const lightness = st.hslLightBase + bands.brightness * 0.1 * shift;
+      this.clayHueBase +
+      bands.mid * 0.08 * shift +
+      bands.melody * t.coreColorShift * st.shiftScale +
+      bands.brightness * 0.48 * shift;
+    const saturation = this.claySatBase + bands.contrast * 0.34 * shift + bands.high * 0.16 * shift;
+    const lightness = this.clayLightBase + bands.brightness * 0.1 * shift;
 
     this.targetCoreColor.setHSL(hue, saturation, lightness);
     this.targetCoreEmissive.setHSL(0.56 + bands.brightness * 0.08 * shift, 0.72, 0.18);
@@ -4176,25 +4274,15 @@ class SoundSculpture {
     // 外殻の透明感を抑えて「中身が詰まっている」印象に寄せる
     const sp = this.getSpecies();
     const stMembrane = this.style.membrane;
+    const initialGate = 0.5 + this.formDevelopment * 0.5;
     const membraneOpacity =
-      this.completed
+      (this.completed
         ? stMembrane.completedOpacity
         : (fibUnit(5, 21) + sp.membraneGain * fibUnit(8, 21) - sp.aggressive * fibUnit(5, 21)) *
-          stMembrane.opacityScale;
+          stMembrane.opacityScale) * initialGate;
     uniforms.uOpacity.value += (membraneOpacity - uniforms.uOpacity.value) * Math.min(1, deltaTime * fib(3));
     const freezeTarget = this.completed ? stMembrane.freezeTarget : 0;
     uniforms.uCompleted.value += (freezeTarget - uniforms.uCompleted.value) * Math.min(1, deltaTime * 2);
-
-    if (this.style.membrane.vita && !this.completed) {
-      const drift = growthPattern(0.24, 0.41, 0.18, this.idleTime * 0.06 + this.morphologySeed);
-      const drift2 = growthPattern(-0.18, 0.52, 0.33, this.idleTime * 0.04 + this.morphologySeed + 7.2);
-      const hue = (((0.5 + drift * 0.14 + drift2 * 0.06) % 1) + 1) % 1;
-      const targetBase = this._tmpColor.setHSL(hue, 0.4 + drift2 * 0.12, 0.52);
-      const targetAccent = new THREE.Color().setHSL(((hue + 0.1) % 1 + 1) % 1, 0.5, 0.6);
-      const paletteLerp = Math.min(1, deltaTime * (0.12 + this.audioColorBlend * 0.28));
-      (uniforms.uPaletteColor.value as THREE.Color).lerp(targetBase, paletteLerp);
-      (uniforms.uPaletteAccent.value as THREE.Color).lerp(targetAccent, paletteLerp);
-    }
 
     this.surfaceGeometry.attributes.position.needsUpdate = true;
     this.surfaceGeometry.computeVertexNormals();

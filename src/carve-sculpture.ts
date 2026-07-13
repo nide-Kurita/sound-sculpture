@@ -1,6 +1,12 @@
 import * as THREE from "three";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { bandSoloAllows, computeBandLiveWeights, getBandSoloMode } from "./band-test";
+import {
+  createClayColorShift,
+  METAMORPHOSIS_CLAY_STYLE,
+  nudgeClayColorShift,
+  resolveClayPalette,
+} from "./clay-color";
 import { growthModulateScalar, growthPattern } from "./growth-algorithm";
 import { fibUnit } from "./fibonacci";
 import { runtimeTuning } from "./sculpture-tuning";
@@ -203,6 +209,8 @@ export class CarveSculpture implements SculptureExperience {
   private readonly innerCore: THREE.Mesh;
   private readonly surface: THREE.Mesh;
   private readonly sparks: THREE.Points;
+  /** 未出現時もクリック判定できる透明コライダー */
+  private readonly pokeCollider: THREE.Mesh;
 
   private readonly geometry: THREE.BufferGeometry;
   private readonly surfaceGeometry: THREE.BufferGeometry;
@@ -241,6 +249,10 @@ export class CarveSculpture implements SculptureExperience {
   private readonly scratchColor = new THREE.Color();
   private readonly targetCoreColor = new THREE.Color(CLAY_CORE_COLOR);
   private readonly targetCoreEmissive = new THREE.Color(0x000000);
+  private clayHueBase = 0.09;
+  private claySatBase = 0.18;
+  private clayLightBase = 0.78;
+  private clayColorShift = createClayColorShift();
   private readonly innerColor = new THREE.Color(CLAY_INNER_COLOR);
   private readonly baseScale = new THREE.Vector3(1, 1, 1);
 
@@ -355,7 +367,17 @@ export class CarveSculpture implements SculptureExperience {
     });
     this.sparks = new THREE.Points(this.sparkGeometry, this.sparkMaterial);
 
-    this.group.add(this.innerCore, this.core, this.surface, this.sparks);
+    this.pokeCollider = new THREE.Mesh(
+      new THREE.SphereGeometry(1.42, 28, 28),
+      new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+      }),
+    );
+    this.pokeCollider.name = "Poke collider";
+
+    this.group.add(this.pokeCollider, this.innerCore, this.core, this.surface, this.sparks);
     this.baseScale.copy(this.group.scale);
 
     const vertexCount = this.geometry.attributes.position.count;
@@ -375,6 +397,23 @@ export class CarveSculpture implements SculptureExperience {
 
     this.initPeakTargets();
     this.collapseToOrigin();
+    this.syncClayColors();
+  }
+
+  private syncClayColors() {
+    const palette = resolveClayPalette(METAMORPHOSIS_CLAY_STYLE, this.clayColorShift);
+    this.clayHueBase = palette.hue;
+    this.claySatBase = palette.sat;
+    this.clayLightBase = palette.light;
+    this.coreMaterial.color.setHex(palette.surfaceHex);
+    this.targetCoreColor.setHex(palette.surfaceHex);
+    this.innerCoreMaterial.color.setHex(palette.innerHex);
+    this.innerColor.setHex(palette.innerHex);
+  }
+
+  nudgeClayColorOnClick() {
+    this.clayColorShift = nudgeClayColorShift(this.clayColorShift);
+    this.syncClayColors();
   }
 
   update(
@@ -427,9 +466,10 @@ export class CarveSculpture implements SculptureExperience {
 
     const t = runtimeTuning;
     const shift = t.coreColorShift;
-    const hue = 0.09 + bands.mid * 0.08 * shift + bands.melody * t.coreColorShift + bands.brightness * 0.48 * shift;
-    const saturation = 0.18 + bands.contrast * 0.34 * shift + bands.high * 0.16 * shift;
-    const lightness = 0.78 + bands.brightness * 0.1 * shift;
+    const hue =
+      this.clayHueBase + bands.mid * 0.08 * shift + bands.melody * t.coreColorShift + bands.brightness * 0.48 * shift;
+    const saturation = this.claySatBase + bands.contrast * 0.34 * shift + bands.high * 0.16 * shift;
+    const lightness = this.clayLightBase + bands.brightness * 0.1 * shift;
 
     this.targetCoreColor.setHSL(hue, saturation, lightness);
     this.targetCoreEmissive.setHSL(0.56 + bands.brightness * 0.08 * shift, 0.72, 0.18);
@@ -451,7 +491,7 @@ export class CarveSculpture implements SculptureExperience {
   }
 
   getPointerTargets() {
-    const targets: THREE.Object3D[] = [];
+    const targets: THREE.Object3D[] = [this.pokeCollider];
     if (this.core.visible) {
       targets.push(this.core);
     }
@@ -464,6 +504,7 @@ export class CarveSculpture implements SculptureExperience {
   pokeSurface(localPoint: THREE.Vector3) {
     pokeClickRepulsion(this.clickRepulsion, this.basePositions, localPoint);
     pokeClickRepulsion(this.surfaceClickRepulsion, this.baseSurfacePositions, localPoint, 0.1, 0.52);
+    this.nudgeClayColorOnClick();
   }
 
   complete() {
@@ -513,9 +554,10 @@ export class CarveSculpture implements SculptureExperience {
     this.core.visible = false;
     this.innerCore.visible = false;
     this.surface.visible = false;
-    this.coreMaterial.color.set(CLAY_CORE_COLOR);
     this.coreMaterial.emissive.set(0x000000);
     this.coreMaterial.emissiveIntensity = 0;
+    this.clayColorShift = createClayColorShift();
+    this.syncClayColors();
     this.surfaceMaterial.uniforms.uCompleted.value = 0;
     this.collapseToOrigin();
   }
@@ -846,7 +888,7 @@ export class CarveSculpture implements SculptureExperience {
       this.sparkLife[i] = 0.45 + strength * 0.55;
 
       const tone = 0.65 + seededUnit(i, 3.1) * 0.35;
-      this.scratchColor.set(CLAY_CORE_COLOR).lerp(this.innerColor, 0.2);
+      this.scratchColor.copy(this.targetCoreColor).lerp(this.innerColor, 0.2);
       this.sparkColors[idx] = this.scratchColor.r * tone;
       this.sparkColors[idx + 1] = this.scratchColor.g * tone;
       this.sparkColors[idx + 2] = this.scratchColor.b * tone;
@@ -1046,9 +1088,13 @@ export class CarveSculpture implements SculptureExperience {
   private updateCoreMaterial(bands: AudioBands, deltaTime: number) {
     const t = runtimeTuning;
     const shift = t.coreColorShift;
-    const hue = 0.09 + bands.mid * 0.08 * shift + bands.melody * t.coreColorShift + bands.brightness * 0.48 * shift;
-    const saturation = 0.18 + bands.contrast * 0.34 * shift + bands.high * 0.16 * shift;
-    const lightness = 0.78 + bands.brightness * 0.1 * shift + this.getAverageEmergence() * 0.04;
+    const hue =
+      this.clayHueBase +
+      bands.mid * 0.08 * shift +
+      bands.melody * t.coreColorShift +
+      bands.brightness * 0.48 * shift;
+    const saturation = this.claySatBase + bands.contrast * 0.34 * shift + bands.high * 0.16 * shift;
+    const lightness = this.clayLightBase + bands.brightness * 0.1 * shift + this.getAverageEmergence() * 0.04;
 
     this.targetCoreColor.setHSL(hue, saturation, lightness);
     this.targetCoreEmissive.setHSL(0.56 + bands.brightness * 0.08 * shift, 0.72, 0.18);
