@@ -430,3 +430,145 @@ export const growthSpikeMask = (x: number, y: number, z: number, salt: number) =
 
 export const getGrowthAlgorithmMeta = (id: GrowthAlgorithmId = activeGrowthAlgorithmId) =>
   GROWTH_ALGORITHM_CATALOG.find((entry) => entry.id === id) ?? GROWTH_ALGORITHM_CATALOG[0];
+
+/** 変形チャネル — 全ての形状数値は growthModulate* を通して反映する */
+export type GrowthDeformChannel =
+  | "bulk"
+  | "mid"
+  | "high"
+  | "flow"
+  | "erosion"
+  | "live"
+  | "idle"
+  | "click"
+  | "global"
+  | "anchor"
+  | "memory"
+  | "surface";
+
+let growthDeformInfluence = 1;
+
+/** 成長アルゴリズムによる変形の効き（1=フル、低いほど均一に近づく） */
+export const setGrowthDeformInfluence = (value: number) => {
+  growthDeformInfluence = Math.max(0, Math.min(1.5, value));
+};
+
+export const getGrowthDeformInfluence = () => growthDeformInfluence;
+
+const deformSmooth01 = (value: number) => {
+  const x = clamp01(value);
+  return x * x * (3 - 2 * x);
+};
+
+const ALGO_CHANNEL_BIAS: Partial<
+  Record<GrowthAlgorithmId, Partial<Record<GrowthDeformChannel, number>>>
+> = {
+  fibonacci: { bulk: 1, mid: 1, global: 1 },
+  phyllotaxis: { bulk: 1.08, global: 1.12, anchor: 1.15 },
+  lsystem: { anchor: 1.25, flow: 1.18, mid: 1.1 },
+  "differential-growth": { bulk: 1.14, mid: 1.16, flow: 1.1 },
+  "reaction-diffusion": { mid: 1.2, surface: 1.22, erosion: 1.12 },
+  voronoi: { bulk: 1.18, mid: 1.22, high: 0.92, global: 1.08 },
+  dla: { high: 1.2, anchor: 1.18, flow: 1.12 },
+  physarum: { flow: 1.28, anchor: 1.2, surface: 1.15 },
+  "flow-field": { flow: 1.32, surface: 1.18, live: 1.1 },
+  "curl-noise": { flow: 1.26, live: 1.14, idle: 1.12 },
+  "space-colonization": { anchor: 1.3, bulk: 1.1, global: 1.08 },
+  "crystal-growth": { high: 1.38, bulk: 0.86, mid: 0.92 },
+  erosion: { erosion: 1.45, bulk: 0.8, global: 0.88 },
+};
+
+const rawChannelGain = (
+  channel: GrowthDeformChannel,
+  pattern: number,
+  spike: number,
+  algoId: GrowthAlgorithmId,
+) => {
+  const wave = deformSmooth01(pattern * 0.5 + 0.5);
+  const edge = deformSmooth01(spike);
+  let gain = 0.76 + wave * 0.48;
+
+  switch (channel) {
+    case "bulk":
+      gain *= 0.84 + wave * 0.32;
+      break;
+    case "mid":
+      gain *= 0.78 + Math.abs(pattern) * 0.38;
+      break;
+    case "high":
+      gain *= 0.52 + edge * 0.98;
+      break;
+    case "flow":
+      gain *= 0.72 + Math.abs(pattern) * 0.52;
+      break;
+    case "erosion":
+      gain *= 0.68 + (1 - wave) * 0.48 + edge * 0.22;
+      break;
+    case "live":
+      gain *= 0.8 + wave * 0.4;
+      break;
+    case "idle":
+      gain *= 0.86 + wave * 0.28;
+      break;
+    case "click":
+      gain *= 0.88 + edge * 0.38;
+      break;
+    case "global":
+      gain *= 0.7 + wave * 0.6;
+      break;
+    case "anchor":
+      gain *= 0.66 + wave * 0.68;
+      break;
+    case "memory":
+      gain *= 0.78 + wave * 0.32;
+      break;
+    case "surface":
+      gain *= 0.82 + Math.abs(pattern) * 0.36;
+      break;
+    default:
+      break;
+  }
+
+  return gain * (ALGO_CHANNEL_BIAS[algoId]?.[channel] ?? 1);
+};
+
+/**
+ * スカラー変位・圧力・蓄積量を成長アルゴリズムのパターンで変調して返す。
+ * amount=0 は即 0（パターン評価をスキップ）。
+ */
+export const growthModulateScalar = (
+  amount: number,
+  nx: number,
+  ny: number,
+  nz: number,
+  salt: number,
+  channel: GrowthDeformChannel = "bulk",
+) => {
+  if (amount === 0) {
+    return 0;
+  }
+  const algo = getGrowthAlgorithm();
+  const pattern = algo.pattern(nx, ny, nz, salt);
+  const spike = algo.spikeMask(nx, ny, nz, salt);
+  const gain = rawChannelGain(channel, pattern, spike, algo.id);
+  const blended = 1 + (gain - 1) * growthDeformInfluence;
+  return amount * blended;
+};
+
+/** ベクトル変位を成長アルゴリズムで変調（方向は保ち、大きさのみ変える） */
+export const growthModulateVector3 = (
+  vx: number,
+  vy: number,
+  vz: number,
+  nx: number,
+  ny: number,
+  nz: number,
+  salt: number,
+  channel: GrowthDeformChannel = "flow",
+) => {
+  if (vx === 0 && vy === 0 && vz === 0) {
+    return { x: 0, y: 0, z: 0 };
+  }
+  const gain = growthModulateScalar(1, nx, ny, nz, salt, channel);
+  return { x: vx * gain, y: vy * gain, z: vz * gain };
+};

@@ -1,4 +1,7 @@
 import type * as THREE from "three";
+import {
+  growthModulateScalar,
+} from "./growth-algorithm";
 
 export type ClickRepulsionState = {
   offset: Float32Array;
@@ -39,7 +42,17 @@ export const pokeClickRepulsion = (
     }
     const t = 1 - Math.sqrt(distSq / radiusSq);
     const falloff = t * t * (3 - 2 * t);
-    state.velocity[i] += strength * falloff;
+    const dist = Math.sqrt(distSq);
+    const r = Math.hypot(basePositions[idx], basePositions[idx + 1], basePositions[idx + 2]) || 1;
+    const impulse = growthModulateScalar(
+      strength * falloff,
+      basePositions[idx] / r,
+      basePositions[idx + 1] / r,
+      basePositions[idx + 2] / r,
+      r + dist,
+      "click",
+    );
+    state.velocity[i] += impulse;
   }
 };
 
@@ -76,8 +89,12 @@ export const applyClickRepulsionToPositions = (
     const y = basePositions[idx + 1];
     const z = basePositions[idx + 2];
     const r = Math.hypot(x, y, z) || 1;
-    (positions as Float32Array)[idx] += (x / r) * bump;
-    (positions as Float32Array)[idx + 1] += (y / r) * bump;
-    (positions as Float32Array)[idx + 2] += (z / r) * bump;
+    const nx = x / r;
+    const ny = y / r;
+    const nz = z / r;
+    const modBump = growthModulateScalar(bump, nx, ny, nz, r * 0.17 + bump, "click");
+    (positions as Float32Array)[idx] += nx * modBump;
+    (positions as Float32Array)[idx + 1] += ny * modBump;
+    (positions as Float32Array)[idx + 2] += nz * modBump;
   }
 };

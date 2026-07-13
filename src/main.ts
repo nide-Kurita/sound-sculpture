@@ -40,6 +40,8 @@ import {
   GROWTH_ALGORITHM_CATALOG,
   getGrowthAlgorithmMeta,
   growthFlow,
+  growthModulateScalar,
+  growthModulateVector3,
   growthPattern,
   growthPlaceOnSphere,
   growthSpikeMask,
@@ -1925,6 +1927,11 @@ class SoundSculpture {
     return sum / Math.max(1, vertexCount);
   }
 
+  /** 頂点変形の salt — 成長アルゴリズム変調用 */
+  private vertexDeformSalt(vertexIndex: number, extra = 0) {
+    return this.morphologySeed + this.formingTime * 0.31 + vertexIndex * 0.0037 + extra;
+  }
+
   /**
    * 変形後の平均半径を初期値に戻し、全体の膨張を抑える。
    * 突起の最大半径だけは maxSpreadRatio まで許容する (広がり・触手など)。
@@ -3095,7 +3102,7 @@ class SoundSculpture {
    * diabolo だけだとくびれ＋上下膨らみのジャグリング用形状に固定されるため、
    * torus / monolith / coral / spindle を音と乱数で混ぜる。
    */
-  private applyGlobalForm(px: number, py: number, pz: number) {
+  private applyGlobalForm(px: number, py: number, pz: number, salt: number) {
     const ax = this.morphAxis.x;
     const ay = this.morphAxis.y;
     const az = this.morphAxis.z;
@@ -3195,10 +3202,13 @@ class SoundSculpture {
     const warpedZ = sx * sinTwist + sz * cosTwist;
     // 序盤は大域モーフを掛けず、完全な球体の粘土塊として見せる
     const formMix = smoothstep(0, 1, this.formDevelopment);
+    const pr = Math.hypot(px, py, pz) || 1;
+    const globalGain = growthModulateScalar(1, px / pr, py / pr, pz / pr, salt, "global");
+    const mix = formMix * globalGain;
     return {
-      x: px + (warpedX - px) * formMix,
-      y: py + (warpedY - py) * formMix,
-      z: pz + (warpedZ - pz) * formMix,
+      x: px + (warpedX - px) * mix,
+      y: py + (warpedY - py) * mix,
+      z: pz + (warpedZ - pz) * mix,
     };
   }
 
@@ -3324,15 +3334,39 @@ class SoundSculpture {
         Math.pow(spikeMask, 2.7) *
         (0.26 + bands.contrast * 0.22 + bands.overall * 0.2) *
         (0.55 + growthSpikeMask(nx, ny, nz, audioSalt) * 0.65);
+      const bulkDelta = growthModulateScalar(
+        lowAmount * roundedPressure,
+        nx,
+        ny,
+        nz,
+        audioSalt,
+        "bulk",
+      );
+      const midDelta = growthModulateScalar(
+        midAmount * bumpPressure,
+        nx,
+        ny,
+        nz,
+        audioSalt + 6.3,
+        "mid",
+      );
+      const highDelta = growthModulateScalar(
+        highAmount * spikePressure * 0.85,
+        nx,
+        ny,
+        nz,
+        audioSalt + 28.9,
+        "high",
+      );
       this.accumulated[i] = this.accumulateWithMemory(
         this.accumulated[i],
-        lowAmount * roundedPressure,
+        bulkDelta,
         -0.72,
         0.58,
       );
       this.midBumps[i] = this.accumulateWithMemory(
         this.midBumps[i],
-        midAmount * bumpPressure,
+        midDelta,
         -0.42,
         0.26,
       );
@@ -3341,8 +3375,7 @@ class SoundSculpture {
         spikeCap,
         Math.max(
           0,
-          (this.highSpikes[i] * (1 - deltaTime * 0.35)) +
-            highAmount * spikePressure * 0.85,
+          (this.highSpikes[i] * (1 - deltaTime * 0.35)) + highDelta,
         ),
       );
 
@@ -3354,12 +3387,18 @@ class SoundSculpture {
         const ax = this.crystalAxes[index];
         const ay = this.crystalAxes[index + 1];
         const az = this.crystalAxes[index + 2];
-        const crystalScale =
+        const crystalScale = growthModulateScalar(
           highAmount *
-          spikePressure *
-          (0.45 + bands.brightness * 0.6) *
-          runtimeTuning.crystalScale *
-          this.getSpecies().crystalGain;
+            spikePressure *
+            (0.45 + bands.brightness * 0.6) *
+            runtimeTuning.crystalScale *
+            this.getSpecies().crystalGain,
+          nx,
+          ny,
+          nz,
+          audioSalt + 19.4,
+          "high",
+        );
         this.vectorField[index] += ax * crystalScale;
         this.vectorField[index + 1] += ay * crystalScale;
         this.vectorField[index + 2] += az * crystalScale;
@@ -3569,7 +3608,14 @@ class SoundSculpture {
 
         switch (anchor.kind) {
           case "lobe": {
-            const f = falloff * growth * 0.55;
+            const f = growthModulateScalar(
+              falloff * growth * 0.55,
+              nx,
+              ny,
+              nz,
+              this.vertexDeformSalt(i, a),
+              "anchor",
+            );
             this.vectorField[idx] += nx * f;
             this.vectorField[idx + 1] += ny * f;
             this.vectorField[idx + 2] += nz * f;
@@ -3582,7 +3628,14 @@ class SoundSculpture {
             const ty = dy - ny * proj;
             const tz = dz - nz * proj;
             const tLen = Math.hypot(tx, ty, tz) || 1;
-            const f = falloff * growth;
+            const f = growthModulateScalar(
+              falloff * growth,
+              nx,
+              ny,
+              nz,
+              this.vertexDeformSalt(i, a + 1.3),
+              "anchor",
+            );
             const tangentScale = 1.05 * f;
             const normalScale = 0.22 * f;
             this.vectorField[idx] += (tx / tLen) * tangentScale + nx * normalScale;
@@ -3592,7 +3645,14 @@ class SoundSculpture {
           }
           case "crystal": {
             const sharp = Math.pow(falloff, 4.5);
-            const f = sharp * growth * 0.65;
+            const f = growthModulateScalar(
+              sharp * growth * 0.65,
+              nx,
+              ny,
+              nz,
+              this.vertexDeformSalt(i, a + 2.7),
+              "high",
+            );
             // 結晶: 法線 + わずかに斜めの軸。
             this.vectorField[idx] += (nx * 0.75 + dx * 0.45) * f;
             this.vectorField[idx + 1] += (ny * 0.75 + dy * 0.45) * f;
@@ -3601,7 +3661,14 @@ class SoundSculpture {
           }
           case "erosion": {
             // “削り”は相対的に主役にする（ただし急激に凹まないように上限は同じ）
-            const f = falloff * growth * 0.95;
+            const f = growthModulateScalar(
+              falloff * growth * 0.95,
+              nx,
+              ny,
+              nz,
+              this.vertexDeformSalt(i, a + 4.1),
+              "erosion",
+            );
             this.vectorField[idx] -= nx * f;
             this.vectorField[idx + 1] -= ny * f;
             this.vectorField[idx + 2] -= nz * f;
@@ -3666,14 +3733,17 @@ class SoundSculpture {
       const tx = this._curlOut.x - nx * dot;
       const ty = this._curlOut.y - ny * dot;
       const tz = this._curlOut.z - nz * dot;
+      const deformSalt = this.vertexDeformSalt(i, salt);
+      const liveMod = growthModulateScalar(liveAmount, nx, ny, nz, deformSalt, "flow");
+      const persistMod = growthModulateScalar(persistAmount, nx, ny, nz, deformSalt + 4.1, "memory");
 
-      this.flowField[idx] += tx * liveAmount;
-      this.flowField[idx + 1] += ty * liveAmount;
-      this.flowField[idx + 2] += tz * liveAmount;
+      this.flowField[idx] += tx * liveMod;
+      this.flowField[idx + 1] += ty * liveMod;
+      this.flowField[idx + 2] += tz * liveMod;
       // 持続的な痕跡 (中音が長く続くほど "流れの彫り跡" が残る)。
-      this.vectorField[idx] += tx * persistAmount;
-      this.vectorField[idx + 1] += ty * persistAmount;
-      this.vectorField[idx + 2] += tz * persistAmount;
+      this.vectorField[idx] += tx * persistMod;
+      this.vectorField[idx + 1] += ty * persistMod;
+      this.vectorField[idx + 2] += tz * persistMod;
     }
   }
 
@@ -3694,16 +3764,6 @@ class SoundSculpture {
     const bleedRate = 0.027;
 
     for (let i = 0; i < this.accumulated.length; i += 1) {
-      const lowBleed = this.liveOffset[i] * w.low * t.liveLow * rate * bleedRate;
-      if (Math.abs(lowBleed) > 0.00001) {
-        this.accumulated[i] = this.accumulateWithMemory(this.accumulated[i], lowBleed, -0.72, 0.58);
-      }
-
-      const midBleed = this.surfaceLiveOffset[i] * w.mid * t.liveMid * rate * bleedRate;
-      if (Math.abs(midBleed) > 0.00001) {
-        this.midBumps[i] = this.accumulateWithMemory(this.midBumps[i], midBleed, -0.42, 0.26);
-      }
-
       const index = i * 3;
       const x = this.basePositions[index];
       const y = this.basePositions[index + 1];
@@ -3712,9 +3772,41 @@ class SoundSculpture {
       const nx = x / radius;
       const ny = y / radius;
       const nz = z / radius;
+      const deformSalt = this.vertexDeformSalt(i);
+
+      const lowBleed = growthModulateScalar(
+        this.liveOffset[i] * w.low * t.liveLow * rate * bleedRate,
+        nx,
+        ny,
+        nz,
+        deformSalt,
+        "live",
+      );
+      if (Math.abs(lowBleed) > 0.00001) {
+        this.accumulated[i] = this.accumulateWithMemory(this.accumulated[i], lowBleed, -0.72, 0.58);
+      }
+
+      const midBleed = growthModulateScalar(
+        this.surfaceLiveOffset[i] * w.mid * t.liveMid * rate * bleedRate,
+        nx,
+        ny,
+        nz,
+        deformSalt + 3.2,
+        "surface",
+      );
+      if (Math.abs(midBleed) > 0.00001) {
+        this.midBumps[i] = this.accumulateWithMemory(this.midBumps[i], midBleed, -0.42, 0.26);
+      }
+
       const highDrive = w.high * t.liveHigh + this.hatImpulse * 0.42;
-      const highBleed =
-        highDrive * rate * bleedRate * growthPattern(nx, ny, nz, this.formingTime * 2.1 + i * 0.03);
+      const highBleed = growthModulateScalar(
+        highDrive * rate * bleedRate * growthPattern(nx, ny, nz, this.formingTime * 2.1 + i * 0.03),
+        nx,
+        ny,
+        nz,
+        deformSalt + 7.4,
+        "high",
+      );
       if (highBleed > 0.00001) {
         this.highSpikes[i] = Math.min(t.spikeCap, this.highSpikes[i] + highBleed);
       }
@@ -3796,7 +3888,14 @@ class SoundSculpture {
       const mask = smoothstep(0.1, 0.92, -grain + streak * 0.55 + bands.contrast * 0.35);
 
       const hardness = 0.55;
-      const amount = -drive * mask * (1 - hardness * 0.6) * deltaTime * 2.1;
+      const amount = growthModulateScalar(
+        -drive * mask * (1 - hardness * 0.6) * deltaTime * 2.1,
+        nx,
+        ny,
+        nz,
+        this.vertexDeformSalt(i, salt),
+        "erosion",
+      );
       this.erosionField[i] = Math.max(-0.62, this.erosionField[i] + amount);
 
       const fx = this.flowField[idx];
@@ -3804,7 +3903,14 @@ class SoundSculpture {
       const fz = this.flowField[idx + 2];
       const fLen = Math.hypot(fx, fy, fz);
       if (fLen > 0.0001) {
-        const scrape = drive * mask * deltaTime * 0.012;
+        const scrape = growthModulateScalar(
+          drive * mask * deltaTime * 0.012,
+          nx,
+          ny,
+          nz,
+          this.vertexDeformSalt(i, salt + 2.8),
+          "erosion",
+        );
         this.vectorField[idx] -= (fx / fLen) * scrape;
         this.vectorField[idx + 1] -= (fy / fLen) * scrape;
         this.vectorField[idx + 2] -= (fz / fLen) * scrape;
@@ -3828,17 +3934,33 @@ class SoundSculpture {
       const nx = x / radius;
       const ny = y / radius;
       const nz = z / radius;
-      const pulse =
+      const pulseRaw =
         this.completed ? 0 : growthPattern(nx, ny, nz, this.formingTime * 1.6) * (
           (this.kickImpulse * 0.42 + latestRhythm.pulseEnvelope * latestRhythm.pulseConfidence * 0.38) * t.liveLow
         );
+      const pulse = growthModulateScalar(
+        pulseRaw,
+        nx,
+        ny,
+        nz,
+        this.vertexDeformSalt(i, 6.1),
+        "live",
+      );
 
       this.liveOffset[i] += (pulse - this.liveOffset[i]) * Math.min(1, deltaTime * 8);
 
       const carve = this.detachmentCarve[i];
       const erosion = this.erosionField[i];
       const rememberedDisplacement = this.getPermanentScalarDisplacement(i);
-      const scalarDisp = (rememberedDisplacement + erosion) * (1 - carve * 0.88);
+      const deformSalt = this.vertexDeformSalt(i);
+      const scalarDisp = growthModulateScalar(
+        (rememberedDisplacement + erosion) * (1 - carve * 0.88),
+        nx,
+        ny,
+        nz,
+        deformSalt,
+        "bulk",
+      );
 
       // vectorField のクランプ (頂点ごと)。
       let vfx = this.vectorField[index] * (1 - carve * 0.75);
@@ -3854,12 +3976,23 @@ class SoundSculpture {
         this.vectorField[index + 1] = vfy;
         this.vectorField[index + 2] = vfz;
       }
+      const vecMod = growthModulateVector3(vfx, vfy, vfz, nx, ny, nz, deformSalt + 5.5, "flow");
+      const flowMod = growthModulateVector3(
+        this.flowField[index],
+        this.flowField[index + 1],
+        this.flowField[index + 2],
+        nx,
+        ny,
+        nz,
+        deformSalt + 2.2,
+        "flow",
+      );
 
       // 法線方向のスカラ変位 + 任意方向の vector offset + live tangent flow。
-      const px = x + nx * scalarDisp + vfx + this.flowField[index];
-      const py = y + ny * scalarDisp + vfy + this.flowField[index + 1];
-      const pz = z + nz * scalarDisp + vfz + this.flowField[index + 2];
-      const warped = this.applyGlobalForm(px, py, pz);
+      const px = x + nx * scalarDisp + vecMod.x + flowMod.x;
+      const py = y + ny * scalarDisp + vecMod.y + flowMod.y;
+      const pz = z + nz * scalarDisp + vecMod.z + flowMod.z;
+      const warped = this.applyGlobalForm(px, py, pz, deformSalt);
       positions[index] = warped.x;
       positions[index + 1] = warped.y;
       positions[index + 2] = warped.z;
@@ -3885,9 +4018,27 @@ class SoundSculpture {
           (this.completed
             ? 0
             : this.liveOffset[i] * (1 - this.detachmentCarve[i] * 0.88)) + this.idleWobbleField[i];
-        positions[index] += nx * live + this.idleWobbleVector[index];
-        positions[index + 1] += ny * live + this.idleWobbleVector[index + 1];
-        positions[index + 2] += nz * live + this.idleWobbleVector[index + 2];
+        const liveScalar = growthModulateScalar(
+          live,
+          nx,
+          ny,
+          nz,
+          this.vertexDeformSalt(i),
+          this.completed ? "idle" : "live",
+        );
+        const wobbleVec = growthModulateVector3(
+          this.idleWobbleVector[index],
+          this.idleWobbleVector[index + 1],
+          this.idleWobbleVector[index + 2],
+          nx,
+          ny,
+          nz,
+          this.vertexDeformSalt(i, 1.7),
+          "idle",
+        );
+        positions[index] += nx * liveScalar + wobbleVec.x;
+        positions[index + 1] += ny * liveScalar + wobbleVec.y;
+        positions[index + 2] += nz * liveScalar + wobbleVec.z;
       }
     }
 
@@ -3922,12 +4073,40 @@ class SoundSculpture {
       this.surfaceLiveOffset[i] +=
         (targetSurfaceLive - this.surfaceLiveOffset[i]) * Math.min(1, deltaTime * 9);
       const remembered = this.getPermanentScalarDisplacement(i);
-      const scalarDisp = remembered * 0.98 + flow * midDrive * 0.05;
+      const deformSalt = this.vertexDeformSalt(i, 9.2);
+      const scalarDisp = growthModulateScalar(
+        remembered * 0.98 + flow * midDrive * 0.05,
+        nx,
+        ny,
+        nz,
+        deformSalt,
+        "surface",
+      );
+      const vecMod = growthModulateVector3(
+        this.vectorField[index] * vectorScale,
+        this.vectorField[index + 1] * vectorScale,
+        this.vectorField[index + 2] * vectorScale,
+        nx,
+        ny,
+        nz,
+        deformSalt + 4.4,
+        "flow",
+      );
+      const flowMod = growthModulateVector3(
+        this.flowField[index] * flowScale,
+        this.flowField[index + 1] * flowScale,
+        this.flowField[index + 2] * flowScale,
+        nx,
+        ny,
+        nz,
+        deformSalt + 1.8,
+        "flow",
+      );
 
-      const px = x + nx * scalarDisp + this.vectorField[index] * vectorScale + this.flowField[index] * flowScale;
-      const py = y + ny * scalarDisp + this.vectorField[index + 1] * vectorScale + this.flowField[index + 1] * flowScale;
-      const pz = z + nz * scalarDisp + this.vectorField[index + 2] * vectorScale + this.flowField[index + 2] * flowScale;
-      const warped = this.applyGlobalForm(px, py, pz);
+      const px = x + nx * scalarDisp + vecMod.x + flowMod.x;
+      const py = y + ny * scalarDisp + vecMod.y + flowMod.y;
+      const pz = z + nz * scalarDisp + vecMod.z + flowMod.z;
+      const warped = this.applyGlobalForm(px, py, pz, deformSalt);
       positions[index] = warped.x;
       positions[index + 1] = warped.y;
       positions[index + 2] = warped.z;
@@ -3948,9 +4127,27 @@ class SoundSculpture {
         // 膜はコアより僅かに大きくホヨホヨさせて「柔らかい外皮」を演出
         const live =
           (this.completed ? 0 : this.surfaceLiveOffset[i]) + this.idleWobbleField[i] * 1.18;
-        positions[index] += nx * live + this.idleWobbleVector[index] * 1.05;
-        positions[index + 1] += ny * live + this.idleWobbleVector[index + 1] * 1.05;
-        positions[index + 2] += nz * live + this.idleWobbleVector[index + 2] * 1.05;
+        const liveScalar = growthModulateScalar(
+          live,
+          nx,
+          ny,
+          nz,
+          this.vertexDeformSalt(i, 11.5),
+          this.completed ? "idle" : "surface",
+        );
+        const wobbleVec = growthModulateVector3(
+          this.idleWobbleVector[index] * 1.05,
+          this.idleWobbleVector[index + 1] * 1.05,
+          this.idleWobbleVector[index + 2] * 1.05,
+          nx,
+          ny,
+          nz,
+          this.vertexDeformSalt(i, 13.1),
+          "idle",
+        );
+        positions[index] += nx * liveScalar + wobbleVec.x;
+        positions[index + 1] += ny * liveScalar + wobbleVec.y;
+        positions[index + 2] += nz * liveScalar + wobbleVec.z;
       }
     }
 

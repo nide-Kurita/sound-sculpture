@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { bandSoloAllows, computeBandLiveWeights, getBandSoloMode } from "./band-test";
-import { growthPattern } from "./growth-algorithm";
+import { growthModulateScalar, growthPattern } from "./growth-algorithm";
 import { fibUnit } from "./fibonacci";
 import { runtimeTuning } from "./sculpture-tuning";
 import { DEFAULT_SPECIES_PROFILE, type SpeciesProfile } from "./species-profile";
@@ -723,18 +723,41 @@ export class CarveSculpture implements SculptureExperience {
       const headroom = Math.max(0, peak - this.emergence[i]);
       if (headroom > 0.0001) {
         const prev = this.emergence[i];
-        const delta = lowAmount * bulkMask * 1.1 * growthScale;
+        const delta = growthModulateScalar(
+          lowAmount * bulkMask * 1.1 * growthScale,
+          nx,
+          ny,
+          nz,
+          salt,
+          "bulk",
+        );
         this.emergence[i] = Math.min(peak, prev + delta);
         this.emergenceVelocity[i] = Math.max(this.emergenceVelocity[i], this.emergence[i] - prev);
       }
 
       this.surfaceDetail[i] = Math.min(
         detailCap,
-        this.surfaceDetail[i] + midAmount * streakMask * 0.9 * growthScale,
+        this.surfaceDetail[i] +
+          growthModulateScalar(
+            midAmount * streakMask * 0.9 * growthScale,
+            nx,
+            ny,
+            nz,
+            salt + 6.3,
+            "mid",
+          ),
       );
       this.fineRelief[i] = Math.min(
         reliefCap,
-        this.fineRelief[i] + highAmount * fineMask * 0.75 * growthScale,
+        this.fineRelief[i] +
+          growthModulateScalar(
+            highAmount * fineMask * 0.75 * growthScale,
+            nx,
+            ny,
+            nz,
+            salt + 28.9,
+            "high",
+          ),
       );
     }
   }

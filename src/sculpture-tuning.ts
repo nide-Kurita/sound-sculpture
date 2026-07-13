@@ -1,4 +1,5 @@
 import { fib, fibRatio, fibSeconds, fibUnit } from "./fibonacci";
+import { setGrowthDeformInfluence } from "./growth-algorithm";
 
 /** 開発パネル用の調整ノブ（6項目） */
 export type SculptureTuning = {
@@ -155,6 +156,9 @@ export let runtimeTuning: RuntimeSculptureTuning = expandSculptureTuning(sculptu
 
 export const syncRuntimeTuning = () => {
   runtimeTuning = expandSculptureTuning(sculptureTuning);
+  const formation = knobScale(sculptureTuning.formation);
+  const growth = knobScale(sculptureTuning.growth);
+  setGrowthDeformInfluence(Math.min(1.45, 0.48 + formation * 0.3 + growth * 0.44));
 };
 
 export const resetSculptureTuning = () => {
@@ -211,7 +215,7 @@ export const TUNING_SLIDER_SPECS: TuningSliderSpec[] = [
   {
     key: "formation",
     label: "形成",
-    help: "音の蓄積速度とうねり痕跡。上げるほど形が速く・深く刻まれます。",
+    help: "音の蓄積速度とうねり痕跡。上げるほど形が速く・深く刻まれます。成長アルゴリズムの変形効きにも影響します。",
     group: "形成・成長",
     scope: "form",
     min: FIB_SLIDER_MIN,
@@ -221,7 +225,7 @@ export const TUNING_SLIDER_SPECS: TuningSliderSpec[] = [
   {
     key: "growth",
     label: "成長・侵食",
-    help: "大域シルエットの変化、アンカー器官、侵食の進みやすさ。",
+    help: "大域シルエットの変化、アンカー器官、侵食の進みやすさ。成長アルゴリズムの変形効きも強まります。",
     group: "形成・成長",
     scope: "form",
     min: FIB_SLIDER_MIN,
