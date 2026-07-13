@@ -79,6 +79,7 @@ import {
   VISUAL_STYLE_CATALOG,
   type VisualStyleId,
 } from "./visual-style";
+import { SceneBackground } from "./scene-background";
 import {
   clamp01,
   parseSculptureMode,
@@ -4637,218 +4638,6 @@ class SoundSculpture {
   }
 }
 
-/**
- * 背景に奥行きを与えるグラデーションドーム。
- * 単色背景の代わりに、天頂→地平の緩いグラデーションと
- * 「被写体の背後」に常に位置する淡いハロー（光だまり）で空間の深さを作る。
- * 色はスタイルの背景色から毎フレーム導出されるため、完成時のクロスフェードにも追従する。
- */
-class BackgroundDome {
-  readonly mesh: THREE.Mesh;
-  private readonly material: THREE.ShaderMaterial;
-  private readonly _hsl = { h: 0, s: 0, l: 0 };
-
-  constructor() {
-    this.material = new THREE.ShaderMaterial({
-      uniforms: {
-        uTop: { value: new THREE.Color() },
-        uBottom: { value: new THREE.Color() },
-        uHalo: { value: new THREE.Color() },
-        uHaloStrength: { value: 0.55 },
-      },
-      vertexShader: /* glsl */ `
-        varying vec3 vDir;
-        void main() {
-          vDir = normalize(position);
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: /* glsl */ `
-        uniform vec3 uTop;
-        uniform vec3 uBottom;
-        uniform vec3 uHalo;
-        uniform float uHaloStrength;
-        varying vec3 vDir;
-
-        void main() {
-          vec3 dir = normalize(vDir);
-          float h = dir.y * 0.5 + 0.5;
-          vec3 col = mix(uBottom, uTop, smoothstep(0.06, 0.94, h));
-          // 地平付近を落として奥行きの階層を出す
-          float horizon = smoothstep(0.02, 0.38, h);
-          col *= mix(0.62, 1.0, horizon);
-          // 微細な深度バンド（空間の層を感じさせる）
-          float depthBands = sin(dir.x * 18.0 + dir.z * 14.0) * 0.012 + sin(dir.y * 22.0) * 0.008;
-          col *= 1.0 - depthBands;
-          vec3 behind = normalize(-cameraPosition);
-          float halo = smoothstep(0.55, 0.985, dot(dir, behind));
-          col = mix(col, uHalo, halo * halo * uHaloStrength);
-          gl_FragColor = vec4(col, 1.0);
-        }
-      `,
-      side: THREE.BackSide,
-      depthWrite: false,
-    });
-    this.mesh = new THREE.Mesh(new THREE.SphereGeometry(46, 48, 32), this.material);
-    this.mesh.renderOrder = -20;
-    this.mesh.frustumCulled = false;
-  }
-
-  /** 基準の背景色から天頂・地平・ハローの各色を導出する。 */
-  setFromBackground(base: THREE.Color, dark: boolean) {
-    base.getHSL(this._hsl);
-    const { h, s, l } = this._hsl;
-    const top = this.material.uniforms.uTop.value as THREE.Color;
-    const bottom = this.material.uniforms.uBottom.value as THREE.Color;
-    const halo = this.material.uniforms.uHalo.value as THREE.Color;
-    if (dark) {
-      // 暗テーマ: 地平をさらに沈め、深海の遠さを出す。ハローは冷たい微光
-      top.setHSL(h, Math.min(1, s * 1.15 + 0.02), Math.min(1, l * 1.9 + 0.015));
-      bottom.setHSL(h, s, Math.max(0, l * 0.45));
-      halo.setHSL(h, Math.min(1, s * 0.8 + 0.1), Math.min(0.32, l * 2.6 + 0.05));
-      this.material.uniforms.uHaloStrength.value = 0.7;
-    } else {
-      // 明テーマ: 上は僅かに明るく、下は落として床の気配を出す
-      top.setHSL(h, s, Math.min(1, l + 0.025));
-      bottom.setHSL(h, Math.min(1, s + 0.03), Math.max(0, l - 0.085));
-      halo.setHSL(h, Math.max(0, s - 0.02), Math.min(1, l + 0.035));
-      this.material.uniforms.uHaloStrength.value = 0.9;
-    }
-  }
-}
-
-class StarField {
-  readonly points: THREE.Points;
-  private readonly positions: Float32Array;
-  private readonly colors: Float32Array;
-  private readonly baseColors: Float32Array;
-  private readonly twinklePhase: Float32Array;
-  private readonly twinkleRate: Float32Array;
-  private readonly driftDir: Float32Array;
-  private readonly geometry: THREE.BufferGeometry;
-  private readonly material: THREE.PointsMaterial;
-  private readonly parallax: number;
-
-  constructor(options?: {
-    count?: number;
-    minRadius?: number;
-    maxRadius?: number;
-    size?: number;
-    baseOpacity?: number;
-    parallax?: number;
-  }) {
-    const count = options?.count ?? 2400;
-    const minRadius = options?.minRadius ?? 26;
-    const maxRadius = options?.maxRadius ?? 60;
-    const pointSize = options?.size ?? 0.022;
-    const baseOpacity = options?.baseOpacity ?? 0.9;
-    this.parallax = options?.parallax ?? 1;
-
-    this.positions = new Float32Array(count * 3);
-    this.colors = new Float32Array(count * 3);
-    this.baseColors = new Float32Array(count * 3);
-    this.twinklePhase = new Float32Array(count);
-    this.twinkleRate = new Float32Array(count);
-    this.driftDir = new Float32Array(count * 3);
-
-    for (let i = 0; i < count; i += 1) {
-      const idx = i * 3;
-      const u = Math.random();
-      const v = Math.random();
-      const theta = u * Math.PI * 2;
-      const phi = Math.acos(2 * v - 1);
-      const sinPhi = Math.sin(phi);
-      const nx = sinPhi * Math.cos(theta);
-      const ny = Math.cos(phi);
-      const nz = sinPhi * Math.sin(theta);
-
-      const radius = minRadius + Math.random() * (maxRadius - minRadius);
-      this.positions[idx] = nx * radius;
-      this.positions[idx + 1] = ny * radius * 0.78;
-      this.positions[idx + 2] = nz * radius;
-
-      const dx = (Math.random() - 0.5) * 0.5;
-      const dy = (Math.random() - 0.5) * 0.35;
-      const dz = (Math.random() - 0.5) * 0.5;
-      const len = Math.hypot(dx, dy, dz) || 1;
-      this.driftDir[idx] = dx / len;
-      this.driftDir[idx + 1] = dy / len;
-      this.driftDir[idx + 2] = dz / len;
-
-      const warm = Math.random() < 0.08;
-      const tint = 0.6 + Math.random() * 0.4;
-      const r = warm ? 0.95 * tint : 0.65 * tint;
-      const g = warm ? 0.85 * tint : 0.78 * tint;
-      const b = warm ? 1.0 * tint : 1.0 * tint;
-
-      const bright = Math.pow(Math.random(), 3.2);
-      const intensity = 0.18 + (1 - bright) * 0.95;
-
-      this.baseColors[idx] = r * intensity;
-      this.baseColors[idx + 1] = g * intensity;
-      this.baseColors[idx + 2] = b * intensity;
-      this.colors[idx] = this.baseColors[idx];
-      this.colors[idx + 1] = this.baseColors[idx + 1];
-      this.colors[idx + 2] = this.baseColors[idx + 2];
-
-      this.twinklePhase[i] = Math.random() * Math.PI * 2;
-      this.twinkleRate[i] = 0.25 + Math.random() * 0.9;
-    }
-
-    this.geometry = new THREE.BufferGeometry();
-    this.geometry.setAttribute("position", new THREE.BufferAttribute(this.positions, 3));
-    this.geometry.setAttribute("color", new THREE.BufferAttribute(this.colors, 3));
-    this.material = new THREE.PointsMaterial({
-      size: pointSize,
-      sizeAttenuation: true,
-      vertexColors: true,
-      transparent: true,
-      opacity: baseOpacity,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-    this.points = new THREE.Points(this.geometry, this.material);
-    this.points.frustumCulled = false;
-    this.points.renderOrder = -10;
-  }
-
-  update(time: number, bands: AudioBands, deltaTime: number, cameraPosition?: THREE.Vector3) {
-    const audioTwinkle = 0.18 + bands.high * 0.35 + bands.brightness * 0.25;
-    const calm = 1 - bands.sub * 0.25;
-
-    const drift = deltaTime * 0.05 * (0.35 + audioTwinkle) * calm * this.parallax;
-    const count = this.twinklePhase.length;
-    for (let i = 0; i < count; i += 1) {
-      const idx = i * 3;
-      this.positions[idx] += this.driftDir[idx] * drift;
-      this.positions[idx + 1] += this.driftDir[idx + 1] * drift;
-      this.positions[idx + 2] += this.driftDir[idx + 2] * drift;
-
-      const tw =
-        0.72 +
-        0.28 *
-          Math.sin(time * this.twinkleRate[i] + this.twinklePhase[i]) *
-          (0.75 + audioTwinkle * 0.75);
-
-      this.colors[idx] = this.baseColors[idx] * tw;
-      this.colors[idx + 1] = this.baseColors[idx + 1] * tw;
-      this.colors[idx + 2] = this.baseColors[idx + 2] * tw;
-    }
-
-    if (cameraPosition) {
-      this.points.position.set(
-        cameraPosition.x * (1 - this.parallax) * 0.04,
-        cameraPosition.y * (1 - this.parallax) * 0.03,
-        cameraPosition.z * (1 - this.parallax) * 0.04,
-      );
-    }
-
-    this.geometry.attributes.position.needsUpdate = true;
-    this.geometry.attributes.color.needsUpdate = true;
-    this.material.opacity = 0.75 + bands.high * 0.12;
-  }
-}
-
 const canvas = document.querySelector<HTMLCanvasElement>("#scene");
 const appElement = document.querySelector<HTMLElement>("#app");
 const startButton = document.querySelector<HTMLButtonElement>("#start-audio");
@@ -5171,18 +4960,22 @@ scene.background = new THREE.Color(sceneEnv.background);
 
 const themeDarkActive = styleEnvActive && visualStyle.themeDark;
 
+const sceneBackground = new SceneBackground(sceneEnv, themeDarkActive);
+sceneBackground.setFromBackground(scene.background as THREE.Color, themeDarkActive, 0);
+sceneBackground.addToScene(scene);
+
 const syncSceneFog = () => {
-  const bg = scene.background as THREE.Color;
-  scene.fog = new THREE.FogExp2(bg.getHex(), themeDarkActive ? 0.0078 : 0.0058);
+  sceneBackground.syncFog(scene, scene.background as THREE.Color, themeDarkActive);
 };
 
-// 背景の奥行き: 単色の代わりにグラデーションドーム（色は毎フレーム背景色から導出）
-const backgroundDome = new BackgroundDome();
-backgroundDome.setFromBackground(scene.background as THREE.Color, themeDarkActive);
-scene.add(backgroundDome.mesh);
 syncSceneFog();
 
-const camera = new THREE.PerspectiveCamera(36, window.innerWidth / window.innerHeight, 0.1, 100);
+const camera = new THREE.PerspectiveCamera(
+  36,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  sceneEnv.cameraFar ?? 100,
+);
 camera.position.set(0, 0.28, 6.4);
 
 const renderer = new THREE.WebGLRenderer({
@@ -5192,6 +4985,7 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(scene.background as THREE.Color);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = sceneEnv.exposure;
@@ -5279,27 +5073,6 @@ renderer.domElement.addEventListener("pointercancel", () => {
   viewPointerState.id = null;
 });
 
-const starsNear = new StarField({
-  count: 820,
-  minRadius: 14,
-  maxRadius: 26,
-  size: 0.028,
-  baseOpacity: 0.92,
-  parallax: 1.35,
-});
-const starsFar = new StarField({
-  count: 3400,
-  minRadius: 28,
-  maxRadius: 58,
-  size: 0.015,
-  baseOpacity: 0.72,
-  parallax: 0.55,
-});
-starsNear.points.visible = sceneEnv.stars;
-starsFar.points.visible = sceneEnv.stars;
-scene.add(starsNear.points);
-scene.add(starsFar.points);
-
 const keyLight = new THREE.DirectionalLight(0xffffff, sceneEnv.key);
 keyLight.position.set(3, 4, 5);
 keyLight.castShadow = true;
@@ -5313,22 +5086,29 @@ keyLight.shadow.camera.bottom = -6;
 scene.add(keyLight);
 scene.add(keyLight.target);
 
-const fillLight = new THREE.DirectionalLight(0xe8f0ff, sceneEnv.fill);
+const fillLight = new THREE.DirectionalLight(sceneEnv.fillColor ?? 0xe8f0ff, sceneEnv.fill);
 fillLight.position.set(-4, 2, 2);
 scene.add(fillLight);
 
-const ambientLight = new THREE.HemisphereLight(0xffffff, 0xd6d0c6, sceneEnv.ambient);
+const ambientLight = new THREE.HemisphereLight(
+  0xffffff,
+  sceneEnv.hemisphereGround ?? 0xd6d0c6,
+  sceneEnv.ambient,
+);
 scene.add(ambientLight);
 
-const floor = new THREE.Mesh(new THREE.PlaneGeometry(18, 18), new THREE.ShadowMaterial({ color: 0x000000, opacity: 0.045 }));
-floor.position.y = -1.82;
-floor.rotation.x = -Math.PI / 2;
-floor.receiveShadow = true;
-scene.add(floor);
+if (sceneEnv.rimLightIntensity) {
+  const rimLight = new THREE.DirectionalLight(
+    sceneEnv.rimLightColor ?? 0x6ec8ff,
+    sceneEnv.rimLightIntensity,
+  );
+  rimLight.position.set(0, 1.5, -5);
+  scene.add(rimLight);
+}
 
 // monolith スタイル: ギャラリーの台座
 if (sceneEnv.pedestal) {
-  floor.position.y = -2.62;
+  sceneBackground.setPedestalLayout(true);
   const pedestal = new THREE.Mesh(
     new THREE.CylinderGeometry(1.08, 1.2, 0.8, 64),
     new THREE.MeshStandardMaterial({ color: 0x35343a, roughness: 0.85, metalness: 0.08 }),
@@ -5611,7 +5391,8 @@ const updateEnvironmentCrossfade = (deltaTime: number) => {
   (scene.background as THREE.Color)
     .copy(envBackgroundForming)
     .lerp(envBackgroundComplete, envMix);
-  backgroundDome.setFromBackground(scene.background as THREE.Color, themeDarkActive);
+  renderer.setClearColor(scene.background as THREE.Color);
+  sceneBackground.setFromBackground(scene.background as THREE.Color, themeDarkActive, envMix);
   syncSceneFog();
   if (!lightSliderTouched) {
     keyLight.intensity = envLerp(sceneEnv.key, sceneEnv.keyComplete);
@@ -5869,10 +5650,7 @@ const render = () => {
     bands.overall *= waveGate;
   }
 
-  if (starsNear.points.visible) {
-    starsNear.update(elapsedTime, bands, deltaTime, camera.position);
-    starsFar.update(elapsedTime, bands, deltaTime, camera.position);
-  }
+  sceneBackground.update(elapsedTime, bands, deltaTime, camera);
 
   if (isAudioReady && !isComplete) {
     if (bands.overall >= SILENCE_THRESHOLD) {

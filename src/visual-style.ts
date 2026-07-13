@@ -8,6 +8,18 @@
 
 export type VisualStyleId = "metamorphosis" | "vita" | "monolith";
 
+export type BackgroundProfile = {
+  studioSpace?: boolean;
+  dustMotes?: boolean;
+  domeVariant?: "default" | "studio" | "abyss";
+  /** 可視床を出さず開放空間にする（vita） */
+  openVoid?: boolean;
+  /** 疎な生物発光粒子（vita） */
+  biolumeMotes?: boolean;
+  /** スタイル別の FogExp2 密度 */
+  fogDensity?: number;
+};
+
 export type VisualStyleEnv = {
   background: number;
   backgroundComplete: number;
@@ -23,6 +35,17 @@ export type VisualStyleEnv = {
   pedestal: boolean;
   spotlight: boolean;
   spotlightIntensity: number;
+  backgroundProfile?: BackgroundProfile;
+  /** 遠景ドーム・星屑用のカメラ far（vita） */
+  cameraFar?: number;
+  /** HemisphereLight 地面色（vita） */
+  hemisphereGround?: number;
+  /** 被写体背面のリムライト強度（vita） */
+  rimLightIntensity?: number;
+  /** 被写体背面のリムライト色（vita） */
+  rimLightColor?: number;
+  /** フィルライト色（vita） */
+  fillColor?: number;
 };
 
 export type VisualStyleConfig = {
@@ -118,6 +141,11 @@ const METAMORPHOSIS: VisualStyleConfig = {
     pedestal: false,
     spotlight: false,
     spotlightIntensity: 0,
+    backgroundProfile: {
+      studioSpace: true,
+      dustMotes: true,
+      domeVariant: "studio",
+    },
   },
 };
 
@@ -155,20 +183,31 @@ const VITA: VisualStyleConfig = {
   },
   completion: { mode: "breathe", seconds: 6 },
   env: {
-    background: 0x0a0d14,
-    backgroundComplete: 0x0a0d14,
-    exposure: 1.16,
-    key: 1.7,
-    keyComplete: 1.5,
-    fill: 0.8,
-    fillComplete: 0.7,
-    ambient: 0.6,
-    ambientComplete: 0.5,
+    background: 0x060910,
+    backgroundComplete: 0x070b12,
+    exposure: 1.12,
+    key: 1.95,
+    keyComplete: 1.72,
+    fill: 0.82,
+    fillComplete: 0.72,
+    ambient: 0.56,
+    ambientComplete: 0.48,
     stars: true,
     environmentMap: false,
     pedestal: false,
     spotlight: false,
     spotlightIntensity: 0,
+    cameraFar: 220,
+    hemisphereGround: 0x0c1018,
+    fillColor: 0x6a7280,
+    rimLightIntensity: 0.26,
+    rimLightColor: 0x3d4f62,
+    backgroundProfile: {
+      domeVariant: "abyss",
+      openVoid: true,
+      biolumeMotes: true,
+      fogDensity: 0.0022,
+    },
   },
 };
 
