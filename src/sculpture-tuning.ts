@@ -92,7 +92,7 @@ const RUNTIME_BASELINE: RuntimeSculptureTuning = {
   pulseHold: fibRatio(8, 5),
   pulseSqueeze: fibUnit(8, 9),
   pulseConfidenceFloor: fibUnit(8, 10),
-  speciesCalibrationSeconds: fibSeconds(7),
+  speciesCalibrationSeconds: fibSeconds(5),
 };
 
 export const DEFAULT_SCULPTURE_TUNING: SculptureTuning = {
@@ -243,9 +243,12 @@ export const TUNING_SLIDER_SPECS: TuningSliderSpec[] = [
 export const formatSculptureTuningForAgent = (
   knobs: SculptureTuning = sculptureTuning,
   runtime: RuntimeSculptureTuning = runtimeTuning,
+  growthAlgorithm = "fibonacci",
 ) => {
   const lines = [
     "Sound Sculpture — 開発チューニング（AI agent 用）",
+    "",
+    `成長アルゴリズム: ${growthAlgorithm}`,
     "",
     "ノブ（パネル6項目）:",
     "",

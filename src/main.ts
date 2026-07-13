@@ -2,7 +2,7 @@ import "./styles.scss";
 import * as THREE from "three";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { TrackballControls } from "three/examples/jsm/controls/TrackballControls.js";
 import {
   applyBandSolo,
   BAND_TEST_TONES,
@@ -26,6 +26,7 @@ import {
 } from "./sculpture-tuning";
 import {
   StructureTracker,
+  getStructureFormationScale,
   type StructureSnapshot,
 } from "./structure-tracker";
 import {
@@ -35,42 +36,53 @@ import {
   type SpeciesProfile,
 } from "./species-profile";
 import { fib, fibRatio, fibUnit } from "./fibonacci";
-
-type SculptureMode = "classic" | "carve";
-
-type SculptureExperience = {
-  readonly group: THREE.Group;
-  update(bands: AudioBands, deltaTime: number, userViewInteracting?: boolean, rhythm?: RhythmEvents, structure?: StructureSnapshot, species?: SpeciesProfile): void;
-  applyLiveTuningNow(): void;
-  complete(): void;
-  reset(): void;
-  createExportGroup(): THREE.Group;
-};
-
-const parseSculptureMode = (): SculptureMode => {
-  const param = new URLSearchParams(window.location.search).get("mode");
-  return param === "carve" ? "carve" : "classic";
-};
-
-type AudioBands = {
-  /** サブ低域 (キック胴・フロアタム) 30–120 Hz */
-  sub: number;
-  /** 低域 (キック箱鳴り・スネア太さ) 120–400 Hz */
-  low: number;
-  /** 中域 (ドラムボディ・ハイハット胴) 400–2000 Hz */
-  mid: number;
-  /** メロディ中域 (ボーカル・主旋律) 700–1500 Hz */
-  melody: number;
-  /** 高域 (アタック 2–6 kHz + 輝き・空気感 5–18 kHz) */
-  high: number;
-  overall: number;
-  centroid: number;
-  bassFocus: number;
-  /** melody / 全帯域 — 主旋律の存在感 */
-  melodyFocus: number;
-  brightness: number;
-  contrast: number;
-};
+import {
+  GROWTH_ALGORITHM_CATALOG,
+  getGrowthAlgorithmMeta,
+  growthFlow,
+  growthPattern,
+  growthPlaceOnSphere,
+  growthSpikeMask,
+  parseGrowthAlgorithmId,
+  setGrowthAlgorithmId,
+  type GrowthAlgorithmId,
+} from "./growth-algorithm";
+import { AmoebaSculpture } from "./amoeba-sculpture";
+import { CarveSculpture } from "./carve-sculpture";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
+import {
+  deriveAfterlifeMaterial,
+  deriveSculpturePalette,
+  NEUTRAL_SCULPTURE_PALETTE,
+  type SculpturePalette,
+} from "./audio-palette";
+import {
+  applyClickRepulsionToPositions,
+  createClickRepulsionState,
+  pokeClickRepulsion,
+  resetClickRepulsionState,
+  updateClickRepulsion,
+} from "./click-repulsion";
+import {
+  getActiveVisualStyle,
+  NEUTRAL_ENVIRONMENT,
+  parseVisualStyleId,
+  setActiveVisualStyle,
+  VISUAL_STYLE_CATALOG,
+  type VisualStyleId,
+} from "./visual-style";
+import {
+  clamp01,
+  parseSculptureMode,
+  seededUnit,
+  SILENCE_SECONDS_TO_COMPLETE,
+  SILENCE_THRESHOLD,
+  smoothstep,
+  type AudioBands,
+  type RhythmEvents,
+  type SculptureExperience,
+  type SculptureMode,
+} from "./sculpture-types";
 
 type WaveformMetrics = {
   peak: number;
@@ -78,6 +90,9 @@ type WaveformMetrics = {
   peakDelta: number;
   energyDelta: number;
 };
+
+/** 曲内相対正規化の対象となる帯域キー */
+type BandNormKey = "sub" | "low" | "mid" | "melody" | "high" | "overall";
 
 type AudioProfile = {
   duration: number;
@@ -103,35 +118,6 @@ type AudioProfile = {
   attackRate: number;
   quietRatio: number;
   loudRatio: number;
-};
-
-type RhythmEvents = {
-  kick: number;
-  snare: number;
-  hat: number;
-  /** シンバル・大きな波形スパイクなどの瞬間反応 */
-  transient: number;
-  beat: number;
-  beatIndex: number;
-  kickIndex: number;
-  snareIndex: number;
-  hatIndex: number;
-  transientIndex: number;
-  downbeat: boolean;
-  /** 推定テンポ (BPM)。ビートが検出できない間は直近値を維持。 */
-  bpm: number;
-  /** IOIベースの拍位相 0–1 */
-  pulsePhase: number;
-  /** 直近パルス間隔の安定度 */
-  pulseConfidence: number;
-  /** 減衰するパルスエンベロープ */
-  pulseEnvelope: number;
-  /** kick/transient 等で記録された離散パルス回数 */
-  pulseIndex: number;
-  /** オシロ表示用 */
-  subLevel: number;
-  wavePeak: number;
-  waveEnergy: number;
 };
 
 // NOTE: render loop で最新値に更新し、SoundSculpture 側で参照する。
@@ -186,16 +172,6 @@ const defaultStructureSnapshot = (): StructureSnapshot => ({
 
 let latestStructure: StructureSnapshot = defaultStructureSnapshot();
 
-const SILENCE_THRESHOLD = 0.025;
-const SILENCE_SECONDS_TO_COMPLETE = 2.4;
-
-const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
-
-const smoothstep = (edge0: number, edge1: number, value: number) => {
-  const x = clamp01((value - edge0) / (edge1 - edge0));
-  return x * x * (3 - 2 * x);
-};
-
 const createEmptyAudioProfile = (): AudioProfile => ({
   duration: 0,
   activeDuration: 0,
@@ -221,17 +197,6 @@ const createEmptyAudioProfile = (): AudioProfile => ({
   quietRatio: 0,
   loudRatio: 0,
 });
-
-const vertexPattern = (x: number, y: number, z: number, salt: number) => {
-  const wave = Math.sin(x * 5.13 + y * 1.37 + salt) + Math.sin(y * 4.21 - z * 2.31 + salt * 1.7) + Math.sin(z * 6.17 + x * 2.91 - salt * 0.6);
-
-  return wave / 3;
-};
-
-const seededUnit = (index: number, salt: number) => {
-  const value = Math.sin(index * 127.1 + salt * 311.7) * 43758.5453;
-  return value - Math.floor(value);
-};
 
 /**
  * オンセット/ビート検出。
@@ -532,36 +497,6 @@ class RhythmTracker {
   }
 }
 
-const curlNoiseSample = (
-  x: number,
-  y: number,
-  z: number,
-  salt: number,
-  out: { x: number; y: number; z: number },
-) => {
-  const eps = 0.42;
-  const invDouble = 1 / (2 * eps);
-
-  // Three independent scalar potentials Pa / Pb / Pc.
-  // curl(F) where F = (Pa, Pb, Pc).
-  const Pa_yp = vertexPattern(x, y + eps, z, salt);
-  const Pa_yn = vertexPattern(x, y - eps, z, salt);
-  const Pa_zp = vertexPattern(x, y, z + eps, salt);
-  const Pa_zn = vertexPattern(x, y, z - eps, salt);
-  const Pb_xp = vertexPattern(x + eps, y, z, salt + 7.13);
-  const Pb_xn = vertexPattern(x - eps, y, z, salt + 7.13);
-  const Pb_zp = vertexPattern(x, y, z + eps, salt + 7.13);
-  const Pb_zn = vertexPattern(x, y, z - eps, salt + 7.13);
-  const Pc_xp = vertexPattern(x + eps, y, z, salt + 13.71);
-  const Pc_xn = vertexPattern(x - eps, y, z, salt + 13.71);
-  const Pc_yp = vertexPattern(x, y + eps, z, salt + 13.71);
-  const Pc_yn = vertexPattern(x, y - eps, z, salt + 13.71);
-
-  out.x = ((Pc_yp - Pc_yn) - (Pb_zp - Pb_zn)) * invDouble;
-  out.y = ((Pa_zp - Pa_zn) - (Pc_xp - Pc_xn)) * invDouble;
-  out.z = ((Pb_xp - Pb_xn) - (Pa_yp - Pa_yn)) * invDouble;
-};
-
 type GrowthAnchorKind = "lobe" | "tentacle" | "crystal" | "erosion";
 
 /** シルエットの造形モード。diabolo 一強にならないよう複数をブレンドする。 */
@@ -608,7 +543,6 @@ const createSculptureSphereGeometry = (radius: number) => {
 };
 
 const CLAY_CORE_COLOR = 0xd9cdb8;
-const CLAY_INNER_COLOR = 0xcfc3ae;
 
 const buildFragmentBasis = (
   axis: THREE.Vector3,
@@ -651,6 +585,11 @@ const surfaceFragmentShader = /* glsl */ `
   uniform float uGlow;
   uniform float uOpacity;
   uniform float uCompleted;
+  uniform float uPetrify;
+  uniform float uVita;
+  uniform float uBreath;
+  uniform vec3 uPaletteColor;
+  uniform vec3 uPaletteAccent;
 
   varying vec3 vNormal;
   varying vec3 vWorldPosition;
@@ -719,6 +658,28 @@ const surfaceFragmentShader = /* glsl */ `
     alpha += lineDrive * fresnel * uMelodyFresnel * 0.06;
     alpha *= mix(1.0, 0.58, frozen);
 
+    // vita: 真珠光沢のイリデッセンス（生命スタイル）
+    if (uVita > 0.5) {
+      vec3 irid = 0.5 + 0.5 * cos(6.28318 * (fresnel * 1.35 + vec3(0.0, 0.33, 0.67)) + flowTime * 0.3);
+      vec3 pearl = irid * mix(vec3(1.0), uPaletteColor * 1.7, 0.55);
+      color = mix(color, color * 0.35 + pearl * (0.4 + uBreath * 0.5), 0.8);
+      alpha += 0.045 + fresnel * 0.15 + uBreath * fresnel * 0.12;
+    }
+
+    // petrify: 下から上へ結晶化が進む（変容スタイル）
+    if (uPetrify > 0.001) {
+      float h = clamp(vWorldPosition.y / 1.9, -1.0, 1.0);
+      float front = uPetrify * 2.9 - 1.45;
+      float crystal = smoothstep(h - 0.34, h + 0.1, front + surfaceNoise * 0.4);
+      float facets = pow(noise(vWorldPosition * 12.5), 2.2);
+      vec3 crystalColor =
+        uPaletteColor * (0.35 + facets * 1.05) +
+        uPaletteAccent * fresnel * 1.35 +
+        vec3(1.0) * pow(facets, 3.0) * 0.65;
+      color = mix(color, crystalColor, crystal);
+      alpha = mix(alpha, 0.16 + fresnel * 0.3 + facets * 0.12, crystal);
+    }
+
     gl_FragColor = vec4(color, alpha);
   }
 `;
@@ -748,6 +709,26 @@ class AudioInput {
   };
   private prevWaveRms = 0;
   private prevWavePeak = 0;
+  /**
+   * 曲内相対正規化用のランニングピーク。
+   * 各帯域を「その曲の中でのピーク」で割ることで、ミックスバランスや
+   * 再生音量の偏り（低音が強い曲・明るい曲・小さくマスタリングされた曲）を吸収し、
+   * どの曲でも帯域ごとの役割が等しく形に現れるようにする。
+   */
+  private readonly bandPeakEma: Record<BandNormKey, number> = {
+    sub: 0,
+    low: 0,
+    mid: 0,
+    melody: 0,
+    high: 0,
+    overall: 0,
+  };
+  /** これ未満のピークでは割らない（無音・微小ノイズの増幅を防ぐ下限） */
+  private static readonly BAND_NORM_FLOOR = 0.22;
+  /** ピーク追従（速い）— 持続的な大音量に ~1 秒で追いつく */
+  private static readonly BAND_NORM_ATTACK = 2.4;
+  /** ピーク減衰（非常に遅い; 時定数 ~55 秒）— 曲全体のスケール感を保持する */
+  private static readonly BAND_NORM_RELEASE = 1 / 55;
   private profile = createEmptyAudioProfile();
   private previousProfileBands: AudioBands | null = null;
   private lowProfileTotal = 0;
@@ -1019,13 +1000,15 @@ class AudioInput {
         Math.abs(mid - high)) /
       spectralTotal;
 
+    // 帯域ごとのノイズゲート（絶対値）→ 曲内相対正規化（曲のオブジェクト化）
+    // centroid/bassFocus/brightness/contrast は元々スペクトル比率（相対値）なので正規化しない
     this.bands = {
-      sub: smoothstep(0.02, 0.38, sub),
-      low: smoothstep(0.025, 0.42, low),
-      mid: smoothstep(0.018, 0.34, mid),
-      melody: smoothstep(0.006, 0.2, melody),
-      high: smoothstep(0.005, 0.14, high),
-      overall: smoothstep(0.014, 0.36, overall),
+      sub: this.normalizeBandBySongPeak("sub", smoothstep(0.02, 0.38, sub), deltaTime),
+      low: this.normalizeBandBySongPeak("low", smoothstep(0.025, 0.42, low), deltaTime),
+      mid: this.normalizeBandBySongPeak("mid", smoothstep(0.018, 0.34, mid), deltaTime),
+      melody: this.normalizeBandBySongPeak("melody", smoothstep(0.006, 0.2, melody), deltaTime),
+      high: this.normalizeBandBySongPeak("high", smoothstep(0.005, 0.14, high), deltaTime),
+      overall: this.normalizeBandBySongPeak("overall", smoothstep(0.014, 0.36, overall), deltaTime),
       centroid,
       bassFocus,
       melodyFocus,
@@ -1042,8 +1025,33 @@ class AudioInput {
     return this.profile;
   }
 
+  /**
+   * ゲート済み帯域値を「その曲の中でのランニングピーク」で正規化する。
+   * - ピークへの追従は速く（アタック）、減衰は非常に遅い（リリース）ので、
+   *   曲の静かなパートは静かなまま、帯域間のスケール差だけが吸収される
+   * - ピークが下限 (BAND_NORM_FLOOR) 未満の帯域はほぼ素通し — 存在しない帯域を
+   *   ノイズから増幅してしまうことを防ぐ
+   */
+  private normalizeBandBySongPeak(key: BandNormKey, value: number, deltaTime: number) {
+    const peak = this.bandPeakEma[key];
+    const rate = value > peak ? AudioInput.BAND_NORM_ATTACK : AudioInput.BAND_NORM_RELEASE;
+    this.bandPeakEma[key] = peak + (value - peak) * Math.min(1, deltaTime * rate);
+    const denom = Math.max(AudioInput.BAND_NORM_FLOOR, this.bandPeakEma[key]);
+    return clamp01(value / denom);
+  }
+
+  private resetBandNormalization() {
+    this.bandPeakEma.sub = 0;
+    this.bandPeakEma.low = 0;
+    this.bandPeakEma.mid = 0;
+    this.bandPeakEma.melody = 0;
+    this.bandPeakEma.high = 0;
+    this.bandPeakEma.overall = 0;
+  }
+
   private resetProfile() {
     this.profile = createEmptyAudioProfile();
+    this.resetBandNormalization();
     this.previousProfileBands = null;
     this.lowProfileTotal = 0;
     this.midProfileTotal = 0;
@@ -1207,11 +1215,6 @@ class AudioInput {
   }
 }
 
-export type SoundSculptureOptions = {
-  /** 粘土の変形ロジックはそのまま、コアの見た目だけ頂点追従の粒にする */
-  granular?: boolean;
-};
-
 class SoundSculpture {
   private static readonly maxParticles = 900;
   private static readonly maxGlowDust = 1400;
@@ -1219,6 +1222,10 @@ class SoundSculpture {
   private static readonly maxDetachmentDustSand = 1200;
   private static readonly maxDetachmentDustMetal = 800;
   private static readonly maxDetachmentDustSpark = 600;
+  /** 完成後の鼓動（呼吸）の全体的な強さ */
+  private static readonly AFTERLIFE_BREATH_STRENGTH = 0.68;
+  /** 完成後の鼓動（呼吸）のテンポ。1未満でゆっくり */
+  private static readonly AFTERLIFE_BREATH_TEMPO = 0.2;
 
   readonly group = new THREE.Group();
 
@@ -1231,8 +1238,8 @@ class SoundSculpture {
   private readonly detachmentDustSand: THREE.Points;
   private readonly detachmentDustMetal: THREE.Points;
   private readonly detachmentDustSpark: THREE.Points;
-  private readonly coreMaterial: THREE.MeshStandardMaterial;
-  private readonly innerCoreMaterial: THREE.MeshStandardMaterial;
+  private readonly coreMaterial: THREE.MeshPhysicalMaterial;
+  private readonly innerCoreMaterial: THREE.MeshPhysicalMaterial;
   private readonly surfaceMaterial: THREE.ShaderMaterial;
   private readonly particleMaterial: THREE.PointsMaterial;
   private readonly glowDustMaterial: THREE.PointsMaterial;
@@ -1341,6 +1348,18 @@ class SoundSculpture {
   private completed = false;
   private frozenTime = 0;
   private completeFadeOut = 1;
+  // --- ビジュアルスタイル（変容/生命/彫刻）と完成後の変化 ---
+  private readonly style = getActiveVisualStyle();
+  private completionProgress = 0;
+  private completionPalette: SculpturePalette | null = null;
+  private completionSpecies: SpeciesProfile | null = null;
+  private breathTime = 0;
+  private breathBpm = 64;
+  private breathWave = 0;
+  private readonly completionStartColor = new THREE.Color();
+  private readonly completionStartInnerColor = new THREE.Color();
+  private completionStartRoughness = 0.94;
+  private readonly _tmpColor = new THREE.Color();
   private currentStructure: StructureSnapshot = defaultStructureSnapshot();
   private speciesProfile: SpeciesProfile = { ...DEFAULT_SPECIES_PROFILE };
   private lastNoveltySpawn = 0;
@@ -1355,26 +1374,39 @@ class SoundSculpture {
   private waveImpulse = 0;
   private lastBands: AudioBands | null = null;
   private readonly baseScale = new THREE.Vector3(1, 1, 1);
-  private readonly granular: boolean;
-  private grainMass: THREE.Points | null = null;
-  private grainMassGeometry: THREE.BufferGeometry | null = null;
-  private grainMassMaterial: THREE.PointsMaterial | null = null;
-  private grainMassPositions: Float32Array | null = null;
-  private grainMassColors: Float32Array | null = null;
-  private readonly scratchGrainColor = new THREE.Color();
+  // --- アイドル揺らぎ（vita: 無音・形成初期も成長アルゴリズムのパターンでホヨホヨ蠢く） ---
+  /** formingTime と違い、音が無くても常に進む時計 */
+  private idleTime = Math.random() * 30;
+  private idleWobbleAmp = 0;
+  private readonly idleWobbleField: Float32Array;
+  /** vita アイドル揺らぎの接線方向成分（成長アルゴリズムの flow に則る） */
+  private readonly idleWobbleVector: Float32Array;
+  /** クリック・タッチで一瞬強まる揺らぎ（0→1 で減衰） */
+  private idlePokeImpulse = 0;
+  /** クリック位置の局所反発（完成後も有効） */
+  private readonly clickRepulsion: ReturnType<typeof createClickRepulsionState>;
+  private readonly surfaceClickRepulsion: ReturnType<typeof createClickRepulsionState>;
+  /** 音入力が始まってから色・発光が追従する度合い（急な色変化を抑える） */
+  private audioColorBlend = 0;
+  /**
+   * 大域変形の発達度 (0=未形成)。coral の定常ノイズなど「音に依らない起伏」を
+   * これでゲートし、形成前・形成初期のシルエットを正円（真球）に保つ。
+   */
+  private formDevelopment = 0;
 
-  constructor(options?: SoundSculptureOptions) {
-    this.granular = options?.granular ?? false;
+  constructor() {
     // Icosahedron + mergeVertices: 球面上の均質な頂点分布と滑らかな法線の両立
     this.geometry = createSculptureSphereGeometry(1.34);
     // core と重なると縁がチラつくので、少し外側へ
     this.surfaceGeometry = createSculptureSphereGeometry(1.46);
 
-    this.coreMaterial = new THREE.MeshStandardMaterial({
-      color: CLAY_CORE_COLOR,
+    const styleCore = this.style.core;
+
+    this.coreMaterial = new THREE.MeshPhysicalMaterial({
+      color: styleCore.pearlVariation > 0 ? 0xffffff : styleCore.color,
       emissive: 0x000000,
       emissiveIntensity: 0,
-      roughness: 0.94,
+      roughness: styleCore.roughness,
       metalness: 0,
       flatShading: false,
       // surface(透明)との Z-fighting を避けて「隙間の線」を減らす
@@ -1382,13 +1414,26 @@ class SoundSculpture {
       polygonOffsetFactor: 1,
       polygonOffsetUnits: 1,
     });
+    if (styleCore.sheen > 0) {
+      this.coreMaterial.sheen = styleCore.sheen;
+      this.coreMaterial.sheenColor.set(styleCore.sheenColor);
+      this.coreMaterial.sheenRoughness = 0.55;
+    }
+    if (styleCore.iridescence > 0) {
+      this.coreMaterial.iridescence = styleCore.iridescence;
+      this.coreMaterial.iridescenceIOR = 1.5;
+    }
+    if (styleCore.clearcoat > 0) {
+      this.coreMaterial.clearcoat = styleCore.clearcoat;
+      this.coreMaterial.clearcoatRoughness = 0.35;
+    }
 
     // “粘土の中身”を感じるための内側の塊
-    this.innerCoreMaterial = new THREE.MeshStandardMaterial({
-      color: CLAY_INNER_COLOR,
+    this.innerCoreMaterial = new THREE.MeshPhysicalMaterial({
+      color: styleCore.pearlVariation > 0 ? 0xb8c8dc : styleCore.innerColor,
       emissive: 0x000000,
       emissiveIntensity: 0,
-      roughness: 0.97,
+      roughness: Math.min(1, styleCore.roughness + 0.03),
       metalness: 0,
       flatShading: false,
       polygonOffset: true,
@@ -1411,6 +1456,11 @@ class SoundSculpture {
         // 外殻は控えめにして core の質量感を主役に
         uOpacity: { value: 0.14 },
         uCompleted: { value: 0 },
+        uPetrify: { value: 0 },
+        uVita: { value: this.style.membrane.vita ? 1 : 0 },
+        uBreath: { value: 0 },
+        uPaletteColor: { value: new THREE.Color(0.62, 0.78, 0.95) },
+        uPaletteAccent: { value: new THREE.Color(0.85, 0.9, 1.0) },
       },
       vertexShader: surfaceVertexShader,
       fragmentShader: surfaceFragmentShader,
@@ -1573,6 +1623,17 @@ class SoundSculpture {
     );
     this.baseScale.copy(this.group.scale);
 
+    // スタイルによる表示制御: monolith は膜も加算パーティクルも持たない純粋な彫刻
+    this.surface.visible = this.style.membrane.visible;
+    if (!this.style.particlesVisible) {
+      this.particles.visible = false;
+      this.glowDust.visible = false;
+      this.sparkles.visible = false;
+      this.detachmentDustSand.visible = false;
+      this.detachmentDustMetal.visible = false;
+      this.detachmentDustSpark.visible = false;
+    }
+
     this.basePositions = new Float32Array(this.geometry.attributes.position.array);
     this.baseSurfacePositions = new Float32Array(this.surfaceGeometry.attributes.position.array);
     this.targetCoreMeanRadius = this.meanRadialLength(this.basePositions);
@@ -1588,76 +1649,62 @@ class SoundSculpture {
     this.flowField = new Float32Array(this.accumulated.length * 3);
     this.crystalAxes = new Float32Array(this.accumulated.length * 3);
     this.detachmentCarve = new Float32Array(this.accumulated.length);
+    this.idleWobbleField = new Float32Array(this.accumulated.length);
+    this.idleWobbleVector = new Float32Array(this.accumulated.length * 3);
+    this.clickRepulsion = createClickRepulsionState(this.accumulated.length);
+    this.surfaceClickRepulsion = createClickRepulsionState(this.accumulated.length);
     this.initCrystalAxes();
     this.initMorphology();
 
-    if (this.granular) {
-      this.initGrainMassDisplay(detachmentMap);
+    if (styleCore.pearlVariation > 0) {
+      this.bakeCorePearlColors(styleCore.pearlVariation);
+      this.initVitaMembranePalette();
     }
   }
 
-  private initGrainMassDisplay(pointTexture: THREE.Texture) {
-    const vertexCount = this.geometry.attributes.position.count;
-    this.grainMassPositions = new Float32Array(vertexCount * 3);
-    this.grainMassColors = new Float32Array(vertexCount * 3);
-    this.grainMassPositions.set(this.geometry.attributes.position.array as Float32Array);
-    this.writeGrainMassColors();
-
-    this.grainMassGeometry = new THREE.BufferGeometry();
-    this.grainMassGeometry.setAttribute("position", new THREE.BufferAttribute(this.grainMassPositions, 3));
-    this.grainMassGeometry.setAttribute("color", new THREE.BufferAttribute(this.grainMassColors, 3));
-    this.grainMassMaterial = new THREE.PointsMaterial({
-      size: 0.024,
-      sizeAttenuation: true,
-      vertexColors: true,
-      transparent: true,
-      opacity: 0.93,
-      depthWrite: true,
-      map: pointTexture,
-    });
-    this.grainMass = new THREE.Points(this.grainMassGeometry, this.grainMassMaterial);
-    this.grainMass.frustumCulled = false;
-    this.grainMass.castShadow = true;
-    this.grainMass.receiveShadow = true;
-
-    this.core.visible = false;
-    this.innerCore.visible = false;
-    this.core.castShadow = false;
-    this.innerCore.castShadow = false;
-    this.group.add(this.grainMass);
-  }
-
-  private writeGrainMassColors() {
-    if (!this.grainMassColors || !this.grainMassPositions) {
-      return;
-    }
-
-    const innerScale = this.innerCore.scale.x;
-    const innerColor = new THREE.Color(CLAY_INNER_COLOR);
-    for (let i = 0; i < this.grainMassColors.length / 3; i += 1) {
+  /**
+   * vita 用: コアの頂点カラーに真珠の干渉色（青緑〜藤〜桃）のムラを焼き込む。
+   * 単色の初期状態でも生命の質感が出る。マテリアルカラーと乗算される。
+   */
+  private bakeCorePearlColors(amount: number) {
+    const position = this.geometry.attributes.position;
+    const colors = new Float32Array(position.count * 3);
+    const color = new THREE.Color();
+    for (let i = 0; i < position.count; i += 1) {
+      const x = position.getX(i);
+      const y = position.getY(i);
+      const z = position.getZ(i);
+      const r = Math.hypot(x, y, z) || 1;
+      const nx = x / r;
+      const ny = y / r;
+      const nz = z / r;
+      const p1 = growthPattern(nx * 1.3, ny * 1.3, nz * 1.3, this.morphologySeed + 4.2);
+      const p2 = growthPattern(nx * 2.7, ny * 2.7, nz * 2.7, this.morphologySeed + 17.8);
+      const p3 = growthPattern(nx * 0.85, ny * 1.15, nz * 0.95, this.morphologySeed + 31.4);
+      const hue = (((0.5 + p1 * 0.14 + p3 * 0.08 + ny * 0.04) * amount + 0.5 * (1 - amount)) % 1 + 1) % 1;
+      const saturation = clamp01(0.26 + Math.abs(p2) * 0.28 * amount + Math.abs(p3) * 0.12 * amount);
+      const lightness = clamp01(0.54 + p1 * 0.1 * amount + p2 * 0.04 * amount);
+      color.setHSL(hue, saturation, lightness);
       const idx = i * 3;
-      const bx = this.basePositions[idx];
-      const by = this.basePositions[idx + 1];
-      const bz = this.basePositions[idx + 2];
-      const baseRadius = Math.hypot(bx, by, bz) / Math.max(0.001, this.targetCoreMeanRadius);
-      const tone = 0.84 + seededUnit(i, 3.7) * 0.16;
-      const innerMix = smoothstep(0.9, 0.45, baseRadius) * (1.1 - innerScale);
-      this.scratchGrainColor.copy(this.coreMaterial.color).lerp(innerColor, innerMix * 0.5);
-      this.grainMassColors[idx] = this.scratchGrainColor.r * tone;
-      this.grainMassColors[idx + 1] = this.scratchGrainColor.g * tone;
-      this.grainMassColors[idx + 2] = this.scratchGrainColor.b * tone;
+      colors[idx] = color.r;
+      colors[idx + 1] = color.g;
+      colors[idx + 2] = color.b;
     }
+    this.geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    this.coreMaterial.vertexColors = true;
+    this.coreMaterial.needsUpdate = true;
   }
 
-  private syncGrainMassFromCore() {
-    if (!this.granular || !this.grainMassPositions || !this.grainMassGeometry) {
-      return;
-    }
-
-    this.grainMassPositions.set(this.geometry.attributes.position.array as Float32Array);
-    this.grainMassGeometry.attributes.position.needsUpdate = true;
-    this.writeGrainMassColors();
-    this.grainMassGeometry.attributes.color.needsUpdate = true;
+  /** vita 膜シェーダーの初期パレットを成長パターンから導出（単色回避） */
+  private initVitaMembranePalette() {
+    const salt = this.morphologySeed;
+    const p1 = growthPattern(0.31, 0.52, 0.18, salt);
+    const p2 = growthPattern(0.62, -0.28, 0.44, salt + 11.3);
+    const hue = (((0.5 + p1 * 0.16 + p2 * 0.06) % 1) + 1) % 1;
+    const base = new THREE.Color().setHSL(hue, 0.42 + p2 * 0.12, 0.54);
+    const accent = new THREE.Color().setHSL(((hue + 0.1 + p1 * 0.04) % 1 + 1) % 1, 0.52, 0.62);
+    (this.surfaceMaterial.uniforms.uPaletteColor.value as THREE.Color).copy(base);
+    (this.surfaceMaterial.uniforms.uPaletteAccent.value as THREE.Color).copy(accent);
   }
 
   private makeCircleTexture() {
@@ -1708,10 +1755,8 @@ class SoundSculpture {
 
   private initMorphology() {
     this.morphologySeed = Math.random() * 1000;
-    const theta = seededUnit(0, this.morphologySeed) * Math.PI * 2;
-    const phi = Math.acos(2 * seededUnit(1, this.morphologySeed + 3.7) - 1);
-    const sinPhi = Math.sin(phi);
-    this.morphAxis.set(sinPhi * Math.cos(theta), Math.cos(phi), sinPhi * Math.sin(theta));
+    const axis = growthPlaceOnSphere(0, 1, this.morphologySeed);
+    this.morphAxis.set(axis.x, axis.y, axis.z);
     this.waistCenterAlong = (seededUnit(2, this.morphologySeed + 9.1) - 0.5) * 0.5;
 
     this.morphWeights = {
@@ -1750,10 +1795,7 @@ class SoundSculpture {
   }
 
   private getFormationScale() {
-    const s = this.currentStructure;
-    const phaseScale =
-      s.phase === "embryo" ? 0.22 : s.phase === "growth" ? 0.62 : s.phase === "metamorphosis" ? 1 : 0.78;
-    return Math.max(0.08, s.formationRamp * phaseScale);
+    return getStructureFormationScale(this.currentStructure);
   }
 
   private getDetailScale() {
@@ -1809,45 +1851,52 @@ class SoundSculpture {
   private updateMorphology(bands: AudioBands, deltaTime: number) {
     const s = this.currentStructure;
     const sp = this.getSpecies();
-    const lerp = sp.locked ? Math.min(1, deltaTime * 0.85) : Math.min(1, deltaTime * 0.45);
+    const speciesConfidence = sp.confidence;
+    const lerp = Math.min(1, deltaTime * (0.45 + speciesConfidence * 0.4));
     const targetAxis = this.getAudioCarveAxis(0, bands);
     this.morphAxis.lerp(targetAxis, lerp * 0.18).normalize();
 
     const organic = sp.organic;
     const mineral = sp.aggressive;
     const rhythmic = sp.rhythmic;
-    let targetWeights: MorphWeights;
-    if (sp.locked) {
-      const speciesTarget = speciesMorphTargets(sp);
-      const bandBlend = fibUnit(3, 13);
-      const overallBlend = bands.overall * bandBlend;
-      targetWeights = {
-        diabolo:
-          speciesTarget.diabolo * (1 - bandBlend) +
-          (fibUnit(3, 21) + overallBlend * fibUnit(5, 21)) * bandBlend,
-        torus:
-          speciesTarget.torus * (1 - bandBlend) +
-          (fibUnit(2, 21) + overallBlend * fibUnit(5, 21)) * bandBlend,
-        monolith:
-          speciesTarget.monolith * (1 - bandBlend) +
-          (fibUnit(5, 21) + overallBlend * fibUnit(8, 21)) * bandBlend,
-        coral:
-          speciesTarget.coral * (1 - bandBlend) +
-          (fibUnit(5, 21) + bands.contrast * fibUnit(5, 21)) * bandBlend,
-        spindle:
-          speciesTarget.spindle * (1 - bandBlend) +
-          (fibUnit(3, 21) + bands.brightness * fibUnit(8, 21)) * bandBlend,
-      };
-    } else {
-      const overallBlend = bands.overall;
-      targetWeights = {
-        diabolo: fibUnit(3, 21) + overallBlend * fibUnit(5, 21) + organic * fibUnit(8, 21),
-        torus: fibUnit(2, 21) + overallBlend * fibUnit(5, 21) + mineral * fibUnit(5, 21) + rhythmic * fibUnit(8, 21),
-        monolith: fibUnit(5, 21) + overallBlend * fibUnit(8, 21) + mineral * fibUnit(8, 21),
-        coral: fibUnit(5, 21) + organic * fibUnit(13, 21) + bands.contrast * fibUnit(5, 21),
-        spindle: fibUnit(3, 21) + bands.brightness * fibUnit(8, 21) + mineral * fibUnit(8, 21) + s.tension * fibUnit(5, 21),
-      };
-    }
+    const overallBlend = bands.overall;
+    const bandWeights: MorphWeights = {
+      diabolo: fibUnit(3, 21) + overallBlend * fibUnit(5, 21) + organic * fibUnit(8, 21),
+      torus: fibUnit(2, 21) + overallBlend * fibUnit(5, 21) + mineral * fibUnit(5, 21) + rhythmic * fibUnit(8, 21),
+      monolith: fibUnit(5, 21) + overallBlend * fibUnit(8, 21) + mineral * fibUnit(8, 21),
+      coral: fibUnit(5, 21) + organic * fibUnit(13, 21) + bands.contrast * fibUnit(5, 21),
+      spindle: fibUnit(3, 21) + bands.brightness * fibUnit(8, 21) + mineral * fibUnit(8, 21) + s.tension * fibUnit(5, 21),
+    };
+
+    const speciesTarget = speciesMorphTargets(sp);
+    const bandBlend = fibUnit(3, 13);
+    const liveOverallBlend = bands.overall * bandBlend;
+    const speciesWeights: MorphWeights = {
+      diabolo:
+        speciesTarget.diabolo * (1 - bandBlend) +
+        (fibUnit(3, 21) + liveOverallBlend * fibUnit(5, 21)) * bandBlend,
+      torus:
+        speciesTarget.torus * (1 - bandBlend) +
+        (fibUnit(2, 21) + liveOverallBlend * fibUnit(5, 21)) * bandBlend,
+      monolith:
+        speciesTarget.monolith * (1 - bandBlend) +
+        (fibUnit(5, 21) + liveOverallBlend * fibUnit(8, 21)) * bandBlend,
+      coral:
+        speciesTarget.coral * (1 - bandBlend) +
+        (fibUnit(5, 21) + bands.contrast * fibUnit(5, 21)) * bandBlend,
+      spindle:
+        speciesTarget.spindle * (1 - bandBlend) +
+        (fibUnit(3, 21) + bands.brightness * fibUnit(8, 21)) * bandBlend,
+    };
+
+    const c = speciesConfidence;
+    const targetWeights: MorphWeights = {
+      diabolo: speciesWeights.diabolo * c + bandWeights.diabolo * (1 - c),
+      torus: speciesWeights.torus * c + bandWeights.torus * (1 - c),
+      monolith: speciesWeights.monolith * c + bandWeights.monolith * (1 - c),
+      coral: speciesWeights.coral * c + bandWeights.coral * (1 - c),
+      spindle: speciesWeights.spindle * c + bandWeights.spindle * (1 - c),
+    };
     const targetSum =
       targetWeights.diabolo +
       targetWeights.torus +
@@ -1925,23 +1974,20 @@ class SoundSculpture {
   }
 
   private initCrystalAxes() {
-    for (let i = 0; i < this.accumulated.length; i += 1) {
+    const total = this.accumulated.length;
+    for (let i = 0; i < total; i += 1) {
       const idx = i * 3;
-      const u = seededUnit(i, 1.71);
-      const v = seededUnit(i, 5.37);
-      const theta = u * Math.PI * 2;
-      const phi = Math.acos(2 * v - 1);
-      const sinPhi = Math.sin(phi);
-      this.crystalAxes[idx] = sinPhi * Math.cos(theta);
-      this.crystalAxes[idx + 1] = Math.cos(phi);
-      this.crystalAxes[idx + 2] = sinPhi * Math.sin(theta);
+      const axis = growthPlaceOnSphere(i, total, 1.71 + this.morphologySeed * 0.001);
+      this.crystalAxes[idx] = axis.x;
+      this.crystalAxes[idx + 1] = axis.y;
+      this.crystalAxes[idx + 2] = axis.z;
     }
   }
 
   update(
     bands: AudioBands,
     deltaTime: number,
-    userViewInteracting = false,
+    _userViewInteracting = false,
     _rhythm?: RhythmEvents,
     structure: StructureSnapshot = latestStructure,
     species: SpeciesProfile = speciesProfiler.getProfile(),
@@ -1954,6 +2000,14 @@ class SoundSculpture {
     if (!this.completed) {
       this.formingTime += timeAdvance;
     }
+    this.idleTime += deltaTime;
+    if (!this.completed && this.style.idleWobble > 0) {
+      const activityTarget = smoothstep(SILENCE_THRESHOLD, 0.22, bands.overall);
+      this.audioColorBlend += (activityTarget - this.audioColorBlend) * Math.min(1, deltaTime * 0.55);
+    }
+    this.updateIdleWobble(activity, deltaTime);
+    updateClickRepulsion(this.clickRepulsion, deltaTime);
+    updateClickRepulsion(this.surfaceClickRepulsion, deltaTime);
 
     if (!this.completed) {
       if (bands.overall > SILENCE_THRESHOLD) {
@@ -1979,19 +2033,20 @@ class SoundSculpture {
     }
 
     this.updateCoreGeometry(bands, deltaTime);
-    this.updateSurfaceGeometry(bands, deltaTime);
-    if (this.granular) {
-      this.syncGrainMassFromCore();
+    if (this.surface.visible) {
+      this.updateSurfaceGeometry(bands, deltaTime);
     }
     if (!this.completed) {
       this.maybeSpawnDetachedFragment(bands, deltaTime);
       this.updateSeparationTendency(bands, deltaTime);
     }
     this.updateDetachedFragments(bands, deltaTime);
-    this.updateDetachmentDust(bands, deltaTime);
-    this.updateGlowDust(bands, deltaTime);
-    this.updateSparkles(bands, deltaTime);
-    this.updateParticles(bands, deltaTime);
+    if (this.style.particlesVisible) {
+      this.updateDetachmentDust(bands, deltaTime);
+      this.updateGlowDust(bands, deltaTime);
+      this.updateSparkles(bands, deltaTime);
+      this.updateParticles(bands, deltaTime);
+    }
 
     const innerBase = 1;
     const pulseFloor = runtimeTuning.pulseConfidenceFloor;
@@ -2000,17 +2055,95 @@ class SoundSculpture {
     const kickPulse = this.completed ? 0 : 1 + Math.max(this.kickImpulse, syncPulse) * fibUnit(8, 13) * runtimeTuning.liveLow;
     this.innerCore.scale.setScalar(innerBase * kickPulse);
 
-    if (!userViewInteracting && !this.completed) {
-      const pulseGate = latestRhythm.pulseConfidence;
-      const targetSpin = (0.04 + bands.mid * 0.015 + bands.melody * 0.04) * activity * pulseGate;
-      this.group.rotation.y += deltaTime * targetSpin;
-      this.group.rotation.x = Math.sin(this.formingTime * 0.18) * 0.035 * activity * pulseGate;
-    }
-
     if (!this.completed) {
       this.applyRhythmImpulses(deltaTime, bands);
     } else if (bandSoloAllows("low")) {
       this.group.scale.lerp(this.baseScale, Math.min(1, deltaTime * 12));
+    }
+
+    if (this.completed) {
+      this.updateAfterlife(deltaTime);
+    }
+  }
+
+  /** vita: クリック・タップで生命体がホヨッと反応する（完成後も有効） */
+  pokeIdle() {
+    if (this.style.idleWobble <= 0) {
+      return;
+    }
+    this.idlePokeImpulse = 1;
+  }
+
+  private hasActiveClickWobble() {
+    return this.idlePokeImpulse > 0.01 || this.idleWobbleAmp > 0.001;
+  }
+
+  getPointerTargets() {
+    const targets: THREE.Object3D[] = [this.core];
+    if (this.surface.visible) {
+      targets.push(this.surface);
+    }
+    return targets;
+  }
+
+  pokeSurface(localPoint: THREE.Vector3) {
+    pokeClickRepulsion(this.clickRepulsion, this.basePositions, localPoint);
+    if (this.surface.visible) {
+      pokeClickRepulsion(this.surfaceClickRepulsion, this.baseSurfacePositions, localPoint, 0.1, 0.52);
+    }
+  }
+
+  /**
+   * アイドル揺らぎ: 音が無くても成長アルゴリズムのパターンに則って
+   * 表面がホヨホヨと蠢く（vita 用）。音が鳴るほど・形成が進むほど控えめになり、
+   * 音による本来の変形が主役になる。
+   */
+  private updateIdleWobble(activity: number, deltaTime: number) {
+    const gain = this.style.idleWobble;
+    if (gain <= 0) {
+      return;
+    }
+
+    this.idlePokeImpulse *= Math.exp(-6.2 * deltaTime);
+    const pokeBoost = this.idlePokeImpulse * 0.42;
+
+    const targetAmp = this.completed
+      ? gain * pokeBoost
+      : gain *
+        (0.072 + pokeBoost) *
+        (1 - activity * 0.38) *
+        (1 - this.currentStructure.formationRamp * 0.5);
+    this.idleWobbleAmp += (targetAmp - this.idleWobbleAmp) * Math.min(1, deltaTime * 2.2);
+
+    if (this.idleWobbleAmp < 0.001 && this.idlePokeImpulse < 0.01) {
+      this.idleWobbleField.fill(0);
+      this.idleWobbleVector.fill(0);
+      return;
+    }
+
+    const slow = this.idleTime * 0.32;
+    const fast = this.idleTime * 0.58 + 13.7;
+    const flowSalt = this.morphologySeed + slow * 0.55;
+    for (let i = 0; i < this.idleWobbleField.length; i += 1) {
+      const index = i * 3;
+      const x = this.basePositions[index];
+      const y = this.basePositions[index + 1];
+      const z = this.basePositions[index + 2];
+      const r = Math.hypot(x, y, z) || 1;
+      const nx = x / r;
+      const ny = y / r;
+      const nz = z / r;
+      // 低周波を多めにして輪郭を丸く保ちつつ、わずかな有機感だけ残す
+      const wave =
+        growthPattern(nx * 0.75, ny * 0.75, nz * 0.75, slow) * 0.68 +
+        growthPattern(nx * 1.35, ny * 1.35, nz * 1.35, fast) * 0.22 +
+        growthPattern(nx * 0.5, ny * 0.5, nz * 0.5, slow * 0.47 + 8.2) * 0.1;
+      this.idleWobbleField[i] = wave * this.idleWobbleAmp;
+      growthFlow(nx * 1.1, ny * 1.1, nz * 1.1, flowSalt + i * 0.003, this._curlOut);
+      const flowAmp = this.idleWobbleAmp * 0.18;
+      this.idleWobbleVector[index] = this._curlOut.x * flowAmp;
+      this.idleWobbleVector[index + 1] = this._curlOut.y * flowAmp;
+      this.idleWobbleVector[index + 2] = this._curlOut.z * flowAmp;
     }
   }
 
@@ -2126,7 +2259,7 @@ class SoundSculpture {
         const bx = this.basePositions[idx];
         const by = this.basePositions[idx + 1];
         const bz = this.basePositions[idx + 2];
-        curlNoiseSample(bx * 2.8, by * 2.8, bz * 2.8, salt, this._curlOut);
+        growthFlow(bx * 2.8, by * 2.8, bz * 2.8, salt, this._curlOut);
         this.flowField[idx] += this._curlOut.x * amount;
         this.flowField[idx + 1] += this._curlOut.y * amount;
         this.flowField[idx + 2] += this._curlOut.z * amount;
@@ -2134,14 +2267,150 @@ class SoundSculpture {
     }
   }
 
+  /** 完成直前に、録音音声から導出したパレットと種プロファイルを受け取る */
+  prepareCompletion(palette: SculpturePalette, species?: SpeciesProfile) {
+    this.completionPalette = palette;
+    this.completionSpecies = species ?? null;
+    if (species) {
+      this.speciesProfile = species;
+    }
+  }
+
   complete() {
     this.bakeFinalSculptureMemory();
-    this.frozenTime = this.formingTime;
+    // 膜シェーダーの uTime と連続になるよう、アイドル分も含めて凍結する
+    this.frozenTime =
+      this.formingTime + (this.style.idleWobble > 0 ? this.idleTime * 0.3 : 0);
     this.completeFadeOut = 1;
     this.completed = true;
+    this.completionProgress = 0;
+    this.breathTime = 0;
+    this.breathWave = 0;
+    const bpm = latestRhythm.bpm;
+    this.breathBpm = bpm > 30 && bpm < 200 ? Math.min(150, Math.max(44, bpm)) : 64;
+    this.completionStartColor.copy(this.coreMaterial.color);
+    this.completionStartInnerColor.copy(this.innerCoreMaterial.color);
+    this.completionStartRoughness = this.coreMaterial.roughness;
     this.liveOffset.fill(0);
     this.surfaceLiveOffset.fill(0);
-    this.flowField.fill(0);
+    if (this.style.completion.mode === "monolith") {
+      // 石は即座に静止する。生命系スタイルは afterlife で緩やかに減衰させる
+      this.flowField.fill(0);
+    }
+    const palette = this.completionPalette ?? NEUTRAL_SCULPTURE_PALETTE;
+    const uniforms = this.surfaceMaterial.uniforms;
+    (uniforms.uPaletteColor.value as THREE.Color).copy(palette.baseColor);
+    (uniforms.uPaletteAccent.value as THREE.Color).copy(palette.accentColor);
+  }
+
+  /**
+   * 完成後の毎フレーム更新 — スタイルごとの「その後」。
+   * - petrify:  数秒かけて粘土が鉱物へ変わり、膜が結晶化する
+   * - breathe:  録音した鼓動(BPM)を記憶して呼吸を続ける
+   * - monolith: 音のプロファイルが決めた素材（大理石〜ブロンズ〜黒曜石）が現れる
+   */
+  private updateAfterlife(deltaTime: number) {
+    const st = this.style;
+    const palette = this.completionPalette ?? NEUTRAL_SCULPTURE_PALETTE;
+    const species = this.completionSpecies ?? this.speciesProfile;
+    const afterlife = deriveAfterlifeMaterial(palette, species);
+    this.completionProgress = Math.min(
+      1,
+      this.completionProgress + deltaTime / Math.max(0.001, st.completion.seconds),
+    );
+    const p = this.completionProgress;
+    const ease = p * p * (3 - 2 * p);
+
+    if (st.completion.mode !== "monolith" && p < 1) {
+      const flowDecay = Math.exp(-deltaTime * 1.3);
+      for (let i = 0; i < this.flowField.length; i += 1) {
+        this.flowField[i] *= flowDecay;
+      }
+    }
+
+    switch (st.completion.mode) {
+      case "petrify": {
+        this._tmpColor.setHSL(
+          palette.hue,
+          Math.min(0.95, palette.saturation * 0.72 * afterlife.saturationMul),
+          Math.min(0.62, palette.lightness * 0.82),
+        );
+        this.coreMaterial.color.copy(this.completionStartColor).lerp(this._tmpColor, ease);
+        this._tmpColor.setHSL(
+          palette.hue,
+          Math.min(0.95, palette.saturation * 0.6 * afterlife.saturationMul),
+          Math.min(0.5, palette.lightness * 0.6),
+        );
+        this.innerCoreMaterial.color
+          .copy(this.completionStartInnerColor)
+          .lerp(this._tmpColor, ease);
+        this.coreMaterial.roughness =
+          this.completionStartRoughness +
+          (palette.roughness * afterlife.roughnessMul - this.completionStartRoughness) * ease;
+        this.coreMaterial.metalness =
+          palette.metalness * 0.35 * afterlife.metalnessMul * ease;
+        this.coreMaterial.clearcoat = 0.35 * afterlife.clearcoatMul * ease;
+        const surge = Math.sin(Math.PI * ease);
+        this.coreMaterial.emissive.copy(palette.emissiveColor);
+        this.coreMaterial.emissiveIntensity =
+          (surge * surge * 0.85 * palette.emissiveStrength +
+            ease * 0.07 * palette.emissiveStrength) *
+          afterlife.emissiveMul;
+        this.surfaceMaterial.uniforms.uPetrify.value =
+          ease * afterlife.petrifyBoost;
+        break;
+      }
+      case "breathe": {
+        this.breathTime += deltaTime;
+        this.frozenTime += deltaTime * 0.35;
+        const beat =
+          (this.breathBpm / 60) * Math.PI * SoundSculpture.AFTERLIFE_BREATH_TEMPO;
+        const wave =
+          (Math.sin(this.breathTime * beat) * 0.6 +
+            Math.sin(this.breathTime * beat * 0.5 + 1.7) * 0.4) *
+          afterlife.breathAmp *
+          SoundSculpture.AFTERLIFE_BREATH_STRENGTH;
+        this.breathWave = wave * 0.5 + 0.5;
+        const swell = 1 + wave * 0.016 * (0.6 + palette.energy * 0.7);
+        this.group.scale.set(
+          this.baseScale.x * swell,
+          this.baseScale.y * (2 - swell),
+          this.baseScale.z * swell,
+        );
+        this.innerCore.scale.setScalar(1 + this.breathWave * 0.05 * afterlife.breathAmp);
+        this._tmpColor.setHSL(
+          palette.hue,
+          Math.min(0.9, palette.saturation * 1.15 * afterlife.saturationMul),
+          Math.min(0.6, palette.lightness),
+        );
+        this.coreMaterial.color.copy(this.completionStartColor).lerp(this._tmpColor, ease);
+        this.coreMaterial.emissive.copy(palette.emissiveColor);
+        this.coreMaterial.emissiveIntensity =
+          palette.emissiveStrength * (0.22 + this.breathWave * 0.35) * afterlife.emissiveMul;
+        this.surfaceMaterial.uniforms.uBreath.value = this.breathWave;
+        break;
+      }
+      case "monolith": {
+        const metal = palette.metalness * afterlife.metalnessMul;
+        this._tmpColor.setHSL(
+          palette.hue,
+          palette.saturation * (0.22 + metal * 0.4) * afterlife.saturationMul,
+          0.62 - metal * 0.47,
+        );
+        this.coreMaterial.color.copy(this.completionStartColor).lerp(this._tmpColor, ease);
+        this._tmpColor.multiplyScalar(0.72);
+        this.innerCoreMaterial.color
+          .copy(this.completionStartInnerColor)
+          .lerp(this._tmpColor, ease);
+        this.coreMaterial.roughness =
+          this.completionStartRoughness +
+          (0.42 * afterlife.roughnessMul - metal * 0.16 - this.completionStartRoughness) * ease;
+        this.coreMaterial.metalness = metal * ease;
+        this.coreMaterial.clearcoat = (0.3 + (1 - metal) * 0.3) * afterlife.clearcoatMul * ease;
+        this.coreMaterial.emissiveIntensity *= Math.max(0, 1 - deltaTime * 2);
+        break;
+      }
+    }
   }
 
   /** 完了時: LIVE で見えていた変位を永久形状に焼き込む */
@@ -2177,6 +2446,11 @@ class SoundSculpture {
     this.completed = false;
     this.frozenTime = 0;
     this.completeFadeOut = 1;
+    this.completionProgress = 0;
+    this.completionPalette = null;
+    this.completionSpecies = null;
+    this.breathTime = 0;
+    this.breathWave = 0;
     this.currentStructure = defaultStructureSnapshot();
     this.speciesProfile = { ...DEFAULT_SPECIES_PROFILE };
     this.lastNoveltySpawn = 0;
@@ -2191,6 +2465,14 @@ class SoundSculpture {
     this.formBendZ = 0;
     this.formAsymmetry = 0;
     this.formBaseWeight = 0;
+    this.formDevelopment = 0;
+    this.idleWobbleAmp = 0;
+    this.idlePokeImpulse = 0;
+    this.audioColorBlend = 0;
+    this.idleWobbleField.fill(0);
+    this.idleWobbleVector.fill(0);
+    resetClickRepulsionState(this.clickRepulsion);
+    resetClickRepulsionState(this.surfaceClickRepulsion);
     this.waistCenterAlong = 0;
     this.particleCursor = 0;
     this.particleEmission = 0;
@@ -2243,11 +2525,13 @@ class SoundSculpture {
     this.detachmentDustSparkVelocities.fill(0);
     this.detachmentDustSparkCursor = 0;
 
+    this.group.quaternion.identity();
     this.group.rotation.set(0, 0, 0);
     this.group.scale.copy(this.baseScale);
     this.innerCore.scale.setScalar(1);
 
     this.initMorphology();
+    this.initCrystalAxes();
 
     const corePos = this.geometry.attributes.position.array as Float32Array;
     corePos.set(this.basePositions);
@@ -2259,10 +2543,17 @@ class SoundSculpture {
     this.surfaceGeometry.attributes.position.needsUpdate = true;
     this.surfaceGeometry.computeVertexNormals();
 
-    this.coreMaterial.color.set(CLAY_CORE_COLOR);
-    this.coreMaterial.roughness = 0.94;
+    const styleCore = this.style.core;
+    this.coreMaterial.color.set(styleCore.pearlVariation > 0 ? 0xffffff : styleCore.color);
+    this.coreMaterial.roughness = styleCore.roughness;
+    this.coreMaterial.metalness = 0;
+    this.coreMaterial.clearcoat = styleCore.clearcoat;
     this.coreMaterial.emissive.set(0x000000);
     this.coreMaterial.emissiveIntensity = 0;
+    this.innerCoreMaterial.color.set(styleCore.pearlVariation > 0 ? 0xb8c8dc : styleCore.innerColor);
+    this.innerCoreMaterial.roughness = Math.min(1, styleCore.roughness + 0.03);
+    this.innerCoreMaterial.emissive.set(0x000000);
+    this.innerCoreMaterial.emissiveIntensity = 0;
 
     const uniforms = this.surfaceMaterial.uniforms;
     uniforms.uCompleted.value = 0;
@@ -2270,9 +2561,12 @@ class SoundSculpture {
     uniforms.uMelody.value = 0;
     uniforms.uGlow.value = 0;
     uniforms.uOpacity.value = 0.22;
+    uniforms.uPetrify.value = 0;
+    uniforms.uBreath.value = 0;
 
-    if (this.granular) {
-      this.syncGrainMassFromCore();
+    if (styleCore.pearlVariation > 0) {
+      this.bakeCorePearlColors(styleCore.pearlVariation);
+      this.initVitaMembranePalette();
     }
   }
 
@@ -2406,7 +2700,7 @@ class SoundSculpture {
       const py = positions[idx + 1];
       const pz = positions[idx + 2];
 
-      curlNoiseSample(px * curlScale, py * curlScale, pz * curlScale, this.morphologySeed + drift, this._curlOut);
+      growthFlow(px * curlScale, py * curlScale, pz * curlScale, this.morphologySeed + drift, this._curlOut);
       const vx = (velocities[idx] + this._curlOut.x * curlStrength) * damping;
       const vy = (velocities[idx + 1] + this._curlOut.y * curlStrength) * damping;
       const vz = (velocities[idx + 2] + this._curlOut.z * curlStrength) * damping;
@@ -2462,8 +2756,9 @@ class SoundSculpture {
         color: this.coreMaterial.color.clone(),
         emissive: this.coreMaterial.emissive.clone(),
         emissiveIntensity: this.coreMaterial.emissiveIntensity,
-        roughness: 0.86,
-        metalness: 0.02,
+        roughness: this.coreMaterial.roughness,
+        metalness: this.coreMaterial.metalness,
+        vertexColors: this.coreMaterial.vertexColors,
       }),
     );
     core.name = "Sculpture core";
@@ -2482,44 +2777,25 @@ class SoundSculpture {
     innerCore.scale.setScalar(0.92);
     innerCore.name = "Inner mass";
 
-    const surface = new THREE.Mesh(
-      this.surfaceGeometry.clone(),
-      new THREE.MeshStandardMaterial({
-        name: "Frozen digital surface",
-        color: 0x92b8e8,
-        emissive: 0x1e5eff,
-        emissiveIntensity: 0.12,
-        roughness: 0.34,
-        metalness: 0.04,
-        transparent: true,
-        opacity: 0.32,
-      }),
-    );
-    surface.name = "Digital surface";
+    exportGroup.add(core, innerCore);
 
-    if (this.granular && this.grainMassGeometry && this.grainMassMaterial) {
-      const grainGeometry = this.grainMassGeometry.clone();
-      grainGeometry.setAttribute(
-        "position",
-        new THREE.BufferAttribute((this.grainMassPositions ?? this.geometry.attributes.position.array).slice(), 3),
-      );
-      if (this.grainMassColors) {
-        grainGeometry.setAttribute("color", new THREE.BufferAttribute(this.grainMassColors.slice(), 3));
-      }
-      const grains = new THREE.Points(
-        grainGeometry,
-        new THREE.PointsMaterial({
-          name: "Grain mass",
-          size: this.grainMassMaterial.size,
-          vertexColors: true,
+    if (this.surface.visible) {
+      const palette = this.completionPalette ?? NEUTRAL_SCULPTURE_PALETTE;
+      const surface = new THREE.Mesh(
+        this.surfaceGeometry.clone(),
+        new THREE.MeshStandardMaterial({
+          name: "Frozen digital surface",
+          color: palette.baseColor.clone(),
+          emissive: palette.emissiveColor.clone(),
+          emissiveIntensity: 0.12,
+          roughness: 0.34,
+          metalness: 0.04,
           transparent: true,
-          opacity: this.grainMassMaterial.opacity,
+          opacity: 0.32,
         }),
       );
-      grains.name = "Sculpture core (grains)";
-      exportGroup.add(grains, surface);
-    } else {
-      exportGroup.add(core, innerCore, surface);
+      surface.name = "Digital surface";
+      exportGroup.add(surface);
     }
 
     const particleCount = this.particleActive.reduce((count, isActive) => count + isActive, 0);
@@ -2568,32 +2844,63 @@ class SoundSculpture {
 
   private updateCoreMaterial(bands: AudioBands, deltaTime: number) {
     const t = runtimeTuning;
-    const shift = t.coreColorShift;
+    const st = this.style.core;
+    const shift = t.coreColorShift * st.shiftScale;
+    const audioBlend = st.pearlVariation > 0 ? this.audioColorBlend : 1;
+    // vita: 無音時も色相がゆっくり漂い、生きている印象を保つ
+    const idleHueDrift =
+      this.style.idleWobble > 0
+        ? Math.sin(this.idleTime * 0.21) * 0.03 + Math.sin(this.idleTime * 0.047 + 1.7) * 0.02
+        : 0;
     const hue =
-      0.09 + bands.mid * 0.08 * shift + bands.melody * t.coreColorShift + bands.brightness * 0.48 * shift;
-    const saturation = 0.18 + bands.contrast * 0.34 * shift + bands.high * 0.16 * shift;
-    const lightness = 0.78 + bands.brightness * 0.1 * shift;
+      st.hueBase +
+      idleHueDrift +
+      bands.mid * 0.08 * shift * audioBlend +
+      bands.melody * t.coreColorShift * st.shiftScale * audioBlend +
+      bands.brightness * 0.48 * shift * audioBlend;
+    const saturation =
+      st.hslSatBase + (bands.contrast * 0.34 + bands.high * 0.16) * shift * audioBlend;
+    const lightness = st.hslLightBase + bands.brightness * 0.1 * shift * audioBlend;
 
     this.targetCoreColor.setHSL(hue, saturation, lightness);
-    this.targetCoreEmissive.setHSL(0.56 + bands.brightness * 0.08 * shift, 0.72, 0.18);
+    this.targetCoreEmissive.setHSL(0.56 + bands.brightness * 0.08 * shift * audioBlend, 0.72, 0.18);
 
-    const colorLerp = Math.min(1, deltaTime * (1.8 + bands.overall * 5));
-    this.coreMaterial.color.lerp(this.targetCoreColor, colorLerp);
-    this.coreMaterial.emissive.lerp(this.targetCoreEmissive, colorLerp);
+    const colorLerp = Math.min(1, deltaTime * (1.2 + bands.overall * 2.8 * audioBlend));
+    if (st.pearlVariation <= 0) {
+      this.coreMaterial.color.lerp(this.targetCoreColor, colorLerp);
+    } else {
+      this.coreMaterial.color.set(0xffffff);
+    }
+    this.coreMaterial.emissive.lerp(this.targetCoreEmissive, colorLerp * audioBlend);
     const sp = this.getSpecies();
+    // vita: 無音時も鼓動のように微かに発光する
+    const idleGlow =
+      this.style.idleWobble * (0.07 + (Math.sin(this.idleTime * 0.55) * 0.5 + 0.5) * 0.08);
     const targetEmissive =
       (bands.overall * fibUnit(5, 21) + bands.brightness * fibUnit(3, 21) + bands.contrast * t.coreEmissive * fibUnit(3, 21)) *
-      (t.coreEmissive / fibUnit(3, 21)) *
-      (fibUnit(5, 8) + sp.aggressive * fibUnit(8, 13));
+        (t.coreEmissive / fibUnit(3, 21)) *
+        (fibUnit(5, 8) + sp.aggressive * fibUnit(8, 13)) *
+        st.emissiveScale *
+        audioBlend +
+      idleGlow;
+    const emissiveLerp = Math.min(1, deltaTime * (1.4 + bands.overall * 2.2 * audioBlend));
     this.coreMaterial.emissiveIntensity +=
-      (targetEmissive - this.coreMaterial.emissiveIntensity) * Math.min(1, deltaTime * fib(3));
+      (targetEmissive - this.coreMaterial.emissiveIntensity) * emissiveLerp;
     const baseRoughness =
       fibRatio(11, 12) +
       fibUnit(5, 21) -
       bands.brightness * fibUnit(5, 21) * shift -
       bands.high * fibUnit(3, 21) * shift;
-    this.coreMaterial.roughness =
-      baseRoughness + sp.aggressive * fibUnit(5, 21) - sp.organic * fibUnit(5, 21);
+    this.coreMaterial.roughness = Math.min(
+      1,
+      Math.max(
+        0.1,
+        baseRoughness +
+          (st.roughness - 0.94) +
+          sp.aggressive * fibUnit(5, 21) -
+          sp.organic * fibUnit(5, 21),
+      ),
+    );
   }
 
   private getBandLiveWeights(bands: AudioBands): BandLiveWeights {
@@ -2603,23 +2910,41 @@ class SoundSculpture {
   private getMembraneLiveTarget(bands: AudioBands) {
     const t = runtimeTuning;
     const w = this.getBandLiveWeights(bands);
+    const audioPart = this.style.core.pearlVariation > 0 ? this.audioColorBlend : 1;
     if (this.completed) {
-      return 0;
+      // vita は完成後も記憶した鼓動で膜が生き続ける
+      if (this.style.completion.mode === "breathe") {
+        const interaction = this.hasActiveClickWobble() ? this.idleWobbleAmp : 0;
+        return 0.45 + this.breathWave * 0.6 + interaction * 5;
+      }
+      return this.hasActiveClickWobble() ? this.idleWobbleAmp * 5 : 0;
     }
     return (
-      w.high * t.liveHigh * fibRatio(8, 5) +
-      this.getSpecies().membraneGain * fibUnit(5, 13) +
-      (this.hatImpulse * fibUnit(8, 13) + this.waveImpulse * fibUnit(5, 13)) * t.liveHigh
+      w.high * t.liveHigh * fibRatio(8, 5) * audioPart +
+      this.getSpecies().membraneGain * fibUnit(5, 13) * audioPart +
+      (this.hatImpulse * fibUnit(8, 13) + this.waveImpulse * fibUnit(5, 13)) * t.liveHigh +
+      // アイドル時も膜が微かに生きて見えるように（vita）
+      this.idleWobbleAmp * 5
     );
   }
 
   private getMembraneGlowTarget(bands: AudioBands) {
     const t = runtimeTuning;
+    const audioPart = this.style.core.pearlVariation > 0 ? this.audioColorBlend : 1;
+    if (this.completed && this.style.completion.mode === "breathe") {
+      const interaction = this.hasActiveClickWobble() ? this.idleWobbleAmp : 0;
+      return 0.4 + this.breathWave * 0.45 + interaction * (3.2 + Math.sin(this.idleTime * 0.55) * 1.2);
+    }
+    if (this.completed) {
+      const interaction = this.hasActiveClickWobble() ? this.idleWobbleAmp : 0;
+      return 0.35 + interaction * (3.2 + Math.sin(this.idleTime * 0.55) * 1.2);
+    }
     return (
       (this.completed ? 0.35 : 0.2) +
-      bands.overall * t.liveHigh * 1.1 +
-      this.separationTendency * 0.25 +
-      (this.hatImpulse * 0.5 + this.waveImpulse * 0.28) * t.liveHigh
+      bands.overall * t.liveHigh * 1.1 * audioPart +
+      this.separationTendency * 0.25 * audioPart +
+      (this.hatImpulse * 0.5 + this.waveImpulse * 0.28) * t.liveHigh +
+      this.idleWobbleAmp * (3.2 + Math.sin(this.idleTime * 0.55) * 1.2)
     );
   }
 
@@ -2628,13 +2953,18 @@ class SoundSculpture {
     if (!bands) {
       return;
     }
+    if (this.completed) {
+      // 完成後のマテリアルは afterlife（石化・呼吸・素材化）が管理する
+      return;
+    }
 
     const t = runtimeTuning;
-    const shift = t.coreColorShift;
+    const st = this.style.core;
+    const shift = t.coreColorShift * st.shiftScale;
     const hue =
-      0.09 + bands.mid * 0.08 * shift + bands.melody * t.coreColorShift + bands.brightness * 0.48 * shift;
-    const saturation = 0.18 + bands.contrast * 0.34 * shift + bands.high * 0.16 * shift;
-    const lightness = 0.78 + bands.brightness * 0.1 * shift;
+      st.hueBase + bands.mid * 0.08 * shift + bands.melody * t.coreColorShift * st.shiftScale + bands.brightness * 0.48 * shift;
+    const saturation = st.hslSatBase + bands.contrast * 0.34 * shift + bands.high * 0.16 * shift;
+    const lightness = st.hslLightBase + bands.brightness * 0.1 * shift;
 
     this.targetCoreColor.setHSL(hue, saturation, lightness);
     this.targetCoreEmissive.setHSL(0.56 + bands.brightness * 0.08 * shift, 0.72, 0.18);
@@ -2643,7 +2973,10 @@ class SoundSculpture {
     this.coreMaterial.emissiveIntensity =
       (bands.overall * 0.22 + bands.brightness * 0.12 + bands.contrast * t.coreEmissive * 0.1) *
       (t.coreEmissive / 0.1);
-    this.coreMaterial.roughness = 0.86 - bands.brightness * 0.18 * shift - bands.high * 0.08 * shift;
+    this.coreMaterial.roughness = Math.min(
+      1,
+      Math.max(0.1, 0.86 + (st.roughness - 0.94) - bands.brightness * 0.18 * shift - bands.high * 0.08 * shift),
+    );
 
     const uniforms = this.surfaceMaterial.uniforms;
     uniforms.uMelodyLine.value = t.membraneLine;
@@ -2742,6 +3075,19 @@ class SoundSculpture {
             runtimeTuning.formAsymmetryAccumRate,
       ),
     );
+
+    // 発達度: 音で蓄積された変形量の総和。coral の定常ノイズ等をこれでゲートし、
+    // 音が入る前・形成初期のシルエットを正円に保つ。
+    this.formDevelopment = clamp01(
+      (this.formStretch +
+        this.formWaist +
+        this.formTwist +
+        this.formBaseWeight +
+        Math.abs(this.formBendX) +
+        Math.abs(this.formBendZ) +
+        Math.abs(this.formAsymmetry)) *
+        2.4,
+    );
   }
 
   /**
@@ -2815,8 +3161,11 @@ class SoundSculpture {
     sy *= blendScale(spindleAlong * spindlePerp - 1, w.spindle);
     sz *= blendScale(spindleAlong * spindlePerp - 1, w.spindle);
 
-    // coral: 3D ノイズで塊のクラスタ (垂直対称を壊す)
-    const coralNoise = vertexPattern(px * 1.15, py * 1.08, pz * 1.12, this.morphologySeed + this.formingTime * 0.16);
+    // coral: 3D ノイズで塊のクラスタ (垂直対称を壊す)。
+    // formDevelopment でゲートし、未形成時は真球を崩さない
+    const coralNoise =
+      growthPattern(px * 1.15, py * 1.08, pz * 1.12, this.morphologySeed + this.formingTime * 0.16) *
+      this.formDevelopment;
     const coralBump = 1 + coralNoise * 0.14 * (0.45 + this.formTwist * 0.08);
     sx *= blendScale(coralBump - 1, w.coral);
     sy *= blendScale(coralBump - 1, w.coral);
@@ -2845,7 +3194,7 @@ class SoundSculpture {
     const warpedY = sy;
     const warpedZ = sx * sinTwist + sz * cosTwist;
     // 序盤は大域モーフを掛けず、完全な球体の粘土塊として見せる
-    const formMix = 1;
+    const formMix = smoothstep(0, 1, this.formDevelopment);
     return {
       x: px + (warpedX - px) * formMix,
       y: py + (warpedY - py) * formMix,
@@ -2924,10 +3273,10 @@ class SoundSculpture {
         smoothstep(-0.42, 0.24, along) *
         smoothstep(0.56, 0.18, along);
       const audioSalt = this.spectralPhase * 1.7 + this.carvingPhase * 0.9 + bands.centroid * 11.0 + bands.contrast * 7.0;
-      const largeForm = vertexPattern(nx, ny, nz, audioSalt);
-      const surfaceGrain = vertexPattern(nx, ny, nz, audioSalt + 6.3);
-      const chiselNoise = vertexPattern(nx, ny, nz, audioSalt + 13.7);
-      const spikeNoise = vertexPattern(nx, ny, nz, audioSalt + 28.9);
+      const largeForm = growthPattern(nx, ny, nz, audioSalt);
+      const surfaceGrain = growthPattern(nx, ny, nz, audioSalt + 6.3);
+      const chiselNoise = growthPattern(nx, ny, nz, audioSalt + 13.7);
+      const spikeNoise = growthPattern(nx, ny, nz, audioSalt + 28.9);
       const torusRing =
         (1 - smoothstep(0, 0.44, Math.abs(along))) * perp * (0.82 + bands.overall * 0.55);
       const monolithCap = smoothstep(0.18, 0.88, along) * axisFocusA * (0.95 + bands.overall * 0.5);
@@ -2973,7 +3322,8 @@ class SoundSculpture {
       const spikeMask = smoothstep(0.62, 0.96, spikeNoise * 0.58 + axisFocusA * 0.42 + bands.brightness * 0.24);
       const spikePressure =
         Math.pow(spikeMask, 2.7) *
-        (0.26 + bands.contrast * 0.22 + bands.overall * 0.2);
+        (0.26 + bands.contrast * 0.22 + bands.overall * 0.2) *
+        (0.55 + growthSpikeMask(nx, ny, nz, audioSalt) * 0.65);
       this.accumulated[i] = this.accumulateWithMemory(
         this.accumulated[i],
         lowAmount * roundedPressure,
@@ -3086,12 +3436,12 @@ class SoundSculpture {
   private makeAnchor(kind: GrowthAnchorKind, bands: AudioBands): GrowthAnchor {
     const s = this.currentStructure;
     const seed = this.morphologySeed + latestRhythm.beatIndex * 0.17 + this.growthAnchors.length * 3.1;
-    const u = seededUnit(this.growthAnchors.length, seed);
-    const v = seededUnit(this.growthAnchors.length + 1, seed + 4.2);
-    const theta = u * Math.PI * 2;
-    const phi = Math.acos(Math.max(-1, Math.min(1, 1 - 2 * v)));
-    const sinPhi = Math.sin(phi);
-    const randomDir = new THREE.Vector3(sinPhi * Math.cos(theta), Math.cos(phi), sinPhi * Math.sin(theta));
+    const placed = growthPlaceOnSphere(
+      this.growthAnchors.length,
+      SoundSculpture.maxGrowthAnchors,
+      seed,
+    );
+    const randomDir = new THREE.Vector3(placed.x, placed.y, placed.z);
     const axisBlend = 0.35 + s.density * 0.25;
     const position = randomDir.lerp(this.morphAxis, axisBlend).normalize();
 
@@ -3310,7 +3660,7 @@ class SoundSculpture {
       const ny = by / r;
       const nz = bz / r;
 
-      curlNoiseSample(bx * 1.35, by * 1.35, bz * 1.35, salt, this._curlOut);
+      growthFlow(bx * 1.35, by * 1.35, bz * 1.35, salt, this._curlOut);
       // 法線方向成分を抜いて純粋な tangent flow にする。
       const dot = this._curlOut.x * nx + this._curlOut.y * ny + this._curlOut.z * nz;
       const tx = this._curlOut.x - nx * dot;
@@ -3364,7 +3714,7 @@ class SoundSculpture {
       const nz = z / radius;
       const highDrive = w.high * t.liveHigh + this.hatImpulse * 0.42;
       const highBleed =
-        highDrive * rate * bleedRate * vertexPattern(nx, ny, nz, this.formingTime * 2.1 + i * 0.03);
+        highDrive * rate * bleedRate * growthPattern(nx, ny, nz, this.formingTime * 2.1 + i * 0.03);
       if (highBleed > 0.00001) {
         this.highSpikes[i] = Math.min(t.spikeCap, this.highSpikes[i] + highBleed);
       }
@@ -3441,8 +3791,8 @@ class SoundSculpture {
       const ny = by / r;
       const nz = bz / r;
 
-      const grain = vertexPattern(nx, ny, nz, salt);
-      const streak = vertexPattern(nx * 1.7, ny * 1.7, nz * 1.7, salt + 4.7);
+      const grain = growthPattern(nx, ny, nz, salt);
+      const streak = growthPattern(nx * 1.7, ny * 1.7, nz * 1.7, salt + 4.7);
       const mask = smoothstep(0.1, 0.92, -grain + streak * 0.55 + bands.contrast * 0.35);
 
       const hardness = 0.55;
@@ -3479,7 +3829,7 @@ class SoundSculpture {
       const ny = y / radius;
       const nz = z / radius;
       const pulse =
-        this.completed ? 0 : vertexPattern(nx, ny, nz, this.formingTime * 1.6) * (
+        this.completed ? 0 : growthPattern(nx, ny, nz, this.formingTime * 1.6) * (
           (this.kickImpulse * 0.42 + latestRhythm.pulseEnvelope * latestRhythm.pulseConfidence * 0.38) * t.liveLow
         );
 
@@ -3518,10 +3868,10 @@ class SoundSculpture {
     this.constrainEnvelope(
       positions as Float32Array,
       this.targetCoreMeanRadius,
-      1.12 + this.getFormationScale() * 0.22,
+      1.012 + this.formDevelopment * 0.11 + this.getFormationScale() * 0.2,
     );
 
-    if (!this.completed) {
+    if (!this.completed || this.hasActiveClickWobble()) {
       for (let i = 0; i < this.accumulated.length; i += 1) {
         const index = i * 3;
         const x = this.basePositions[index];
@@ -3531,12 +3881,17 @@ class SoundSculpture {
         const nx = x / radius;
         const ny = y / radius;
         const nz = z / radius;
-        const live = this.liveOffset[i] * (1 - this.detachmentCarve[i] * 0.88);
-        positions[index] += nx * live;
-        positions[index + 1] += ny * live;
-        positions[index + 2] += nz * live;
+        const live =
+          (this.completed
+            ? 0
+            : this.liveOffset[i] * (1 - this.detachmentCarve[i] * 0.88)) + this.idleWobbleField[i];
+        positions[index] += nx * live + this.idleWobbleVector[index];
+        positions[index + 1] += ny * live + this.idleWobbleVector[index + 1];
+        positions[index + 2] += nz * live + this.idleWobbleVector[index + 2];
       }
     }
+
+    applyClickRepulsionToPositions(this.clickRepulsion, this.basePositions, positions as Float32Array);
 
     this.geometry.attributes.position.needsUpdate = true;
     this.geometry.computeVertexNormals();
@@ -3560,8 +3915,8 @@ class SoundSculpture {
       const nx = x / radius;
       const ny = y / radius;
       const nz = z / radius;
-      const flow = vertexPattern(nx, ny, nz, this.formingTime * 2.8);
-      const ripple = vertexPattern(nx, ny, nz, this.formingTime * 3.6 + this.carvingPhase * 0.7);
+      const flow = growthPattern(nx, ny, nz, this.formingTime * 2.8);
+      const ripple = growthPattern(nx, ny, nz, this.formingTime * 3.6 + this.carvingPhase * 0.7);
       const surfacePattern = flow * 0.22 + ripple * 0.09;
       const targetSurfaceLive = midDrive * surfacePattern;
       this.surfaceLiveOffset[i] +=
@@ -3580,7 +3935,7 @@ class SoundSculpture {
 
     this.constrainEnvelope(positions as Float32Array, this.targetSurfaceMeanRadius, 1.32);
 
-    if (!this.completed) {
+    if (!this.completed || this.hasActiveClickWobble()) {
       for (let i = 0; i < this.accumulated.length; i += 1) {
         const index = i * 3;
         const x = this.baseSurfacePositions[index];
@@ -3590,15 +3945,26 @@ class SoundSculpture {
         const nx = x / radius;
         const ny = y / radius;
         const nz = z / radius;
-        const live = this.surfaceLiveOffset[i];
-        positions[index] += nx * live;
-        positions[index + 1] += ny * live;
-        positions[index + 2] += nz * live;
+        // 膜はコアより僅かに大きくホヨホヨさせて「柔らかい外皮」を演出
+        const live =
+          (this.completed ? 0 : this.surfaceLiveOffset[i]) + this.idleWobbleField[i] * 1.18;
+        positions[index] += nx * live + this.idleWobbleVector[index] * 1.05;
+        positions[index + 1] += ny * live + this.idleWobbleVector[index + 1] * 1.05;
+        positions[index + 2] += nz * live + this.idleWobbleVector[index + 2] * 1.05;
       }
     }
 
+    applyClickRepulsionToPositions(
+      this.surfaceClickRepulsion,
+      this.baseSurfacePositions,
+      positions as Float32Array,
+    );
+
     const uniforms = this.surfaceMaterial.uniforms;
-    uniforms.uTime.value = this.completed ? this.frozenTime : this.formingTime;
+    // vita は無音時も膜の模様がゆっくり流れ続ける（idleTime は常に進む）
+    uniforms.uTime.value = this.completed
+      ? this.frozenTime
+      : this.formingTime + (this.style.idleWobble > 0 ? this.idleTime * 0.3 : 0);
     uniforms.uMelodyLine.value = t.membraneLine;
     uniforms.uMelodyFresnel.value = t.membraneFresnel;
     uniforms.uMelodyNoise.value = t.membraneNoise;
@@ -3612,12 +3978,26 @@ class SoundSculpture {
     uniforms.uGlow.value += (targetGlow - uniforms.uGlow.value) * Math.min(1, deltaTime * 5);
     // 外殻の透明感を抑えて「中身が詰まっている」印象に寄せる
     const sp = this.getSpecies();
+    const stMembrane = this.style.membrane;
     const membraneOpacity =
       this.completed
-        ? fibUnit(2, 21)
-        : fibUnit(5, 21) + sp.membraneGain * fibUnit(8, 21) - sp.aggressive * fibUnit(5, 21);
+        ? stMembrane.completedOpacity
+        : (fibUnit(5, 21) + sp.membraneGain * fibUnit(8, 21) - sp.aggressive * fibUnit(5, 21)) *
+          stMembrane.opacityScale;
     uniforms.uOpacity.value += (membraneOpacity - uniforms.uOpacity.value) * Math.min(1, deltaTime * fib(3));
-    uniforms.uCompleted.value += ((this.completed ? 1 : 0) - uniforms.uCompleted.value) * Math.min(1, deltaTime * 2);
+    const freezeTarget = this.completed ? stMembrane.freezeTarget : 0;
+    uniforms.uCompleted.value += (freezeTarget - uniforms.uCompleted.value) * Math.min(1, deltaTime * 2);
+
+    if (this.style.membrane.vita && !this.completed) {
+      const drift = growthPattern(0.24, 0.41, 0.18, this.idleTime * 0.06 + this.morphologySeed);
+      const drift2 = growthPattern(-0.18, 0.52, 0.33, this.idleTime * 0.04 + this.morphologySeed + 7.2);
+      const hue = (((0.5 + drift * 0.14 + drift2 * 0.06) % 1) + 1) % 1;
+      const targetBase = this._tmpColor.setHSL(hue, 0.4 + drift2 * 0.12, 0.52);
+      const targetAccent = new THREE.Color().setHSL(((hue + 0.1) % 1 + 1) % 1, 0.5, 0.6);
+      const paletteLerp = Math.min(1, deltaTime * (0.12 + this.audioColorBlend * 0.28));
+      (uniforms.uPaletteColor.value as THREE.Color).lerp(targetBase, paletteLerp);
+      (uniforms.uPaletteAccent.value as THREE.Color).lerp(targetAccent, paletteLerp);
+    }
 
     this.surfaceGeometry.attributes.position.needsUpdate = true;
     this.surfaceGeometry.computeVertexNormals();
@@ -3771,7 +4151,7 @@ class SoundSculpture {
       const nx = this.glowDustBaseDirs[idx];
       const ny = this.glowDustBaseDirs[idx + 1];
       const nz = this.glowDustBaseDirs[idx + 2];
-      const wobble = vertexPattern(nx, ny, nz, this.morphologySeed + i * 0.13 + drift) * 0.14;
+      const wobble = growthPattern(nx, ny, nz, this.morphologySeed + i * 0.13 + drift) * 0.14;
       const radius = shellPulse + wobble + seededUnit(i, drift) * 0.08;
       this.glowDustPositions[idx] = nx * radius;
       this.glowDustPositions[idx + 1] = ny * radius;
@@ -3783,7 +4163,11 @@ class SoundSculpture {
       this.glowDustColors[idx + 2] = 1.0 * glow;
     }
 
-    const targetOpacity = this.completed ? 0.12 : 0.42 + bands.high * 0.35 + bands.melody * 0.28 + bands.mid * 0.1;
+    const targetOpacity = this.completed
+      ? this.style.completion.mode === "breathe"
+        ? 0.24 + this.breathWave * 0.12
+        : 0.12
+      : 0.42 + bands.high * 0.35 + bands.melody * 0.28 + bands.mid * 0.1;
     this.glowDustMaterial.opacity +=
       (targetOpacity - this.glowDustMaterial.opacity) * Math.min(1, deltaTime * 4);
     this.glowDustMaterial.size = 0.014 + bands.high * 0.008 + this.hatImpulse * 0.012 + this.waveImpulse * 0.01;
@@ -3968,6 +4352,86 @@ class SoundSculpture {
   }
 }
 
+/**
+ * 背景に奥行きを与えるグラデーションドーム。
+ * 単色背景の代わりに、天頂→地平の緩いグラデーションと
+ * 「被写体の背後」に常に位置する淡いハロー（光だまり）で空間の深さを作る。
+ * 色はスタイルの背景色から毎フレーム導出されるため、完成時のクロスフェードにも追従する。
+ */
+class BackgroundDome {
+  readonly mesh: THREE.Mesh;
+  private readonly material: THREE.ShaderMaterial;
+  private readonly _hsl = { h: 0, s: 0, l: 0 };
+
+  constructor() {
+    this.material = new THREE.ShaderMaterial({
+      uniforms: {
+        uTop: { value: new THREE.Color() },
+        uBottom: { value: new THREE.Color() },
+        uHalo: { value: new THREE.Color() },
+        uHaloStrength: { value: 0.55 },
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vDir;
+        void main() {
+          vDir = normalize(position);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform vec3 uTop;
+        uniform vec3 uBottom;
+        uniform vec3 uHalo;
+        uniform float uHaloStrength;
+        varying vec3 vDir;
+
+        void main() {
+          vec3 dir = normalize(vDir);
+          float h = dir.y * 0.5 + 0.5;
+          vec3 col = mix(uBottom, uTop, smoothstep(0.06, 0.94, h));
+          // 地平付近を落として奥行きの階層を出す
+          float horizon = smoothstep(0.02, 0.38, h);
+          col *= mix(0.62, 1.0, horizon);
+          // 微細な深度バンド（空間の層を感じさせる）
+          float depthBands = sin(dir.x * 18.0 + dir.z * 14.0) * 0.012 + sin(dir.y * 22.0) * 0.008;
+          col *= 1.0 - depthBands;
+          vec3 behind = normalize(-cameraPosition);
+          float halo = smoothstep(0.55, 0.985, dot(dir, behind));
+          col = mix(col, uHalo, halo * halo * uHaloStrength);
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `,
+      side: THREE.BackSide,
+      depthWrite: false,
+    });
+    this.mesh = new THREE.Mesh(new THREE.SphereGeometry(46, 48, 32), this.material);
+    this.mesh.renderOrder = -20;
+    this.mesh.frustumCulled = false;
+  }
+
+  /** 基準の背景色から天頂・地平・ハローの各色を導出する。 */
+  setFromBackground(base: THREE.Color, dark: boolean) {
+    base.getHSL(this._hsl);
+    const { h, s, l } = this._hsl;
+    const top = this.material.uniforms.uTop.value as THREE.Color;
+    const bottom = this.material.uniforms.uBottom.value as THREE.Color;
+    const halo = this.material.uniforms.uHalo.value as THREE.Color;
+    if (dark) {
+      // 暗テーマ: 地平をさらに沈め、深海の遠さを出す。ハローは冷たい微光
+      top.setHSL(h, Math.min(1, s * 1.15 + 0.02), Math.min(1, l * 1.9 + 0.015));
+      bottom.setHSL(h, s, Math.max(0, l * 0.45));
+      halo.setHSL(h, Math.min(1, s * 0.8 + 0.1), Math.min(0.32, l * 2.6 + 0.05));
+      this.material.uniforms.uHaloStrength.value = 0.7;
+    } else {
+      // 明テーマ: 上は僅かに明るく、下は落として床の気配を出す
+      top.setHSL(h, s, Math.min(1, l + 0.025));
+      bottom.setHSL(h, Math.min(1, s + 0.03), Math.max(0, l - 0.085));
+      halo.setHSL(h, Math.max(0, s - 0.02), Math.min(1, l + 0.035));
+      this.material.uniforms.uHaloStrength.value = 0.9;
+    }
+  }
+}
+
 class StarField {
   readonly points: THREE.Points;
   private readonly positions: Float32Array;
@@ -3978,8 +4442,23 @@ class StarField {
   private readonly driftDir: Float32Array;
   private readonly geometry: THREE.BufferGeometry;
   private readonly material: THREE.PointsMaterial;
+  private readonly parallax: number;
 
-  constructor(count = 2400) {
+  constructor(options?: {
+    count?: number;
+    minRadius?: number;
+    maxRadius?: number;
+    size?: number;
+    baseOpacity?: number;
+    parallax?: number;
+  }) {
+    const count = options?.count ?? 2400;
+    const minRadius = options?.minRadius ?? 26;
+    const maxRadius = options?.maxRadius ?? 60;
+    const pointSize = options?.size ?? 0.022;
+    const baseOpacity = options?.baseOpacity ?? 0.9;
+    this.parallax = options?.parallax ?? 1;
+
     this.positions = new Float32Array(count * 3);
     this.colors = new Float32Array(count * 3);
     this.baseColors = new Float32Array(count * 3);
@@ -3989,7 +4468,6 @@ class StarField {
 
     for (let i = 0; i < count; i += 1) {
       const idx = i * 3;
-      // far shell around origin (camera orbits around center)
       const u = Math.random();
       const v = Math.random();
       const theta = u * Math.PI * 2;
@@ -3999,12 +4477,11 @@ class StarField {
       const ny = Math.cos(phi);
       const nz = sinPhi * Math.sin(theta);
 
-      const radius = 26 + Math.random() * 34;
+      const radius = minRadius + Math.random() * (maxRadius - minRadius);
       this.positions[idx] = nx * radius;
-      this.positions[idx + 1] = ny * radius * 0.78; // 少し扁平にして“空”感
+      this.positions[idx + 1] = ny * radius * 0.78;
       this.positions[idx + 2] = nz * radius;
 
-      // slight drift direction (very slow)
       const dx = (Math.random() - 0.5) * 0.5;
       const dy = (Math.random() - 0.5) * 0.35;
       const dz = (Math.random() - 0.5) * 0.5;
@@ -4013,14 +4490,12 @@ class StarField {
       this.driftDir[idx + 1] = dy / len;
       this.driftDir[idx + 2] = dz / len;
 
-      // star color: white〜pale blue, rare warm stars
       const warm = Math.random() < 0.08;
       const tint = 0.6 + Math.random() * 0.4;
       const r = warm ? 0.95 * tint : 0.65 * tint;
       const g = warm ? 0.85 * tint : 0.78 * tint;
       const b = warm ? 1.0 * tint : 1.0 * tint;
 
-      // brightness distribution (many faint, few bright)
       const bright = Math.pow(Math.random(), 3.2);
       const intensity = 0.18 + (1 - bright) * 0.95;
 
@@ -4039,11 +4514,11 @@ class StarField {
     this.geometry.setAttribute("position", new THREE.BufferAttribute(this.positions, 3));
     this.geometry.setAttribute("color", new THREE.BufferAttribute(this.colors, 3));
     this.material = new THREE.PointsMaterial({
-      size: 0.022,
+      size: pointSize,
       sizeAttenuation: true,
       vertexColors: true,
       transparent: true,
-      opacity: 0.9,
+      opacity: baseOpacity,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
@@ -4052,16 +4527,14 @@ class StarField {
     this.points.renderOrder = -10;
   }
 
-  update(time: number, bands: AudioBands, deltaTime: number) {
-    // audio reacts only subtly: brighter on hats/highs, slightly steadier on bass
+  update(time: number, bands: AudioBands, deltaTime: number, cameraPosition?: THREE.Vector3) {
     const audioTwinkle = 0.18 + bands.high * 0.35 + bands.brightness * 0.25;
     const calm = 1 - bands.sub * 0.25;
 
-    const drift = deltaTime * 0.05 * (0.35 + audioTwinkle) * calm;
+    const drift = deltaTime * 0.05 * (0.35 + audioTwinkle) * calm * this.parallax;
     const count = this.twinklePhase.length;
     for (let i = 0; i < count; i += 1) {
       const idx = i * 3;
-      // extremely slow drift (keeps “alive” feeling)
       this.positions[idx] += this.driftDir[idx] * drift;
       this.positions[idx + 1] += this.driftDir[idx + 1] * drift;
       this.positions[idx + 2] += this.driftDir[idx + 2] * drift;
@@ -4077,10 +4550,17 @@ class StarField {
       this.colors[idx + 2] = this.baseColors[idx + 2] * tw;
     }
 
+    if (cameraPosition) {
+      this.points.position.set(
+        cameraPosition.x * (1 - this.parallax) * 0.04,
+        cameraPosition.y * (1 - this.parallax) * 0.03,
+        cameraPosition.z * (1 - this.parallax) * 0.04,
+      );
+    }
+
     this.geometry.attributes.position.needsUpdate = true;
     this.geometry.attributes.color.needsUpdate = true;
     this.material.opacity = 0.75 + bands.high * 0.12;
-    this.material.size = 0.02 + bands.high * 0.01;
   }
 }
 
@@ -4109,6 +4589,10 @@ const tuningExportText = document.querySelector<HTMLTextAreaElement>("#tuning-ex
 const copyTuningButton = document.querySelector<HTMLButtonElement>("#copy-tuning");
 const resetTuningButton = document.querySelector<HTMLButtonElement>("#reset-tuning");
 const sculptureModeSelect = document.querySelector<HTMLSelectElement>("#sculpture-mode");
+const visualStyleSelect = document.querySelector<HTMLSelectElement>("#visual-style");
+const visualStyleField = document.querySelector<HTMLElement>("#visual-style-field");
+const growthAlgorithmSelect = document.querySelector<HTMLSelectElement>("#growth-algorithm");
+const growthAlgorithmHint = document.querySelector<HTMLElement>("#growth-algorithm-hint");
 const bandTestPanel = document.querySelector<HTMLDetailsElement>("#band-test-panel");
 const bandSoloSelect = document.querySelector<HTMLSelectElement>("#band-solo-mode");
 const bandToneTestButton = document.querySelector<HTMLButtonElement>("#band-tone-test");
@@ -4137,13 +4621,45 @@ if (
   !tuningExportText ||
   !copyTuningButton ||
   !resetTuningButton ||
-  !sculptureModeSelect
+  !sculptureModeSelect ||
+  !visualStyleSelect ||
+  !visualStyleField ||
+  !growthAlgorithmSelect ||
+  !growthAlgorithmHint
 ) {
   throw new Error("Required DOM elements are missing.");
 }
 
 const sculptureMode = parseSculptureMode();
-const isCarveMode = sculptureMode === "carve";
+const visualStyleId: VisualStyleId = parseVisualStyleId();
+setActiveVisualStyle(visualStyleId);
+const visualStyle = getActiveVisualStyle();
+// ビジュアルスタイルは classic モード専用。他モードは従来の環境を使う
+const styleEnvActive = sculptureMode === "classic";
+const sceneEnv = styleEnvActive ? visualStyle.env : NEUTRAL_ENVIRONMENT;
+let growthAlgorithmId: GrowthAlgorithmId =
+  sculptureMode === "carve" ? "flow-field" : parseGrowthAlgorithmId();
+setGrowthAlgorithmId(growthAlgorithmId);
+
+const populateGrowthAlgorithmSelect = () => {
+  growthAlgorithmSelect.innerHTML = "";
+  for (const entry of GROWTH_ALGORITHM_CATALOG) {
+    const option = document.createElement("option");
+    option.value = entry.id;
+    option.textContent = entry.label;
+    growthAlgorithmSelect.appendChild(option);
+  }
+};
+
+const applyGrowthAlgorithmUi = (id: GrowthAlgorithmId) => {
+  growthAlgorithmSelect.value = id;
+  const meta = getGrowthAlgorithmMeta(id);
+  growthAlgorithmHint.textContent =
+    sculptureMode === "carve" ? `出現パターン — ${meta.tagline}` : meta.tagline;
+};
+
+populateGrowthAlgorithmSelect();
+applyGrowthAlgorithmUi(growthAlgorithmId);
 
 if (import.meta.env.DEV && startDevAudioButton) {
   startDevAudioButton.hidden = false;
@@ -4168,15 +4684,75 @@ const applySculptureModeUi = (mode: SculptureMode) => {
   sculptureModeSelect.value = mode;
   appElement.classList.toggle("mode-carve", mode === "carve");
   appElement.classList.toggle("mode-classic", mode === "classic");
+  appElement.classList.toggle("mode-amoeba", mode === "amoeba");
   if (mode === "carve") {
-    document.title = "Sound Sculpture — 粒";
+    document.title = "Sound Sculpture — 生み出す";
+  } else if (mode === "amoeba") {
+    document.title = "Sound Sculpture — 生命体";
+  } else {
+    document.title = "Sound Sculpture";
   }
 };
 
 applySculptureModeUi(sculptureMode);
+applyGrowthAlgorithmUi(growthAlgorithmId);
+
+const populateVisualStyleSelect = () => {
+  visualStyleSelect.innerHTML = "";
+  for (const style of VISUAL_STYLE_CATALOG) {
+    const option = document.createElement("option");
+    option.value = style.id;
+    option.textContent = style.label;
+    visualStyleSelect.appendChild(option);
+  }
+};
+
+const applyVisualStyleUi = () => {
+  populateVisualStyleSelect();
+  visualStyleSelect.value = visualStyleId;
+  visualStyleField.hidden = !styleEnvActive;
+  appElement.classList.toggle("style-metamorphosis", styleEnvActive && visualStyleId === "metamorphosis");
+  appElement.classList.toggle("style-vita", styleEnvActive && visualStyleId === "vita");
+  appElement.classList.toggle("style-monolith", styleEnvActive && visualStyleId === "monolith");
+  appElement.classList.toggle("theme-dark", styleEnvActive && visualStyle.themeDark);
+  if (styleEnvActive) {
+    const introTitleClassic = document.querySelector<HTMLElement>("#intro-title .intro-copy--classic");
+    const introDescriptionClassic = document.querySelector<HTMLElement>(
+      "#intro-description .intro-copy--classic",
+    );
+    if (introTitleClassic) {
+      introTitleClassic.textContent = visualStyle.introTitle;
+    }
+    if (introDescriptionClassic) {
+      introDescriptionClassic.textContent = visualStyle.introDescription;
+    }
+  }
+};
+
+applyVisualStyleUi();
+
+visualStyleSelect.addEventListener("change", () => {
+  const nextStyle = visualStyleSelect.value as VisualStyleId;
+  if (!VISUAL_STYLE_CATALOG.some((style) => style.id === nextStyle)) {
+    return;
+  }
+  if (nextStyle === visualStyleId) {
+    return;
+  }
+  const url = new URL(window.location.href);
+  if (nextStyle === "metamorphosis") {
+    url.searchParams.delete("style");
+  } else {
+    url.searchParams.set("style", nextStyle);
+  }
+  window.location.href = url.toString();
+});
 
 sculptureModeSelect.addEventListener("change", () => {
-  const nextMode: SculptureMode = sculptureModeSelect.value === "carve" ? "carve" : "classic";
+  const nextMode = sculptureModeSelect.value as SculptureMode;
+  if (nextMode !== "classic" && nextMode !== "carve" && nextMode !== "amoeba") {
+    return;
+  }
   if (nextMode === sculptureMode) {
     return;
   }
@@ -4184,7 +4760,7 @@ sculptureModeSelect.addEventListener("change", () => {
   if (nextMode === "classic") {
     url.searchParams.delete("mode");
   } else {
-    url.searchParams.set("mode", "carve");
+    url.searchParams.set("mode", nextMode);
   }
   window.location.href = url.toString();
 });
@@ -4306,8 +4882,20 @@ restoreControlPanelPosition();
 }
 
 const scene = new THREE.Scene();
-// scene.background = new THREE.Color(0x000000);
-scene.background = new THREE.Color(0xf7f6f2);
+scene.background = new THREE.Color(sceneEnv.background);
+
+const themeDarkActive = styleEnvActive && visualStyle.themeDark;
+
+const syncSceneFog = () => {
+  const bg = scene.background as THREE.Color;
+  scene.fog = new THREE.FogExp2(bg.getHex(), themeDarkActive ? 0.0078 : 0.0058);
+};
+
+// 背景の奥行き: 単色の代わりにグラデーションドーム（色は毎フレーム背景色から導出）
+const backgroundDome = new BackgroundDome();
+backgroundDome.setFromBackground(scene.background as THREE.Color, themeDarkActive);
+scene.add(backgroundDome.mesh);
+syncSceneFog();
 
 const camera = new THREE.PerspectiveCamera(36, window.innerWidth / window.innerHeight, 0.1, 100);
 camera.position.set(0, 0.28, 6.4);
@@ -4321,37 +4909,113 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.08;
+renderer.toneMappingExposure = sceneEnv.exposure;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-const orbitControls = new OrbitControls(camera, renderer.domElement);
-orbitControls.enabled = true;
-orbitControls.enableDamping = true;
-orbitControls.dampingFactor = 0.08;
-orbitControls.enablePan = false;
-orbitControls.minDistance = 3.4;
-orbitControls.maxDistance = 9;
-orbitControls.target.set(0, 0, 0);
-orbitControls.saveState();
+// monolith スタイル: 環境マップで石・金属の質感を出す
+if (sceneEnv.environmentMap) {
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  pmrem.dispose();
+}
+
+const viewControls = new TrackballControls(camera, renderer.domElement);
+viewControls.enabled = true;
+viewControls.noRotate = false;
+viewControls.noPan = true;
+viewControls.staticMoving = false;
+viewControls.dynamicDampingFactor = 0.08;
+viewControls.rotateSpeed = 1.4;
+viewControls.minDistance = 3.4;
+viewControls.maxDistance = 9;
+viewControls.target.set(0, 0, 0);
 
 let isViewInteracting = false;
-orbitControls.addEventListener("start", () => {
+viewControls.addEventListener("start", () => {
   isViewInteracting = true;
 });
-orbitControls.addEventListener("end", () => {
+viewControls.addEventListener("end", () => {
   isViewInteracting = false;
 });
 
-const sculpture: SculptureExperience = isCarveMode
-  ? new SoundSculpture({ granular: true })
-  : new SoundSculpture();
+const sculpture: SculptureExperience =
+  sculptureMode === "amoeba"
+    ? new AmoebaSculpture({
+        consumeOrganBudget: (cost) => structureTracker.consumeOrganBudget(cost),
+      })
+    : sculptureMode === "carve"
+      ? new CarveSculpture()
+      : new SoundSculpture();
 scene.add(sculpture.group);
 
-const stars = new StarField();
-scene.add(stars.points);
+// ドラッグ: TrackballControls が target (0,0,0) を軸に全方向へ回す。クリックのみ表面反発
+const viewRaycaster = new THREE.Raycaster();
+const viewPointerNdc = new THREE.Vector2();
+const sculptureHitLocal = new THREE.Vector3();
 
-const keyLight = new THREE.DirectionalLight(0xffffff, 3.4);
+const pokeSculptureAtClient = (clientX: number, clientY: number) => {
+  const targets = sculpture.getPointerTargets?.();
+  if (!targets?.length) {
+    return;
+  }
+  const rect = renderer.domElement.getBoundingClientRect();
+  viewPointerNdc.set(
+    ((clientX - rect.left) / rect.width) * 2 - 1,
+    -((clientY - rect.top) / rect.height) * 2 + 1,
+  );
+  viewRaycaster.setFromCamera(viewPointerNdc, camera);
+  const hits = viewRaycaster.intersectObjects(targets, false);
+  if (!hits.length) {
+    return;
+  }
+  sculptureHitLocal.copy(hits[0].point);
+  sculpture.group.worldToLocal(sculptureHitLocal);
+  sculpture.pokeSurface?.(sculptureHitLocal);
+  sculpture.pokeIdle?.();
+};
+
+const viewPointerState = { x: 0, y: 0, id: null as number | null };
+renderer.domElement.addEventListener("pointerdown", (event: PointerEvent) => {
+  if (event.button !== 0) return;
+  viewPointerState.x = event.clientX;
+  viewPointerState.y = event.clientY;
+  viewPointerState.id = event.pointerId;
+});
+renderer.domElement.addEventListener("pointerup", (event: PointerEvent) => {
+  if (event.button !== 0 || viewPointerState.id !== event.pointerId) return;
+  const moved = Math.hypot(event.clientX - viewPointerState.x, event.clientY - viewPointerState.y);
+  viewPointerState.id = null;
+  if (moved < 4) {
+    pokeSculptureAtClient(event.clientX, event.clientY);
+  }
+});
+renderer.domElement.addEventListener("pointercancel", () => {
+  viewPointerState.id = null;
+});
+
+const starsNear = new StarField({
+  count: 820,
+  minRadius: 14,
+  maxRadius: 26,
+  size: 0.028,
+  baseOpacity: 0.92,
+  parallax: 1.35,
+});
+const starsFar = new StarField({
+  count: 3400,
+  minRadius: 28,
+  maxRadius: 58,
+  size: 0.015,
+  baseOpacity: 0.72,
+  parallax: 0.55,
+});
+starsNear.points.visible = sceneEnv.stars;
+starsFar.points.visible = sceneEnv.stars;
+scene.add(starsNear.points);
+scene.add(starsFar.points);
+
+const keyLight = new THREE.DirectionalLight(0xffffff, sceneEnv.key);
 keyLight.position.set(3, 4, 5);
 keyLight.castShadow = true;
 keyLight.shadow.mapSize.set(1024, 1024);
@@ -4364,11 +5028,11 @@ keyLight.shadow.camera.bottom = -6;
 scene.add(keyLight);
 scene.add(keyLight.target);
 
-const fillLight = new THREE.DirectionalLight(0xe8f0ff, 1.1);
+const fillLight = new THREE.DirectionalLight(0xe8f0ff, sceneEnv.fill);
 fillLight.position.set(-4, 2, 2);
 scene.add(fillLight);
 
-const ambientLight = new THREE.HemisphereLight(0xffffff, 0xd6d0c6, 2.4);
+const ambientLight = new THREE.HemisphereLight(0xffffff, 0xd6d0c6, sceneEnv.ambient);
 scene.add(ambientLight);
 
 const floor = new THREE.Mesh(new THREE.PlaneGeometry(18, 18), new THREE.ShadowMaterial({ color: 0x000000, opacity: 0.045 }));
@@ -4376,6 +5040,30 @@ floor.position.y = -1.82;
 floor.rotation.x = -Math.PI / 2;
 floor.receiveShadow = true;
 scene.add(floor);
+
+// monolith スタイル: ギャラリーの台座
+if (sceneEnv.pedestal) {
+  floor.position.y = -2.62;
+  const pedestal = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.08, 1.2, 0.8, 64),
+    new THREE.MeshStandardMaterial({ color: 0x35343a, roughness: 0.85, metalness: 0.08 }),
+  );
+  pedestal.position.y = -2.22;
+  pedestal.castShadow = true;
+  pedestal.receiveShadow = true;
+  scene.add(pedestal);
+}
+
+// monolith スタイル: 完成時に灯るギャラリーのスポットライト
+let spotLight: THREE.SpotLight | null = null;
+if (sceneEnv.spotlight) {
+  spotLight = new THREE.SpotLight(0xfff2df, 0, 0, 0.44, 0.55, 0);
+  spotLight.position.set(2.6, 5.6, 3.2);
+  spotLight.castShadow = true;
+  spotLight.shadow.mapSize.set(1024, 1024);
+  spotLight.target.position.set(0, -0.3, 0);
+  scene.add(spotLight, spotLight.target);
+}
 
 const audioInput = new AudioInput();
 const rhythm = new RhythmTracker();
@@ -4535,7 +5223,7 @@ const drawAudioScope = (
     ctx.fillRect(50, y + 12, envBarW, 4);
     ctx.fillStyle = "#8a857b";
     ctx.fillText(
-      `sp O${species.organic.toFixed(2)} A${species.aggressive.toFixed(2)} R${species.rhythmic.toFixed(2)}${species.locked ? " locked" : ""}`,
+      `sp O${species.organic.toFixed(2)} A${species.aggressive.toFixed(2)} R${species.rhythmic.toFixed(2)} c${species.confidence.toFixed(2)}${species.finalized ? " fin" : ""}`,
       4,
       y + 22,
     );
@@ -4546,6 +5234,33 @@ const drawAudioScope = (
 const setStatus = (message: string) => {
   statusElement.textContent = message;
 };
+
+growthAlgorithmSelect.addEventListener("change", () => {
+  const nextId = growthAlgorithmSelect.value as GrowthAlgorithmId;
+  if (!GROWTH_ALGORITHM_CATALOG.some((entry) => entry.id === nextId)) {
+    return;
+  }
+  if (nextId === growthAlgorithmId) {
+    return;
+  }
+  growthAlgorithmId = nextId;
+  setGrowthAlgorithmId(nextId);
+  applyGrowthAlgorithmUi(nextId);
+
+  const url = new URL(window.location.href);
+  if (nextId === "fibonacci") {
+    url.searchParams.delete("algo");
+  } else {
+    url.searchParams.set("algo", nextId);
+  }
+  window.history.replaceState(null, "", url.toString());
+
+  sculpture.reset();
+  rhythm.reset();
+  structureTracker.reset();
+  speciesProfiler.reset();
+  setStatus("成長アルゴリズムを変更しました — 形成を再開できます");
+});
 
 // 拡張機能や外部スクリプト由来も含め、実行時エラーを画面に出して原因特定しやすくする
 window.addEventListener("error", (event) => {
@@ -4596,6 +5311,33 @@ populateAudioDevices().catch((error) => {
   console.error(error);
 });
 
+// --- 完成時の環境クロスフェード（背景・ライト・スポットライト） ---
+let envMix = 0;
+let lightSliderTouched = false;
+const envBackgroundForming = new THREE.Color(sceneEnv.background);
+const envBackgroundComplete = new THREE.Color(sceneEnv.backgroundComplete);
+const envLerp = (from: number, to: number) => from + (to - from) * envMix;
+
+const updateEnvironmentCrossfade = (deltaTime: number) => {
+  const target = isComplete ? 1 : 0;
+  const seconds = styleEnvActive ? Math.max(1, visualStyle.completion.seconds * 0.7) : 1;
+  const rate = isComplete ? 1 / seconds : 2.4;
+  envMix += (target - envMix) * Math.min(1, deltaTime * rate * 3);
+  (scene.background as THREE.Color)
+    .copy(envBackgroundForming)
+    .lerp(envBackgroundComplete, envMix);
+  backgroundDome.setFromBackground(scene.background as THREE.Color, themeDarkActive);
+  syncSceneFog();
+  if (!lightSliderTouched) {
+    keyLight.intensity = envLerp(sceneEnv.key, sceneEnv.keyComplete);
+  }
+  fillLight.intensity = envLerp(sceneEnv.fill, sceneEnv.fillComplete);
+  ambientLight.intensity = envLerp(sceneEnv.ambient, sceneEnv.ambientComplete);
+  if (spotLight) {
+    spotLight.intensity = sceneEnv.spotlightIntensity * envMix;
+  }
+};
+
 const updateKeyLight = () => {
   const azimuth = THREE.MathUtils.degToRad(Number(lightAzimuthInput.value));
   const elevation = THREE.MathUtils.degToRad(Number(lightElevationInput.value));
@@ -4605,22 +5347,41 @@ const updateKeyLight = () => {
   keyLight.intensity = Number(lightIntensityInput.value);
 };
 
+const setStartButtonsEnabled = (enabled: boolean) => {
+  startButton.disabled = !enabled;
+  startSystemAudioButton.disabled = !enabled;
+  if (startDevAudioButton) {
+    startDevAudioButton.disabled = !enabled;
+  }
+};
+
 const completeSculpture = () => {
   if (isComplete) {
     return;
   }
 
   isComplete = true;
+  isAudioReady = false;
   silenceSeconds = 0;
+  // 音を止める前にプロファイルを確定し、完成形の色・質感を導出する
+  const completionPalette = deriveSculpturePalette(audioInput.getProfile());
+  const completionSpecies = speciesProfiler.finalizeProfile();
+  sculpture.prepareCompletion?.(completionPalette, completionSpecies);
   audioInput.stopPlayback();
   audioInput.resetAnalysisState();
   sculpture.complete();
+  lightSliderTouched = false;
+  lightIntensityInput.value = String(Math.max(1, sceneEnv.keyComplete));
   appElement.classList.add("is-complete");
-  orbitControls.enabled = true;
+  viewControls.enabled = true;
   viewerControlFields.disabled = false;
   completeButton.disabled = true;
   resetSculptureButton.disabled = false;
   exportButton.disabled = false;
+  setStartButtonsEnabled(true);
+  if (bandToneTestButton) {
+    bandToneTestButton.disabled = true;
+  }
   setStatus(completeButton.dataset.statusDone ?? "");
 };
 
@@ -4657,10 +5418,15 @@ const resetSculptureSession = () => {
     waveEnergy: 0,
   };
   appElement.classList.remove("is-complete");
-  orbitControls.enabled = true;
+  viewControls.enabled = true;
   viewerControlFields.disabled = true;
+  lightSliderTouched = false;
+  lightIntensityInput.value = String(Math.max(1, sceneEnv.key));
   completeButton.disabled = !isAudioReady;
   exportButton.disabled = true;
+  if (!isAudioReady) {
+    setStartButtonsEnabled(true);
+  }
   audioInput.restartDevAudioIfActive();
   setStatus(isAudioReady ? (resetSculptureButton.dataset.statusReset ?? "") : (statusElement.dataset.statusIdle ?? ""));
 };
@@ -4712,29 +5478,21 @@ const startAudioInput = async (
   trigger: HTMLButtonElement,
   start: () => Promise<void>,
 ) => {
-  startButton.disabled = true;
-  startSystemAudioButton.disabled = true;
-  if (startDevAudioButton) {
-    startDevAudioButton.disabled = true;
-  }
+  setStartButtonsEnabled(false);
   setStatus(trigger.dataset.statusPreparing ?? "");
 
   try {
     await start();
     isAudioReady = true;
-    orbitControls.enabled = true;
-    completeButton.disabled = false;
+    viewControls.enabled = true;
+    completeButton.disabled = isComplete;
     resetSculptureButton.disabled = false;
     if (bandToneTestButton) {
-      bandToneTestButton.disabled = false;
+      bandToneTestButton.disabled = isComplete;
     }
     setStatus(trigger.dataset.statusReady ?? "");
   } catch (error) {
-    startButton.disabled = false;
-    startSystemAudioButton.disabled = false;
-    if (startDevAudioButton) {
-      startDevAudioButton.disabled = false;
-    }
+    setStartButtonsEnabled(true);
     const message =
       error instanceof Error
         ? `${error.name}: ${error.message}`
@@ -4766,19 +5524,22 @@ if (import.meta.env.DEV && startDevAudioButton) {
 completeButton.addEventListener("click", completeSculpture);
 resetSculptureButton.addEventListener("click", resetSculptureSession);
 exportButton.addEventListener("click", exportSculpture);
-lightAzimuthInput.addEventListener("input", updateKeyLight);
-lightElevationInput.addEventListener("input", updateKeyLight);
-lightIntensityInput.addEventListener("input", updateKeyLight);
+const onLightSliderInput = () => {
+  lightSliderTouched = true;
+  updateKeyLight();
+};
+lightAzimuthInput.addEventListener("input", onLightSliderInput);
+lightElevationInput.addEventListener("input", onLightSliderInput);
+lightIntensityInput.addEventListener("input", onLightSliderInput);
 resetViewButton.addEventListener("click", () => {
-  camera.position.set(0, 0.28, 6.4);
-  orbitControls.target.set(0, 0, 0);
-  orbitControls.update();
+  viewControls.reset();
 });
 
 const resize = () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  viewControls.handleResize();
 };
 
 window.addEventListener("resize", resize);
@@ -4823,7 +5584,10 @@ const render = () => {
     bands.overall *= waveGate;
   }
 
-  stars.update(elapsedTime, bands, deltaTime);
+  if (starsNear.points.visible) {
+    starsNear.update(elapsedTime, bands, deltaTime, camera.position);
+    starsFar.update(elapsedTime, bands, deltaTime, camera.position);
+  }
 
   if (isAudioReady && !isComplete) {
     if (bands.overall >= SILENCE_THRESHOLD) {
@@ -4922,7 +5686,8 @@ const render = () => {
     latestStructure,
     speciesProfile,
   );
-  orbitControls.update();
+  updateEnvironmentCrossfade(deltaTime);
+  viewControls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(render);
 };
@@ -4931,7 +5696,7 @@ const tuningSliderInputs = new Map<keyof SculptureTuning, HTMLInputElement>();
 const tuningSliderValueLabels = new Map<keyof SculptureTuning, HTMLElement>();
 
 const refreshTuningExport = () => {
-  tuningExportText.value = formatSculptureTuningForAgent(sculptureTuning);
+  tuningExportText.value = formatSculptureTuningForAgent(sculptureTuning, runtimeTuning, growthAlgorithmId);
 };
 
 const syncTuningSlidersFromState = () => {
@@ -5048,5 +5813,6 @@ const initTuningPanel = () => {
 };
 
 initTuningPanel();
+lightIntensityInput.value = String(Math.max(1, sceneEnv.key));
 updateKeyLight();
 render();

@@ -78,15 +78,21 @@ h1 {
   display: block;
 }
 
-.intro-copy--carve {
+.intro-copy--carve,
+.intro-copy--amoeba {
   display: none;
 }
 
-.mode-carve .intro-copy--classic {
+.mode-carve .intro-copy--classic,
+.mode-amoeba .intro-copy--classic {
   display: none;
 }
 
 .mode-carve .intro-copy--carve {
+  display: block;
+}
+
+.mode-amoeba .intro-copy--amoeba {
   display: block;
 }
 
@@ -233,35 +239,73 @@ h1 {
   width: 100%;
 }
 
-.audio-device {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 0.6rem;
-  margin: 0 0 1rem;
+.growth-algorithm-hint {
+  margin: -0.55rem 0 1rem;
+  color: #8a857c;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  letter-spacing: 0.02em;
 }
 
-.audio-device__label {
+.input-device-panel {
+  margin-top: 0.85rem;
+  border: 1px solid rgb(22 22 22 / 12%);
+  border-radius: 1rem;
+  background: rgb(255 255 255 / 42%);
+  overflow: hidden;
+}
+
+.input-device-panel__summary {
+  padding: 0.75rem 1rem;
+  color: #5e594f;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  list-style: none;
+}
+
+.input-device-panel__summary::-webkit-details-marker {
+  display: none;
+}
+
+.input-device-panel__summary::before {
+  content: "▸ ";
+  display: inline-block;
+  transition: transform 160ms ease;
+}
+
+.input-device-panel[open] > .input-device-panel__summary::before {
+  transform: rotate(90deg);
+}
+
+.input-device-panel__body {
+  padding: 0 1rem 1rem;
   display: grid;
-  gap: 0.45rem;
+  gap: 0.55rem;
+}
+
+.input-device-panel__field {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+}
+
+.input-device-panel__label {
   color: #77736a;
-  font-size: 0.74rem;
-  letter-spacing: 0.08em;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
 }
 
-.audio-device__select {
-  border: 1px solid rgb(22 22 22 / 18%);
-  border-radius: 999px;
-  padding: 0.7rem 1rem;
-  background: rgb(255 255 255 / 72%);
-  color: #161616;
-  font: inherit;
-  backdrop-filter: blur(16px);
-  min-width: 15.5rem;
+.input-device__select {
+  width: 100%;
 }
 
-.audio-device__refresh {
-  padding: 0.7rem 1rem;
+.input-device__refresh {
+  width: 100%;
+  padding: 0.65rem 0.95rem;
+  font-size: 0.76rem;
+  border-color: rgb(22 22 22 / 16%);
+  background: rgb(255 255 255 / 58%);
 }
 
 .audio-scope {
@@ -279,7 +323,38 @@ h1 {
 }
 
 .band-test-panel {
-  margin-bottom: 0.85rem;
+  margin-top: 0.85rem;
+  border: 1px solid rgb(22 22 22 / 12%);
+  border-radius: 1rem;
+  background: rgb(255 255 255 / 42%);
+  overflow: hidden;
+}
+
+.band-test-panel__summary {
+  padding: 0.75rem 1rem;
+  color: #5e594f;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  list-style: none;
+}
+
+.band-test-panel__summary::-webkit-details-marker {
+  display: none;
+}
+
+.band-test-panel__summary::before {
+  content: "▸ ";
+  display: inline-block;
+  transition: transform 160ms ease;
+}
+
+.band-test-panel[open] > .band-test-panel__summary::before {
+  transform: rotate(90deg);
+}
+
+.band-test-panel__body {
+  padding: 0 1rem 1rem;
 }
 
 .band-test-hint {
@@ -318,9 +393,50 @@ h1 {
 }
 
 .actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.7rem;
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.85rem;
+}
+
+.actions__row {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.actions__row--input {
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+}
+
+.actions__row--sculpture {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.actions__row button {
+  width: 100%;
+  padding: 0.72rem 0.85rem;
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+#start-audio,
+#start-system-audio,
+#start-dev-audio {
+  background: rgb(22 22 22 / 82%);
+  color: #fffdf7;
+  border-color: rgb(22 22 22 / 28%);
+}
+
+#start-audio:hover,
+#start-system-audio:hover,
+#start-dev-audio:hover {
+  background: rgb(22 22 22 / 92%);
+}
+
+#start-audio:disabled,
+#start-system-audio:disabled,
+#start-dev-audio:disabled {
+  background: rgb(255 255 255 / 54%);
+  color: #8a857b;
 }
 
 button {
@@ -365,7 +481,7 @@ button:disabled {
 }
 
 .status {
-  margin: 1rem 0 0;
+  margin: 0.85rem 0 0;
   color: #8a857b;
   font-size: 0.8rem;
   letter-spacing: 0.04em;
@@ -553,6 +669,142 @@ input[type="range"] {
 
 .is-complete .description {
   color: #6b675f;
+}
+
+/* --- ダークテーマ (vita スタイル: 深海の闇の中の生命体) --- */
+
+.theme-dark {
+  color: #ece9e1;
+}
+
+#app.theme-dark {
+  background:
+    radial-gradient(circle at 50% 42%, rgb(30 38 56 / 55%), transparent 34rem),
+    linear-gradient(180deg, #0b0e15 0%, #06080d 100%);
+}
+
+.theme-dark .eyebrow {
+  color: #7f8aa0;
+}
+
+.theme-dark h1 {
+  color: #f0eee7;
+}
+
+.theme-dark .description,
+.theme-dark.is-complete .description {
+  color: #a9b1c2;
+}
+
+.theme-dark .control-panel__handle {
+  border-color: rgb(255 255 255 / 12%);
+  background: rgb(18 22 32 / 62%);
+}
+
+.theme-dark .control-group {
+  border-color: rgb(255 255 255 / 10%);
+  background: rgb(14 17 26 / 74%);
+  box-shadow: 0 1rem 3rem rgb(0 0 0 / 35%);
+}
+
+.theme-dark .control-group__summary,
+.theme-dark .input-device-panel__summary,
+.theme-dark .band-test-panel__summary,
+.theme-dark .tuning-advanced__summary {
+  color: #a0a8b8;
+}
+
+.theme-dark .sculpture-mode,
+.theme-dark .input-device-panel__label,
+.theme-dark label {
+  color: #96a0b2;
+}
+
+.theme-dark .sculpture-mode__select,
+.theme-dark .band-test-solo__select {
+  border-color: rgb(255 255 255 / 16%);
+  background: rgb(26 31 44 / 82%);
+  color: #e8e6df;
+}
+
+.theme-dark button {
+  border-color: rgb(255 255 255 / 16%);
+  background: rgb(30 35 48 / 78%);
+  color: #e8e6df;
+}
+
+.theme-dark button:hover {
+  border-color: rgb(255 255 255 / 30%);
+  background: rgb(42 48 64 / 88%);
+}
+
+.theme-dark #start-audio,
+.theme-dark #start-system-audio,
+.theme-dark #start-dev-audio,
+.theme-dark #export-gltf {
+  background: rgb(226 232 244 / 88%);
+  color: #10131c;
+  border-color: rgb(255 255 255 / 30%);
+}
+
+.theme-dark #start-audio:hover,
+.theme-dark #start-system-audio:hover,
+.theme-dark #start-dev-audio:hover {
+  background: rgb(244 247 252 / 96%);
+}
+
+.theme-dark #start-audio:disabled,
+.theme-dark #start-system-audio:disabled,
+.theme-dark #start-dev-audio:disabled,
+.theme-dark #export-gltf:disabled {
+  background: rgb(30 35 48 / 55%);
+  color: #7d8494;
+}
+
+.theme-dark .status,
+.theme-dark .growth-algorithm-hint,
+.theme-dark .tuning-hint,
+.theme-dark .band-test-hint,
+.theme-dark .tuning-slider__value {
+  color: #8b94a6;
+}
+
+.theme-dark .tuning-hint strong,
+.theme-dark .band-test-solo,
+.theme-dark .tuning-slider__label {
+  color: #b3bac9;
+}
+
+.theme-dark .input-device-panel,
+.theme-dark .band-test-panel {
+  border-color: rgb(255 255 255 / 10%);
+  background: rgb(20 24 34 / 55%);
+}
+
+.theme-dark .tuning-slider__help {
+  border-color: rgb(255 255 255 / 10%);
+  background: rgb(24 28 40 / 62%);
+  color: #96a0b2;
+}
+
+.theme-dark .tuning-export__text {
+  border-color: rgb(255 255 255 / 12%);
+  background: rgb(20 24 34 / 82%);
+  color: #c4cad6;
+}
+
+.theme-dark .tuning-export {
+  border-top-color: rgb(255 255 255 / 8%);
+}
+
+/* オーディオスコープは波形の視認性のため明るい下地を維持する */
+.theme-dark .audio-scope canvas {
+  border-color: rgb(255 255 255 / 12%);
+  background: rgb(233 235 240 / 88%);
+}
+
+.theme-dark input[type="range"] {
+  accent-color: #9fb6dd;
 }
 
 @media (max-width: 720px) {

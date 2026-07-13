@@ -12,7 +12,10 @@ export type SpeciesProfile = {
   erosionGain: number;
   fragmentGain: number;
   membraneGain: number;
-  locked: boolean;
+  /** 完成時に確定済み — 以降 update は停止 */
+  finalized: boolean;
+  /** ウォームアップ後の種信頼度 0〜1（モルフォロジーブレンド用） */
+  confidence: number;
 };
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
@@ -21,6 +24,9 @@ const smoothstep = (edge0: number, edge1: number, value: number) => {
   const x = clamp01((value - edge0) / (edge1 - edge0));
   return x * x * (3 - 2 * x);
 };
+
+/** EMA 時定数 ~12 秒 */
+const SPECIES_EMA_RATE = 1 / 12;
 
 export const DEFAULT_SPECIES_PROFILE: SpeciesProfile = {
   organic: fibUnit(8, 13),
@@ -33,10 +39,17 @@ export const DEFAULT_SPECIES_PROFILE: SpeciesProfile = {
   erosionGain: 1,
   fragmentGain: 1,
   membraneGain: 1,
-  locked: false,
+  finalized: false,
+  confidence: 0,
 };
 
-const buildGains = (organic: number, aggressive: number, rhythmic: number): SpeciesProfile => {
+const applyGains = (
+  organic: number,
+  aggressive: number,
+  rhythmic: number,
+  finalized: boolean,
+  confidence: number,
+): SpeciesProfile => {
   const mineral = 1 - organic;
 
   return {
@@ -50,8 +63,37 @@ const buildGains = (organic: number, aggressive: number, rhythmic: number): Spec
     erosionGain: fibUnit(2, 8) + aggressive * fibRatio(5, 3) + mineral * fibUnit(3, 13),
     fragmentGain: fibUnit(2, 8) + aggressive * fibRatio(8, 2),
     membraneGain: fibUnit(3, 8) + organic * fibRatio(8, 3) + rhythmic * fibUnit(5, 13),
-    locked: true,
+    finalized,
+    confidence,
   };
+};
+
+const computeAxesFromAverages = (
+  avgDensity: number,
+  avgTension: number,
+  avgContrast: number,
+  avgBrightness: number,
+  avgCentroid: number,
+  avgPulse: number,
+  avgTransient: number,
+) => {
+  const organic = clamp01(
+    (1 - avgDensity) * fibUnit(8, 21) +
+      (1 - avgContrast) * fibUnit(5, 21) +
+      smoothstep(fibUnit(5, 21), fibUnit(13, 21), avgCentroid) * fibUnit(8, 13) +
+      (1 - avgTransient) * fibUnit(3, 13),
+  );
+  const aggressive = clamp01(
+    avgContrast * fibUnit(8, 21) +
+      avgBrightness * fibUnit(5, 13) +
+      avgTension * fibUnit(5, 21) +
+      avgTransient * fibUnit(8, 13) +
+      avgDensity * fibUnit(3, 21),
+  );
+  const rhythmic = clamp01(
+    avgPulse * fibRatio(8, 13) + avgDensity * fibUnit(5, 13) + (1 - avgTransient) * fibUnit(5, 21),
+  );
+  return { organic, aggressive, rhythmic };
 };
 
 export type SpeciesSampleInput = {
@@ -66,7 +108,8 @@ export type SpeciesSampleInput = {
 };
 
 export class SpeciesProfiler {
-  private calibrationSeconds = fibSeconds(7);
+  /** ウォームアップ秒数 — この間は種の影響が弱い */
+  private warmupSeconds = fibSeconds(5);
   private activeSeconds = 0;
   private sampleCount = 0;
   private sumDensity = 0;
@@ -80,7 +123,11 @@ export class SpeciesProfiler {
   private profile: SpeciesProfile = { ...DEFAULT_SPECIES_PROFILE };
 
   setCalibrationSeconds(seconds: number) {
-    this.calibrationSeconds = Math.max(fibSeconds(5), seconds);
+    this.warmupSeconds = Math.max(fibSeconds(3), seconds);
+  }
+
+  getWarmupSeconds() {
+    return this.warmupSeconds;
   }
 
   reset() {
@@ -101,8 +148,34 @@ export class SpeciesProfiler {
     return this.profile;
   }
 
+  private getAverages() {
+    const n = Math.max(1, this.sampleCount);
+    return {
+      avgDensity: this.sumDensity / n,
+      avgTension: this.sumTension / n,
+      avgContrast: this.sumContrast / n,
+      avgBrightness: this.sumBrightness / n,
+      avgCentroid: this.sumCentroid / n,
+      avgPulse: this.sumPulseConfidence / n,
+      avgTransient: this.sumTransientRate / n,
+    };
+  }
+
+  private getConfidence() {
+    return smoothstep(this.warmupSeconds, this.warmupSeconds + 8, this.activeSeconds);
+  }
+
+  private applyTargets(organic: number, aggressive: number, rhythmic: number, deltaTime: number) {
+    const confidence = this.getConfidence();
+    const rate = Math.min(1, deltaTime * SPECIES_EMA_RATE * 3);
+    const nextOrganic = this.profile.organic + (organic - this.profile.organic) * rate;
+    const nextAggressive = this.profile.aggressive + (aggressive - this.profile.aggressive) * rate;
+    const nextRhythmic = this.profile.rhythmic + (rhythmic - this.profile.rhythmic) * rate;
+    this.profile = applyGains(nextOrganic, nextAggressive, nextRhythmic, false, confidence);
+  }
+
   update(input: SpeciesSampleInput, bands: BandLevels, deltaTime: number, isActive: boolean) {
-    if (!isActive) {
+    if (!isActive || this.profile.finalized) {
       return;
     }
 
@@ -117,37 +190,50 @@ export class SpeciesProfiler {
     this.sumPulseConfidence += input.pulseConfidence;
     this.sumTransientRate += input.transientRate;
 
-    if (this.profile.locked || this.activeSeconds < this.calibrationSeconds) {
+    if (this.activeSeconds < this.warmupSeconds) {
+      this.profile = { ...DEFAULT_SPECIES_PROFILE, confidence: this.getConfidence() };
       return;
     }
 
-    const n = Math.max(1, this.sampleCount);
-    const avgDensity = this.sumDensity / n;
-    const avgTension = this.sumTension / n;
-    const avgContrast = this.sumContrast / n;
-    const avgBrightness = this.sumBrightness / n;
-    const avgCentroid = this.sumCentroid / n;
-    const avgPulse = this.sumPulseConfidence / n;
-    const avgTransient = this.sumTransientRate / n;
+    const avgs = this.getAverages();
+    const { organic, aggressive, rhythmic } = computeAxesFromAverages(
+      avgs.avgDensity,
+      avgs.avgTension,
+      avgs.avgContrast,
+      avgs.avgBrightness,
+      avgs.avgCentroid,
+      avgs.avgPulse,
+      avgs.avgTransient,
+    );
+    this.applyTargets(organic, aggressive, rhythmic, deltaTime);
+  }
 
-    const organic = clamp01(
-      (1 - avgDensity) * fibUnit(8, 21) +
-        (1 - avgContrast) * fibUnit(5, 21) +
-        smoothstep(fibUnit(5, 21), fibUnit(13, 21), avgCentroid) * fibUnit(8, 13) +
-        (1 - avgTransient) * fibUnit(3, 13),
-    );
-    const aggressive = clamp01(
-      avgContrast * fibUnit(8, 21) +
-        avgBrightness * fibUnit(5, 13) +
-        avgTension * fibUnit(5, 21) +
-        avgTransient * fibUnit(8, 13) +
-        avgDensity * fibUnit(3, 21),
-    );
-    const rhythmic = clamp01(
-      avgPulse * fibRatio(8, 13) + avgDensity * fibUnit(5, 13) + (1 - avgTransient) * fibUnit(5, 21),
-    );
+  /**
+   * 完成直前に曲全体の平均から種を確定する。
+   * ウォームアップ未満の極短曲は部分平均または DEFAULT にフォールバック。
+   */
+  finalizeProfile(): SpeciesProfile {
+    if (this.profile.finalized) {
+      return this.profile;
+    }
 
-    this.profile = buildGains(organic, aggressive, rhythmic);
+    if (this.sampleCount < 1 || this.activeSeconds < this.warmupSeconds * 0.25) {
+      this.profile = { ...DEFAULT_SPECIES_PROFILE, finalized: true, confidence: 1 };
+      return this.profile;
+    }
+
+    const avgs = this.getAverages();
+    const { organic, aggressive, rhythmic } = computeAxesFromAverages(
+      avgs.avgDensity,
+      avgs.avgTension,
+      avgs.avgContrast,
+      avgs.avgBrightness,
+      avgs.avgCentroid,
+      avgs.avgPulse,
+      avgs.avgTransient,
+    );
+    this.profile = applyGains(organic, aggressive, rhythmic, true, 1);
+    return this.profile;
   }
 }
 

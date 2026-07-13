@@ -42,6 +42,23 @@ export type StructureSnapshot = {
 
 export type GrowthPhase = "embryo" | "growth" | "metamorphosis" | "hardening";
 
+/** 成長フェーズごとの形成ゲイン。序盤（embryo）でも形が残るよう中盤との差を抑える。 */
+const FORMATION_PHASE_SCALE: Record<GrowthPhase, number> = {
+  embryo: 0.58,
+  growth: 0.84,
+  metamorphosis: 1,
+  hardening: 0.88,
+};
+
+/**
+ * 構造スナップショットから形成の総合スケールを得る。
+ * formationRamp（曲内での形成度）× フェーズ係数。下限で無音直後の完全ゼロを防ぐ。
+ */
+export const getStructureFormationScale = (snapshot: StructureSnapshot) => {
+  const phaseScale = FORMATION_PHASE_SCALE[snapshot.phase];
+  return Math.max(0.12, snapshot.formationRamp * phaseScale);
+};
+
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 
 const smoothstep = (edge0: number, edge1: number, value: number) => {
@@ -73,6 +90,8 @@ export class StructureTracker {
   private lastEventLabel = "—";
   private kickStreak = 0;
   private transientRate = 0;
+  /** 音の積算量 — 静かなイントロでも形成ランプが進むようにする */
+  private formationCredit = 0;
 
   reset() {
     this.energyLong = 0;
@@ -98,6 +117,7 @@ export class StructureTracker {
     this.lastEventLabel = "—";
     this.kickStreak = 0;
     this.transientRate = 0;
+    this.formationCredit = 0;
   }
 
   update(bands: BandLevels, rhythm: RhythmSnapshot, deltaTime: number, isActive: boolean): StructureSnapshot {
@@ -126,6 +146,8 @@ export class StructureTracker {
 
     if (isActive) {
       this.activeSeconds += deltaTime;
+      // 音量に比例して積算 — 静かでも持続すればランプが上がり、サビだけが支配しにくくなる
+      this.formationCredit += deltaTime * (0.1 + overall * 1.05);
     }
 
     this.elapsed += deltaTime;
@@ -216,8 +238,10 @@ export class StructureTracker {
         this.transientRate * 0.35,
     );
 
-    const formationRamp = smoothstep(0, 18, this.activeSeconds);
-    const detailRamp = smoothstep(12, 90, this.activeSeconds) * smoothstep(0.08, 0.35, this.energyLong);
+    const timeRamp = smoothstep(0, 10, this.activeSeconds);
+    const energyRamp = smoothstep(0, 4.5, this.formationCredit);
+    const formationRamp = Math.max(timeRamp, energyRamp);
+    const detailRamp = smoothstep(8, 72, this.activeSeconds) * smoothstep(0.06, 0.28, this.energyLong);
 
     return {
       energyLong: this.energyLong,
