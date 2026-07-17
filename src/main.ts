@@ -72,17 +72,18 @@ import {
   updateClickRepulsion,
 } from "./click-repulsion";
 import {
+  EXPERIENCE_CATALOG,
   getActiveVisualStyle,
+  getExperience,
   NEUTRAL_ENVIRONMENT,
-  parseVisualStyleId,
+  parseExperienceId,
   setActiveVisualStyle,
-  VISUAL_STYLE_CATALOG,
+  type ExperienceId,
   type VisualStyleId,
 } from "./visual-style";
 import { SceneBackground } from "./scene-background";
 import {
   clamp01,
-  parseSculptureMode,
   seededUnit,
   SILENCE_SECONDS_TO_COMPLETE,
   SILENCE_THRESHOLD,
@@ -1371,6 +1372,26 @@ class SoundSculpture {
   /** 形成開始時の膜不透明度 — 中身の粘土が主役になるよう控えめに */
   private static readonly INITIAL_MEMBRANE_OPACITY = 0.1;
 
+  /** プール済み Points の未使用頂点を描画しない（初期のゴミ粒対策） */
+  private static parkPointsGeometry(geometry: THREE.BufferGeometry) {
+    geometry.setDrawRange(0, 0);
+  }
+
+  private static unparkPointsGeometry(geometry: THREE.BufferGeometry, count: number) {
+    geometry.setDrawRange(0, Math.max(0, count));
+  }
+
+  private parkInactivePointPools() {
+    SoundSculpture.parkPointsGeometry(this.particleGeometry);
+    SoundSculpture.parkPointsGeometry(this.sparkleGeometry);
+    SoundSculpture.parkPointsGeometry(this.detachmentDustSandGeometry);
+    SoundSculpture.parkPointsGeometry(this.detachmentDustMetalGeometry);
+    SoundSculpture.parkPointsGeometry(this.detachmentDustSparkGeometry);
+    this.detachmentDustSand.visible = false;
+    this.detachmentDustMetal.visible = false;
+    this.detachmentDustSpark.visible = false;
+  }
+
   readonly group = new THREE.Group();
 
   private readonly core: THREE.Mesh;
@@ -1647,6 +1668,7 @@ class SoundSculpture {
     this.particleGeometry = new THREE.BufferGeometry();
     this.particleGeometry.setAttribute("position", new THREE.BufferAttribute(this.particlePositions, 3));
     this.particleGeometry.setAttribute("color", new THREE.BufferAttribute(this.particleColors, 3));
+    const pointCircleMap = this.makeCircleTexture();
     this.particleMaterial = new THREE.PointsMaterial({
       size: 0.028,
       sizeAttenuation: true,
@@ -1655,6 +1677,8 @@ class SoundSculpture {
       opacity: 0.82,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
+      map: pointCircleMap,
+      toneMapped: false,
     });
     this.particles = new THREE.Points(this.particleGeometry, this.particleMaterial);
 
@@ -1669,11 +1693,14 @@ class SoundSculpture {
       sizeAttenuation: true,
       vertexColors: true,
       transparent: true,
-      opacity: 0.5,
+      opacity: 0,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
+      map: pointCircleMap,
+      toneMapped: false,
     });
     this.glowDust = new THREE.Points(this.glowDustGeometry, this.glowDustMaterial);
+    this.glowDust.visible = false;
     this.initGlowDust();
 
     this.sparklePositions = new Float32Array(SoundSculpture.maxSparkles * 3);
@@ -1691,10 +1718,12 @@ class SoundSculpture {
       opacity: 0.9,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
+      map: pointCircleMap,
+      toneMapped: false,
     });
     this.sparkles = new THREE.Points(this.sparkleGeometry, this.sparkleMaterial);
 
-    const detachmentMap = this.makeCircleTexture();
+    const detachmentMap = pointCircleMap;
 
     // --- sand dust (kick/sub 寄り、寿命長め、重い) ---
     this.detachmentDustSandPositions = new Float32Array(SoundSculpture.maxDetachmentDustSand * 3);
@@ -1758,6 +1787,15 @@ class SoundSculpture {
       map: detachmentMap,
     });
     this.detachmentDustSpark = new THREE.Points(this.detachmentDustSparkGeometry, this.detachmentDustSparkMaterial);
+    this.detachmentDustSandColors.fill(0);
+    this.detachmentDustMetalColors.fill(0);
+    this.detachmentDustSparkColors.fill(0);
+    this.particleColors.fill(0);
+    this.sparkleColors.fill(0);
+    this.sparkleLife.fill(0);
+    this.detachmentDustSandLife.fill(0);
+    this.detachmentDustMetalLife.fill(0);
+    this.detachmentDustSparkLife.fill(0);
 
     this.group.add(
       this.core,
@@ -1782,6 +1820,7 @@ class SoundSculpture {
       this.detachmentDustMetal.visible = false;
       this.detachmentDustSpark.visible = false;
     }
+    this.parkInactivePointPools();
 
     this.basePositions = new Float32Array(this.geometry.attributes.position.array);
     this.baseSurfacePositions = new Float32Array(this.surfaceGeometry.attributes.position.array);
@@ -1945,11 +1984,14 @@ class SoundSculpture {
       return fallback;
     }
     const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-    gradient.addColorStop(0, "rgba(255,255,255,1)");
-    gradient.addColorStop(1, "rgba(255,255,255,0)");
+    // AdditiveBlending 向け: 縁は黒（透明白だと四角が残る）
+    gradient.addColorStop(0, "rgb(255,255,255)");
+    gradient.addColorStop(0.35, "rgb(255,255,255)");
+    gradient.addColorStop(1, "rgb(0,0,0)");
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, size, size);
     const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.NoColorSpace;
     texture.needsUpdate = true;
     return texture;
   }
@@ -2770,6 +2812,10 @@ class SoundSculpture {
     this.detachmentDustSparkVelocities.fill(0);
     this.detachmentDustSparkCursor = 0;
 
+    this.parkInactivePointPools();
+    this.glowDust.visible = false;
+    this.glowDustMaterial.opacity = 0;
+
     this.group.quaternion.identity();
     this.group.rotation.set(0, 0, 0);
     this.group.scale.copy(this.baseScale);
@@ -2844,6 +2890,10 @@ class SoundSculpture {
       kind === "spark" ? this.detachmentDustSparkLife : kind === "metal" ? this.detachmentDustMetalLife : this.detachmentDustSandLife;
     const max =
       kind === "spark" ? SoundSculpture.maxDetachmentDustSpark : kind === "metal" ? SoundSculpture.maxDetachmentDustMetal : SoundSculpture.maxDetachmentDustSand;
+    const points =
+      kind === "spark" ? this.detachmentDustSpark : kind === "metal" ? this.detachmentDustMetal : this.detachmentDustSand;
+    const geometry =
+      kind === "spark" ? this.detachmentDustSparkGeometry : kind === "metal" ? this.detachmentDustMetalGeometry : this.detachmentDustSandGeometry;
 
     for (let i = 0; i < burstCount; i += 1) {
       const index =
@@ -2894,8 +2944,10 @@ class SoundSculpture {
       }
     }
 
-    const geometry =
-      kind === "spark" ? this.detachmentDustSparkGeometry : kind === "metal" ? this.detachmentDustMetalGeometry : this.detachmentDustSandGeometry;
+    if (this.style.particlesVisible) {
+      points.visible = true;
+      SoundSculpture.unparkPointsGeometry(geometry, max);
+    }
     geometry.attributes.position.needsUpdate = true;
     geometry.attributes.color.needsUpdate = true;
   }
@@ -2919,6 +2971,8 @@ class SoundSculpture {
       kind === "spark" ? this.detachmentDustSparkGeometry : kind === "metal" ? this.detachmentDustMetalGeometry : this.detachmentDustSandGeometry;
     const material =
       kind === "spark" ? this.detachmentDustSparkMaterial : kind === "metal" ? this.detachmentDustMetalMaterial : this.detachmentDustSandMaterial;
+    const points =
+      kind === "spark" ? this.detachmentDustSpark : kind === "metal" ? this.detachmentDustMetal : this.detachmentDustSand;
 
     const curlScale = kind === "spark" ? 1.25 : kind === "metal" ? 0.95 : 0.75;
     const curlStrengthBase = kind === "spark" ? 0.0068 : kind === "metal" ? 0.0046 : 0.0028;
@@ -2980,6 +3034,21 @@ class SoundSculpture {
         : kind === "metal"
           ? 0.02 + bands.mid * 0.014
           : 0.024 + bands.sub * 0.016;
+
+    let anyAlive = false;
+    for (let i = 0; i < max; i += 1) {
+      if (life[i] > 0) {
+        anyAlive = true;
+        break;
+      }
+    }
+    if (anyAlive && this.style.particlesVisible) {
+      points.visible = true;
+      SoundSculpture.unparkPointsGeometry(geometry, max);
+    } else {
+      points.visible = false;
+      SoundSculpture.parkPointsGeometry(geometry);
+    }
 
     geometry.attributes.position.needsUpdate = true;
     geometry.attributes.color.needsUpdate = true;
@@ -4291,6 +4360,59 @@ class SoundSculpture {
     this.geometry.computeVertexNormals();
   }
 
+  /**
+   * vita のコアを膜より十分内側に収める。
+   * コアと膜は同じ頂点トポロジーなので、対応頂点の半径を比較して
+   * 膜の動きが読める空間を全周に確保する。
+   */
+  private enforceVitaMembraneClearance() {
+    if (!this.style.membrane.vita) {
+      return;
+    }
+
+    const corePositions = this.geometry.attributes.position.array as Float32Array;
+    const surfacePositions = this.surfaceGeometry.attributes.position.array as Float32Array;
+    const vertexCount = Math.min(corePositions.length, surfacePositions.length) / 3;
+    const coreToSurfaceRatio = 0.88;
+    const minimumGap = 0.14;
+    let changed = false;
+
+    for (let i = 0; i < vertexCount; i += 1) {
+      const index = i * 3;
+      const cx = corePositions[index];
+      const cy = corePositions[index + 1];
+      const cz = corePositions[index + 2];
+      const coreRadius = Math.hypot(cx, cy, cz);
+      if (coreRadius < 0.0001) {
+        continue;
+      }
+
+      const surfaceRadius = Math.hypot(
+        surfacePositions[index],
+        surfacePositions[index + 1],
+        surfacePositions[index + 2],
+      );
+      const maxCoreRadius = Math.max(
+        0.2,
+        Math.min(surfaceRadius * coreToSurfaceRatio, surfaceRadius - minimumGap),
+      );
+      if (coreRadius <= maxCoreRadius) {
+        continue;
+      }
+
+      const scale = maxCoreRadius / coreRadius;
+      corePositions[index] = cx * scale;
+      corePositions[index + 1] = cy * scale;
+      corePositions[index + 2] = cz * scale;
+      changed = true;
+    }
+
+    if (changed) {
+      this.geometry.attributes.position.needsUpdate = true;
+      this.geometry.computeVertexNormals();
+    }
+  }
+
   private updateSurfaceGeometry(bands: AudioBands, deltaTime: number) {
     const positions = this.surfaceGeometry.attributes.position.array;
     const t = runtimeTuning;
@@ -4399,6 +4521,7 @@ class SoundSculpture {
       this.baseSurfacePositions,
       positions as Float32Array,
     );
+    this.enforceVitaMembraneClearance();
 
     const uniforms = this.surfaceMaterial.uniforms;
     // vita は無音時も膜の模様がゆっくり流れ続ける（idleTime は常に進む）
@@ -4573,6 +4696,14 @@ class SoundSculpture {
   private updateGlowDust(_bands: AudioBands, deltaTime: number) {
     // Scope 水色バー (scopeCyanDrive) と同じ波形エネルギーで半径・明度・不透明度を動かす
     const drive = this.completed ? 0 : scopeCyanDrive(latestRhythm);
+    // 初期ロード／無音時はシェル周りの孤立した点としてゴミに見えるので隠す
+    if (!this.style.particlesVisible || (!this.completed && drive < 0.018)) {
+      this.glowDust.visible = false;
+      this.glowDustMaterial.opacity = 0;
+      return;
+    }
+    this.glowDust.visible = true;
+
     const displayTime = this.completed ? this.frozenTime : this.formingTime;
     const shellPulse = 1.34 + drive * 0.28 + Math.sin(displayTime * 1.4) * (0.012 + drive * 0.04);
     const drift = displayTime * (0.28 + drive * 1.15);
@@ -4622,6 +4753,9 @@ class SoundSculpture {
     this.sparkleColors[idx] = 0.55 * glow;
     this.sparkleColors[idx + 1] = 0.85 * glow;
     this.sparkleColors[idx + 2] = 1.0 * glow;
+    if (this.style.particlesVisible) {
+      SoundSculpture.unparkPointsGeometry(this.sparkleGeometry, SoundSculpture.maxSparkles);
+    }
   }
 
   private sparkleCursor() {
@@ -4643,10 +4777,12 @@ class SoundSculpture {
     }
 
     const decay = this.completed ? 2.8 : 1.8;
+    let anyAlive = false;
     for (let i = 0; i < SoundSculpture.maxSparkles; i += 1) {
       if (this.sparkleLife[i] <= 0) {
         continue;
       }
+      anyAlive = true;
       this.sparkleLife[i] = Math.max(0, this.sparkleLife[i] - deltaTime * decay);
       const idx = i * 3;
       if (this.sparkleLife[i] <= 0) {
@@ -4664,6 +4800,11 @@ class SoundSculpture {
     this.sparkleMaterial.opacity +=
       ((this.completed ? 0.08 : 0.2 + drive * 0.75) - this.sparkleMaterial.opacity) * Math.min(1, deltaTime * 8);
     this.sparkleMaterial.size = 0.04 + drive * 0.06;
+    if (anyAlive && this.style.particlesVisible) {
+      SoundSculpture.unparkPointsGeometry(this.sparkleGeometry, SoundSculpture.maxSparkles);
+    } else {
+      SoundSculpture.parkPointsGeometry(this.sparkleGeometry);
+    }
     this.sparkleGeometry.attributes.position.needsUpdate = true;
     this.sparkleGeometry.attributes.color.needsUpdate = true;
   }
@@ -4690,11 +4831,13 @@ class SoundSculpture {
     }
 
     const completedFade = this.completeFadeOut;
+    let anyActive = false;
 
     for (let i = 0; i < SoundSculpture.maxParticles; i += 1) {
       if (this.particleActive[i] === 0) {
         continue;
       }
+      anyActive = true;
 
       if (this.completed && completedFade < 0.02) {
         this.particleActive[i] = 0;
@@ -4747,6 +4890,11 @@ class SoundSculpture {
 
     this.particleMaterial.opacity +=
       ((this.completed ? 0.08 : 0.82) - this.particleMaterial.opacity) * Math.min(1, deltaTime * 4);
+    if (anyActive && this.style.particlesVisible) {
+      SoundSculpture.unparkPointsGeometry(this.particleGeometry, SoundSculpture.maxParticles);
+    } else {
+      SoundSculpture.parkPointsGeometry(this.particleGeometry);
+    }
     this.particleGeometry.attributes.position.needsUpdate = true;
     this.particleGeometry.attributes.color.needsUpdate = true;
   }
@@ -4782,6 +4930,10 @@ class SoundSculpture {
     this.particlePositions[particlePositionIndex + 1] = this.particleStartPositions[particlePositionIndex + 1];
     this.particlePositions[particlePositionIndex + 2] = this.particleStartPositions[particlePositionIndex + 2];
 
+    if (this.style.particlesVisible) {
+      SoundSculpture.unparkPointsGeometry(this.particleGeometry, SoundSculpture.maxParticles);
+    }
+
     this.particleCursor = (this.particleCursor + 1) % SoundSculpture.maxParticles;
   }
 }
@@ -4810,9 +4962,7 @@ const tuningSlidersRoot = document.querySelector<HTMLElement>("#tuning-sliders")
 const tuningExportText = document.querySelector<HTMLTextAreaElement>("#tuning-export-text");
 const copyTuningButton = document.querySelector<HTMLButtonElement>("#copy-tuning");
 const resetTuningButton = document.querySelector<HTMLButtonElement>("#reset-tuning");
-const sculptureModeSelect = document.querySelector<HTMLSelectElement>("#sculpture-mode");
-const visualStyleSelect = document.querySelector<HTMLSelectElement>("#visual-style");
-const visualStyleField = document.querySelector<HTMLElement>("#visual-style-field");
+const experienceStyleSelect = document.querySelector<HTMLSelectElement>("#experience-style");
 const growthAlgorithmSelect = document.querySelector<HTMLSelectElement>("#growth-algorithm");
 const growthAlgorithmHint = document.querySelector<HTMLElement>("#growth-algorithm-hint");
 const bandTestPanel = document.querySelector<HTMLDetailsElement>("#band-test-panel");
@@ -4843,20 +4993,20 @@ if (
   !tuningExportText ||
   !copyTuningButton ||
   !resetTuningButton ||
-  !sculptureModeSelect ||
-  !visualStyleSelect ||
-  !visualStyleField ||
+  !experienceStyleSelect ||
   !growthAlgorithmSelect ||
   !growthAlgorithmHint
 ) {
   throw new Error("Required DOM elements are missing.");
 }
 
-const sculptureMode = parseSculptureMode();
-const visualStyleId: VisualStyleId = parseVisualStyleId();
+const experienceId: ExperienceId = parseExperienceId();
+const experience = getExperience(experienceId);
+const sculptureMode: SculptureMode = experience.sculptureMode;
+const visualStyleId: VisualStyleId = experience.visualStyleId ?? "vita";
 setActiveVisualStyle(visualStyleId);
 const visualStyle = getActiveVisualStyle();
-// ビジュアルスタイルは classic モード専用。他モードは従来の環境を使う
+// classic エンジンの作品スタイルだけ環境を差し替える
 const styleEnvActive = sculptureMode === "classic";
 const sceneEnv = styleEnvActive ? visualStyle.env : NEUTRAL_ENVIRONMENT;
 let growthAlgorithmId: GrowthAlgorithmId =
@@ -4902,87 +5052,67 @@ const parseBandSoloMode = (): BandSoloMode => {
 let bandSoloMode: BandSoloMode = parseBandSoloMode();
 setBandSoloMode(bandSoloMode);
 
-const applySculptureModeUi = (mode: SculptureMode) => {
-  sculptureModeSelect.value = mode;
-  appElement.classList.toggle("mode-carve", mode === "carve");
-  appElement.classList.toggle("mode-classic", mode === "classic");
-  appElement.classList.toggle("mode-amoeba", mode === "amoeba");
-  if (mode === "carve") {
+const applyExperienceUi = (id: ExperienceId) => {
+  const entry = getExperience(id);
+  experienceStyleSelect.value = id;
+  appElement.classList.toggle("mode-carve", entry.sculptureMode === "carve");
+  appElement.classList.toggle("mode-classic", entry.sculptureMode === "classic");
+  appElement.classList.toggle("mode-amoeba", entry.sculptureMode === "amoeba");
+  appElement.classList.toggle("style-metamorphosis", entry.visualStyleId === "metamorphosis");
+  appElement.classList.toggle("style-vita", entry.visualStyleId === "vita");
+  appElement.classList.toggle("style-monolith", entry.visualStyleId === "monolith");
+  appElement.classList.toggle("theme-dark", styleEnvActive && visualStyle.themeDark);
+
+  const introTitle = document.querySelector<HTMLElement>("#intro-title");
+  const introDescription = document.querySelector<HTMLElement>("#intro-description");
+  if (introTitle) {
+    introTitle.textContent = entry.introTitle;
+  }
+  if (introDescription) {
+    introDescription.textContent = entry.introDescription;
+  }
+
+  if (entry.sculptureMode === "carve") {
     document.title = "Sound Sculpture — 生み出す";
-  } else if (mode === "amoeba") {
+  } else if (entry.sculptureMode === "amoeba") {
     document.title = "Sound Sculpture — 生命体";
+  } else if (entry.id === "vita") {
+    document.title = "Sound Sculpture — 生命";
+  } else if (entry.id === "monolith") {
+    document.title = "Sound Sculpture — 彫刻";
   } else {
     document.title = "Sound Sculpture";
   }
 };
 
-applySculptureModeUi(sculptureMode);
+const populateExperienceSelect = () => {
+  experienceStyleSelect.innerHTML = "";
+  for (const entry of EXPERIENCE_CATALOG) {
+    const option = document.createElement("option");
+    option.value = entry.id;
+    option.textContent = entry.label;
+    experienceStyleSelect.appendChild(option);
+  }
+};
+
+populateExperienceSelect();
+applyExperienceUi(experienceId);
 applyGrowthAlgorithmUi(growthAlgorithmId);
 
-const populateVisualStyleSelect = () => {
-  visualStyleSelect.innerHTML = "";
-  for (const style of VISUAL_STYLE_CATALOG) {
-    const option = document.createElement("option");
-    option.value = style.id;
-    option.textContent = style.label;
-    visualStyleSelect.appendChild(option);
-  }
-};
-
-const applyVisualStyleUi = () => {
-  populateVisualStyleSelect();
-  visualStyleSelect.value = visualStyleId;
-  visualStyleField.hidden = !styleEnvActive;
-  appElement.classList.toggle("style-metamorphosis", styleEnvActive && visualStyleId === "metamorphosis");
-  appElement.classList.toggle("style-vita", styleEnvActive && visualStyleId === "vita");
-  appElement.classList.toggle("style-monolith", styleEnvActive && visualStyleId === "monolith");
-  appElement.classList.toggle("theme-dark", styleEnvActive && visualStyle.themeDark);
-  if (styleEnvActive) {
-    const introTitleClassic = document.querySelector<HTMLElement>("#intro-title .intro-copy--classic");
-    const introDescriptionClassic = document.querySelector<HTMLElement>(
-      "#intro-description .intro-copy--classic",
-    );
-    if (introTitleClassic) {
-      introTitleClassic.textContent = visualStyle.introTitle;
-    }
-    if (introDescriptionClassic) {
-      introDescriptionClassic.textContent = visualStyle.introDescription;
-    }
-  }
-};
-
-applyVisualStyleUi();
-
-visualStyleSelect.addEventListener("change", () => {
-  const nextStyle = visualStyleSelect.value as VisualStyleId;
-  if (!VISUAL_STYLE_CATALOG.some((style) => style.id === nextStyle)) {
+experienceStyleSelect.addEventListener("change", () => {
+  const nextId = experienceStyleSelect.value as ExperienceId;
+  if (!EXPERIENCE_CATALOG.some((entry) => entry.id === nextId)) {
     return;
   }
-  if (nextStyle === visualStyleId) {
+  if (nextId === experienceId) {
     return;
   }
   const url = new URL(window.location.href);
-  if (nextStyle === "metamorphosis") {
+  url.searchParams.delete("mode");
+  if (nextId === "vita") {
     url.searchParams.delete("style");
   } else {
-    url.searchParams.set("style", nextStyle);
-  }
-  window.location.href = url.toString();
-});
-
-sculptureModeSelect.addEventListener("change", () => {
-  const nextMode = sculptureModeSelect.value as SculptureMode;
-  if (nextMode !== "classic" && nextMode !== "carve" && nextMode !== "amoeba") {
-    return;
-  }
-  if (nextMode === sculptureMode) {
-    return;
-  }
-  const url = new URL(window.location.href);
-  if (nextMode === "classic") {
-    url.searchParams.delete("mode");
-  } else {
-    url.searchParams.set("mode", nextMode);
+    url.searchParams.set("style", nextId);
   }
   window.location.href = url.toString();
 });
@@ -5203,11 +5333,34 @@ const pokeSculptureAtClient = (clientX: number, clientY: number) => {
 };
 
 const viewPointerState = { x: 0, y: 0, id: null as number | null };
+const starPointerNdc = new THREE.Vector2();
+let starPointerActive = false;
+
+const syncStarPointerFromClient = (clientX: number, clientY: number) => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    starPointerActive = false;
+    return;
+  }
+  starPointerNdc.set(
+    ((clientX - rect.left) / rect.width) * 2 - 1,
+    -((clientY - rect.top) / rect.height) * 2 + 1,
+  );
+  starPointerActive = true;
+};
+
+renderer.domElement.addEventListener("pointermove", (event: PointerEvent) => {
+  syncStarPointerFromClient(event.clientX, event.clientY);
+});
+renderer.domElement.addEventListener("pointerleave", () => {
+  starPointerActive = false;
+});
 renderer.domElement.addEventListener("pointerdown", (event: PointerEvent) => {
   if (event.button !== 0) return;
   viewPointerState.x = event.clientX;
   viewPointerState.y = event.clientY;
   viewPointerState.id = event.pointerId;
+  syncStarPointerFromClient(event.clientX, event.clientY);
 });
 renderer.domElement.addEventListener("pointerup", (event: PointerEvent) => {
   if (event.button !== 0 || viewPointerState.id !== event.pointerId) return;
@@ -5219,6 +5372,7 @@ renderer.domElement.addEventListener("pointerup", (event: PointerEvent) => {
 });
 renderer.domElement.addEventListener("pointercancel", () => {
   viewPointerState.id = null;
+  starPointerActive = false;
 });
 
 const keyLight = new THREE.DirectionalLight(0xffffff, sceneEnv.key);
@@ -5993,7 +6147,15 @@ const render = () => {
 
   lastDisplayBands = displayBands;
 
-  sceneBackground.update(elapsedTime, displayBands, deltaTime, camera);
+  sceneBackground.update(
+    elapsedTime,
+    displayBands,
+    deltaTime,
+    camera,
+    starPointerActive ? starPointerNdc : null,
+    // 曲再生中は静止、開始前・完成後は漂う
+    !(isAudioReady && !isComplete),
+  );
   drawAudioScope(waveform, rhythmEvents, bandMeters, bandSoloMode, latestStructure, speciesProfile);
   updateEnvironmentCrossfade(deltaTime);
   viewControls.update();

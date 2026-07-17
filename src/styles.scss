@@ -78,24 +78,6 @@ h1 {
   display: block;
 }
 
-.intro-copy--carve,
-.intro-copy--amoeba {
-  display: none;
-}
-
-.mode-carve .intro-copy--classic,
-.mode-amoeba .intro-copy--classic {
-  display: none;
-}
-
-.mode-carve .intro-copy--carve {
-  display: block;
-}
-
-.mode-amoeba .intro-copy--amoeba {
-  display: block;
-}
-
 .control-panel-shell {
   position: fixed;
   z-index: 3;

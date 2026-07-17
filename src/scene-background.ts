@@ -3,10 +3,42 @@ import type { AudioBands } from "./sculpture-types";
 import {
   growthFlow,
   growthModulateScalar,
+  growthModulateVector3,
   growthPattern,
   type GrowthVec3,
 } from "./growth-algorithm";
 import type { BackgroundProfile, VisualStyleEnv } from "./visual-style";
+
+/** Points のデフォルト四角を消すためのソフト円テクスチャ（共有） */
+let sharedPointCircleMap: THREE.CanvasTexture | null = null;
+const getPointCircleMap = () => {
+  if (sharedPointCircleMap) {
+    return sharedPointCircleMap;
+  }
+  const size = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    const fallback = new THREE.Texture();
+    fallback.needsUpdate = true;
+    sharedPointCircleMap = fallback as THREE.CanvasTexture;
+    return sharedPointCircleMap;
+  }
+  // AdditiveBlending は alpha を無視して RGB を足すため、縁は黒へ落とす（透明白だと四角が残る）
+  const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  gradient.addColorStop(0, "rgb(255,255,255)");
+  gradient.addColorStop(0.32, "rgb(255,255,255)");
+  gradient.addColorStop(0.68, "rgb(90,90,90)");
+  gradient.addColorStop(1, "rgb(0,0,0)");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+  sharedPointCircleMap = new THREE.CanvasTexture(canvas);
+  sharedPointCircleMap.colorSpace = THREE.NoColorSpace;
+  sharedPointCircleMap.needsUpdate = true;
+  return sharedPointCircleMap;
+};
 
 const domeVertexShader = /* glsl */ `
   varying vec3 vDir;
@@ -209,6 +241,7 @@ class BackgroundDome {
 
 class StarField {
   readonly points: THREE.Points;
+  readonly trailPoints: THREE.Points;
   private readonly positions: Float32Array;
   private readonly colors: Float32Array;
   private readonly baseColors: Float32Array;
@@ -219,11 +252,25 @@ class StarField {
   private readonly particleSeed: Float32Array | null;
   private readonly geometry: THREE.BufferGeometry;
   private readonly material: THREE.PointsMaterial;
+  private readonly trailGeometry: THREE.BufferGeometry;
+  private readonly trailMaterial: THREE.PointsMaterial;
+  private readonly trailPositions: Float32Array;
+  private readonly trailColors: Float32Array;
+  private readonly trailSteps: number;
   private readonly parallax: number;
   private readonly parallaxAmount: number;
   private readonly organicDrift: boolean;
   private readonly baseOpacity: number;
+  /** 近 > 中 > 遠の常時ドリフト強さ */
+  private readonly idleMotion: number;
+  private readonly avoidOffsets: Float32Array;
   private readonly _flowOut: GrowthVec3 = { x: 0, y: 0, z: 0 };
+  private readonly _world = new THREE.Vector3();
+  private readonly _ndc = new THREE.Vector3();
+  private readonly _camRight = new THREE.Vector3();
+  private readonly _camUp = new THREE.Vector3();
+  /** 曲再生中は止め、停止中だけ進むドリフト時計 */
+  private motionClock = 0;
 
   constructor(options?: {
     count?: number;
@@ -236,6 +283,10 @@ class StarField {
     coolBias?: boolean;
     /** 成長アルゴリズムに則った深海のふよふよ漂い（vita abyss） */
     organicDrift?: boolean;
+    /** 常時ドリフトの相対強さ（近=1 / 中≈0.55 / 遠≈0.28） */
+    idleMotion?: number;
+    /** 軌跡のゴースト段数 */
+    trailSteps?: number;
   }) {
     const count = options?.count ?? 2400;
     const minRadius = options?.minRadius ?? 26;
@@ -246,6 +297,8 @@ class StarField {
     this.parallax = options?.parallax ?? 1;
     this.parallaxAmount = options?.parallaxAmount ?? 0.04;
     this.organicDrift = options?.organicDrift === true;
+    this.idleMotion = options?.idleMotion ?? 1;
+    this.trailSteps = Math.max(1, options?.trailSteps ?? 2);
     this.baseOpacity = baseOpacity;
     this.anchorPositions = this.organicDrift ? new Float32Array(count * 3) : null;
     this.particleSeed = this.organicDrift ? new Float32Array(count) : null;
@@ -256,6 +309,9 @@ class StarField {
     this.twinklePhase = new Float32Array(count);
     this.twinkleRate = new Float32Array(count);
     this.driftDir = new Float32Array(count * 3);
+    this.avoidOffsets = new Float32Array(count * 3);
+    this.trailPositions = new Float32Array(count * this.trailSteps * 3);
+    this.trailColors = new Float32Array(count * this.trailSteps * 3);
 
     for (let i = 0; i < count; i += 1) {
       const idx = i * 3;
@@ -307,7 +363,7 @@ class StarField {
 
       const bright = Math.pow(Math.random(), 3.2);
       const intensity = this.organicDrift
-        ? 0.42 + (1 - bright) * 0.95
+        ? 0.7 + (1 - bright) * 1.15
         : 0.18 + (1 - bright) * 0.95;
 
       this.baseColors[idx] = r * intensity;
@@ -319,11 +375,24 @@ class StarField {
 
       this.twinklePhase[i] = Math.random() * Math.PI * 2;
       this.twinkleRate[i] = this.organicDrift ? 0.12 + Math.random() * 0.38 : 0.25 + Math.random() * 0.9;
+
+      for (let step = 0; step < this.trailSteps; step += 1) {
+        const tIdx = (i * this.trailSteps + step) * 3;
+        this.trailPositions[tIdx] = this.positions[idx];
+        this.trailPositions[tIdx + 1] = this.positions[idx + 1];
+        this.trailPositions[tIdx + 2] = this.positions[idx + 2];
+        const fade = 0.42 - step * 0.14;
+        this.trailColors[tIdx] = this.colors[idx] * fade;
+        this.trailColors[tIdx + 1] = this.colors[idx + 1] * fade;
+        this.trailColors[tIdx + 2] = this.colors[idx + 2] * fade;
+      }
     }
 
     this.geometry = new THREE.BufferGeometry();
     this.geometry.setAttribute("position", new THREE.BufferAttribute(this.positions, 3));
     this.geometry.setAttribute("color", new THREE.BufferAttribute(this.colors, 3));
+    // 円マップ（縁は黒）— 近い星が WebGL のデフォルト四角に見えないようにする
+    // alphaTest は付けない（遠い薄い点が消える）/ toneMapped:false で ACES 潰れを防ぐ
     this.material = new THREE.PointsMaterial({
       size: pointSize,
       sizeAttenuation: true,
@@ -332,22 +401,108 @@ class StarField {
       opacity: baseOpacity,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
+      map: getPointCircleMap(),
+      toneMapped: false,
     });
     this.points = new THREE.Points(this.geometry, this.material);
     this.points.frustumCulled = false;
     this.points.renderOrder = -10;
+
+    this.trailGeometry = new THREE.BufferGeometry();
+    this.trailGeometry.setAttribute("position", new THREE.BufferAttribute(this.trailPositions, 3));
+    this.trailGeometry.setAttribute("color", new THREE.BufferAttribute(this.trailColors, 3));
+    this.trailMaterial = new THREE.PointsMaterial({
+      size: pointSize * 0.78,
+      sizeAttenuation: true,
+      vertexColors: true,
+      transparent: true,
+      opacity: Math.min(0.72, baseOpacity * 0.48),
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      map: getPointCircleMap(),
+      toneMapped: false,
+    });
+    this.trailPoints = new THREE.Points(this.trailGeometry, this.trailMaterial);
+    this.trailPoints.frustumCulled = false;
+    this.trailPoints.renderOrder = -11;
   }
 
-  update(time: number, bands: AudioBands, deltaTime: number, cameraPosition?: THREE.Vector3) {
+  /** 遅延ゴーストで移動軌跡を残す */
+  private updateTrails(deltaTime: number, motionEnabled = true) {
+    const count = this.twinklePhase.length;
+    // 停止中は軌跡を素早く本体へ収束させる
+    const followRate = motionEnabled ? 2.4 + this.idleMotion * 1.1 : 14;
+    const follow = 1 - Math.exp(-deltaTime * followRate);
+    const trailOpacity =
+      this.material.opacity * (0.28 + this.idleMotion * 0.12);
+
+    for (let i = 0; i < count; i += 1) {
+      const idx = i * 3;
+      let srcX = this.positions[idx];
+      let srcY = this.positions[idx + 1];
+      let srcZ = this.positions[idx + 2];
+      const cr = this.colors[idx];
+      const cg = this.colors[idx + 1];
+      const cb = this.colors[idx + 2];
+
+      for (let step = 0; step < this.trailSteps; step += 1) {
+        const tIdx = (i * this.trailSteps + step) * 3;
+        this.trailPositions[tIdx] += (srcX - this.trailPositions[tIdx]) * follow;
+        this.trailPositions[tIdx + 1] += (srcY - this.trailPositions[tIdx + 1]) * follow;
+        this.trailPositions[tIdx + 2] += (srcZ - this.trailPositions[tIdx + 2]) * follow;
+        srcX = this.trailPositions[tIdx];
+        srcY = this.trailPositions[tIdx + 1];
+        srcZ = this.trailPositions[tIdx + 2];
+
+        const fade = 0.55 - step * (0.55 / (this.trailSteps + 0.5));
+        this.trailColors[tIdx] = cr * fade;
+        this.trailColors[tIdx + 1] = cg * fade;
+        this.trailColors[tIdx + 2] = cb * fade;
+      }
+    }
+
+    this.trailPoints.position.copy(this.points.position);
+    this.trailMaterial.opacity = trailOpacity;
+    this.trailGeometry.attributes.position.needsUpdate = true;
+    this.trailGeometry.attributes.color.needsUpdate = true;
+  }
+
+  update(
+    time: number,
+    bands: AudioBands,
+    deltaTime: number,
+    camera?: THREE.PerspectiveCamera,
+    pointerNDC?: THREE.Vector2 | null,
+    motionEnabled = true,
+  ) {
+    const cameraPosition = camera?.position;
+    if (motionEnabled) {
+      this.motionClock += deltaTime;
+    }
+
     if (this.organicDrift && this.anchorPositions && this.particleSeed) {
-      this.updateOrganicDrift(time, bands, deltaTime, cameraPosition);
+      if (motionEnabled) {
+        this.updateOrganicDrift(this.motionClock, bands, deltaTime, cameraPosition);
+      } else if (cameraPosition) {
+        const px = cameraPosition.x * (1 - this.parallax) * this.parallaxAmount;
+        const py = cameraPosition.y * (1 - this.parallax) * this.parallaxAmount * 0.85;
+        const pz = cameraPosition.z * (1 - this.parallax) * this.parallaxAmount;
+        this.points.position.set(px, py, pz);
+      }
+      this.refreshPointerAvoid(deltaTime, camera, pointerNDC);
+      this.geometry.attributes.position.needsUpdate = true;
+      this.updateTrails(deltaTime, motionEnabled);
       return;
     }
+
+    // 前フレームの回避オフセットを外してからシミュレート（蓄積防止）
+    this.applyAvoidSign(-1);
 
     const audioTwinkle = 0.18 + bands.high * 0.35 + bands.brightness * 0.25;
     const calm = 1 - bands.sub * 0.25;
 
-    const drift = deltaTime * 0.05 * (0.35 + audioTwinkle) * calm * this.parallax;
+    const drift =
+      motionEnabled ? deltaTime * 0.05 * (0.35 + audioTwinkle) * calm * this.parallax : 0;
     const count = this.twinklePhase.length;
     for (let i = 0; i < count; i += 1) {
       const idx = i * 3;
@@ -373,12 +528,93 @@ class StarField {
       this.points.position.set(px, py, pz);
     }
 
+    this.refreshPointerAvoid(deltaTime, camera, pointerNDC);
     this.geometry.attributes.position.needsUpdate = true;
     this.geometry.attributes.color.needsUpdate = true;
     this.material.opacity = 0.75 + bands.high * 0.12;
+    this.updateTrails(deltaTime, motionEnabled);
   }
 
-  /** vita: 成長アルゴリズムの flow / pattern で深海のふよふよ漂い */
+  /** カーソル付近の星を画面空間で少し押し退ける */
+  private refreshPointerAvoid(
+    deltaTime: number,
+    camera?: THREE.PerspectiveCamera,
+    pointerNDC?: THREE.Vector2 | null,
+  ) {
+    const count = this.twinklePhase.length;
+    const ease = Math.min(1, deltaTime * 10);
+    const settle = Math.min(1, deltaTime * 6);
+    const radius = 0.22;
+    const radiusSq = radius * radius;
+    // 近いレイヤーほど強く避ける（parallax が大きいほど手前）
+    const layerGain = 0.55 + this.parallax * 0.35;
+    const screenPush = 0.014 * layerGain;
+    const ox = this.points.position.x;
+    const oy = this.points.position.y;
+    const oz = this.points.position.z;
+    const active = Boolean(camera && pointerNDC);
+
+    if (active && camera && pointerNDC) {
+      this._camRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+      this._camUp.setFromMatrixColumn(camera.matrixWorld, 1).normalize();
+      const mx = pointerNDC.x;
+      const my = pointerNDC.y;
+
+      for (let i = 0; i < count; i += 1) {
+        const idx = i * 3;
+        this._world.set(this.positions[idx] + ox, this.positions[idx + 1] + oy, this.positions[idx + 2] + oz);
+        this._ndc.copy(this._world).project(camera);
+        if (this._ndc.z < -1 || this._ndc.z > 1) {
+          this.avoidOffsets[idx] += (0 - this.avoidOffsets[idx]) * settle;
+          this.avoidOffsets[idx + 1] += (0 - this.avoidOffsets[idx + 1]) * settle;
+          this.avoidOffsets[idx + 2] += (0 - this.avoidOffsets[idx + 2]) * settle;
+          continue;
+        }
+
+        const dx = this._ndc.x - mx;
+        const dy = this._ndc.y - my;
+        const d2 = dx * dx + dy * dy;
+        let tx = 0;
+        let ty = 0;
+        let tz = 0;
+        if (d2 < radiusSq && d2 > 1e-8) {
+          const d = Math.sqrt(d2);
+          const falloff = (1 - d / radius) ** 2;
+          const depth = this._world.distanceTo(camera.position);
+          const push = falloff * screenPush * depth;
+          const inv = 1 / d;
+          tx = (this._camRight.x * dx + this._camUp.x * dy) * inv * push;
+          ty = (this._camRight.y * dx + this._camUp.y * dy) * inv * push;
+          tz = (this._camRight.z * dx + this._camUp.z * dy) * inv * push;
+        }
+
+        this.avoidOffsets[idx] += (tx - this.avoidOffsets[idx]) * ease;
+        this.avoidOffsets[idx + 1] += (ty - this.avoidOffsets[idx + 1]) * ease;
+        this.avoidOffsets[idx + 2] += (tz - this.avoidOffsets[idx + 2]) * ease;
+      }
+    } else {
+      for (let i = 0; i < count; i += 1) {
+        const idx = i * 3;
+        this.avoidOffsets[idx] += (0 - this.avoidOffsets[idx]) * settle;
+        this.avoidOffsets[idx + 1] += (0 - this.avoidOffsets[idx + 1]) * settle;
+        this.avoidOffsets[idx + 2] += (0 - this.avoidOffsets[idx + 2]) * settle;
+      }
+    }
+
+    this.applyAvoidSign(1);
+  }
+
+  private applyAvoidSign(sign: number) {
+    const count = this.twinklePhase.length;
+    for (let i = 0; i < count; i += 1) {
+      const idx = i * 3;
+      this.positions[idx] += this.avoidOffsets[idx] * sign;
+      this.positions[idx + 1] += this.avoidOffsets[idx + 1] * sign;
+      this.positions[idx + 2] += this.avoidOffsets[idx + 2] * sign;
+    }
+  }
+
+  /** 彫刻と同じ成長アルゴリズム（pattern / flow / modulate）で漂う */
   private updateOrganicDrift(
     time: number,
     bands: AudioBands,
@@ -387,9 +623,15 @@ class StarField {
   ) {
     const anchors = this.anchorPositions!;
     const seeds = this.particleSeed!;
-    const calm = 1 - bands.sub * 0.2;
     const activity = bands.overall * 0.45 + bands.melody * 0.4 + bands.brightness * 0.2;
-    const slow = time * 0.26;
+    const motion = this.idleMotion;
+    // SoundSculpture.updateIdleWobble と同じ時間スケールで同期
+    const slow = time * 0.32;
+    const fast = time * 0.58 + 13.7;
+    const flowSaltBase = slow * 0.55;
+    // 近ほど大きく・わかりやすく動く（世界座標）
+    const radialScale = (0.55 + motion * 0.95) * (0.85 + activity * 0.55);
+    const flowScale = (0.7 + motion * 1.15) * (0.9 + activity * 0.7);
     const count = this.twinklePhase.length;
 
     for (let i = 0; i < count; i += 1) {
@@ -403,39 +645,67 @@ class StarField {
       const nz = az / shellR;
       const seed = seeds[i];
       const phase = this.twinklePhase[i];
-      const rate = this.twinkleRate[i];
+      const deformSalt = seed + flowSaltBase;
 
-      const patternSlow = growthPattern(nx * 0.82, ny * 0.82, nz * 0.82, seed + slow * 0.52);
-      const patternFast = growthPattern(
-        nx * 1.28,
-        ny * 1.28,
-        nz * 1.28,
-        seed + slow * 0.74 + 9.6,
+      // 彫刻 idle と同型の pattern ミックス
+      const wave =
+        growthPattern(nx * 0.75, ny * 0.75, nz * 0.75, seed + slow) * 0.68 +
+        growthPattern(nx * 1.35, ny * 1.35, nz * 1.35, seed + fast) * 0.22 +
+        growthPattern(nx * 0.5, ny * 0.5, nz * 0.5, seed + slow * 0.47 + 8.2) * 0.1;
+      const breathe = wave * 0.5 + 0.5;
+
+      growthFlow(nx * 1.1, ny * 1.1, nz * 1.1, deformSalt + i * 0.003, this._flowOut);
+      // 法線成分を抜き tangent flow に（彫刻の spectral flow と同じ）
+      const dot = this._flowOut.x * nx + this._flowOut.y * ny + this._flowOut.z * nz;
+      let fx = this._flowOut.x - nx * dot;
+      let fy = this._flowOut.y - ny * dot;
+      let fz = this._flowOut.z - nz * dot;
+      const flowLen = Math.hypot(fx, fy, fz) || 1;
+      fx /= flowLen;
+      fy /= flowLen;
+      fz /= flowLen;
+
+      const radialAmp = growthModulateScalar(wave * radialScale, nx, ny, nz, deformSalt, "idle");
+      const flowAmp = growthModulateScalar(
+        flowScale * (0.55 + breathe * 0.65 + activity * 0.35),
+        nx,
+        ny,
+        nz,
+        deformSalt + 4.1,
+        "flow",
       );
-      // pattern は -1..1 — 0..1 に正規化して明滅が消えないようにする
-      const breathe = (patternSlow * 0.64 + patternFast * 0.36) * 0.5 + 0.5;
-      const hueWave = growthPattern(nx, ny, nz, seed + 14.2 + slow * 0.22) * 0.5 + 0.5;
+      const liveBoost = growthModulateScalar(
+        0.2 + activity * 0.55,
+        nx,
+        ny,
+        nz,
+        deformSalt + 9.2,
+        "live",
+      );
+      const flowVec = growthModulateVector3(
+        fx * flowAmp * (1 + liveBoost),
+        fy * flowAmp * (1 + liveBoost),
+        fz * flowAmp * (1 + liveBoost),
+        nx,
+        ny,
+        nz,
+        deformSalt + 5.5,
+        "flow",
+      );
 
-      growthFlow(nx * 1.02, ny * 1.02, nz * 1.02, seed + slow * 0.44, this._flowOut);
+      // 第2スケールの flow でアルゴリズム差をはっきり出す
+      growthFlow(nx * 1.35, ny * 1.35, nz * 1.35, deformSalt * 0.7 + bands.centroid * 4, this._flowOut);
+      const dot2 = this._flowOut.x * nx + this._flowOut.y * ny + this._flowOut.z * nz;
+      const sx = (this._flowOut.x - nx * dot2) * flowAmp * 0.45;
+      const sy = (this._flowOut.y - ny * dot2) * flowAmp * 0.45;
+      const sz = (this._flowOut.z - nz * dot2) * flowAmp * 0.45;
 
-      const idleGain = growthModulateScalar(1, nx, ny, nz, seed + slow * 0.35, "idle");
-      const flowGain = growthModulateScalar(1, nx, ny, nz, seed + slow * 0.62, "flow");
-      const liveGain = growthModulateScalar(Math.max(0.08, activity), nx, ny, nz, seed + slow * 0.18, "live");
-
-      const floatA = Math.sin(time * rate + phase + breathe * Math.PI * 2);
-      const floatB = Math.sin(time * rate * 0.58 + phase * 1.4 + patternFast * 2.2);
-      const buoy = Math.sin(time * 0.19 + phase * 0.7 + breathe * Math.PI * 2) * 0.022 * idleGain;
-
-      const driftAmp =
-        (0.018 + breathe * 0.024 + liveGain * 0.016) * idleGain * flowGain * calm * this.parallax;
-      const radialAmp = (0.012 + breathe * 0.014) * floatA * idleGain;
-
-      let px = ax + this._flowOut.x * floatB * driftAmp + nx * radialAmp;
-      let py = ay + this._flowOut.y * floatA * driftAmp * 0.52 + ny * radialAmp + buoy;
-      let pz = az + this._flowOut.z * floatB * driftAmp + nz * radialAmp;
+      let px = ax + nx * radialAmp + flowVec.x + sx;
+      let py = ay + ny * radialAmp * 0.72 + flowVec.y + sy;
+      let pz = az + nz * radialAmp + flowVec.z + sz;
 
       const cr = Math.hypot(px, py, pz) || 1;
-      const radiusPull = (shellR - cr) * Math.min(1, deltaTime * 2.8);
+      const radiusPull = (shellR - cr) * Math.min(1, deltaTime * 1.6);
       px += (px / cr) * radiusPull;
       py += (py / cr) * radiusPull;
       pz += (pz / cr) * radiusPull;
@@ -444,17 +714,14 @@ class StarField {
       this.positions[idx + 1] = py;
       this.positions[idx + 2] = pz;
 
+      const hueWave = growthPattern(nx, ny, nz, seed + 14.2 + slow * 0.22) * 0.5 + 0.5;
       const twinkle =
-        0.78 +
-        0.22 * Math.sin(time * rate * 0.48 + phase) * (0.8 + activity * 0.45 + breathe * 0.2);
-      const colorGain = (0.82 + breathe * 0.28 + liveGain * 0.35) * twinkle;
-      const rShift = 0.92 + hueWave * 0.16;
-      const gShift = 0.9 + breathe * 0.18 + hueWave * 0.08;
-      const bShift = 0.88 + breathe * 0.14 + hueWave * 0.2;
-
-      this.colors[idx] = Math.max(0.04, this.baseColors[idx] * colorGain * rShift);
-      this.colors[idx + 1] = Math.max(0.04, this.baseColors[idx + 1] * colorGain * gShift);
-      this.colors[idx + 2] = Math.max(0.06, this.baseColors[idx + 2] * colorGain * bShift);
+        0.76 +
+        0.24 * Math.sin(time * this.twinkleRate[i] * 0.48 + phase) * (0.75 + activity * 0.5 + breathe * 0.25);
+      const colorGain = (0.78 + breathe * 0.35 + liveBoost * 0.4) * twinkle;
+      this.colors[idx] = Math.max(0.04, this.baseColors[idx] * colorGain * (0.9 + hueWave * 0.18));
+      this.colors[idx + 1] = Math.max(0.04, this.baseColors[idx + 1] * colorGain * (0.88 + breathe * 0.2));
+      this.colors[idx + 2] = Math.max(0.06, this.baseColors[idx + 2] * colorGain * (0.86 + hueWave * 0.22));
     }
 
     if (cameraPosition) {
@@ -464,9 +731,8 @@ class StarField {
       this.points.position.set(px, py, pz);
     }
 
-    this.geometry.attributes.position.needsUpdate = true;
     this.geometry.attributes.color.needsUpdate = true;
-    this.material.opacity = this.baseOpacity * (0.9 + activity * 0.14 + bands.high * 0.08);
+    this.material.opacity = this.baseOpacity * (0.95 + activity * 0.14 + bands.high * 0.08);
   }
 }
 
@@ -528,6 +794,8 @@ class DustMoteField {
       opacity: 0.58,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
+      map: getPointCircleMap(),
+      toneMapped: false,
     });
     this.points = new THREE.Points(this.geometry, this.material);
     this.points.frustumCulled = false;
@@ -631,6 +899,8 @@ class BiolumeMoteField {
       opacity: baseOpacity,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
+      map: getPointCircleMap(),
+      toneMapped: false,
     });
     this.points = new THREE.Points(this.geometry, this.material);
     this.points.frustumCulled = false;
@@ -839,60 +1109,67 @@ export class SceneBackground {
     }
 
     this.starsNear = new StarField({
-      count: this.abyssVariant ? 640 : 820,
-      minRadius: 10,
-      maxRadius: this.abyssVariant ? 22 : 26,
-      size: this.abyssVariant ? 0.034 : 0.028,
-      baseOpacity: this.abyssVariant ? 0.92 : 0.95,
+      count: this.abyssVariant ? 900 : 820,
+      // カメラ(~6)に近すぎると sizeAttenuation で巨大な四角になる
+      minRadius: this.abyssVariant ? 16 : 10,
+      maxRadius: this.abyssVariant ? 28 : 26,
+      size: this.abyssVariant ? 0.098 : 0.052,
+      baseOpacity: this.abyssVariant ? 1 : 0.95,
       parallax: 1.6,
       parallaxAmount: this.abyssVariant ? 0.14 : 0.04,
       coolBias: this.abyssVariant,
       organicDrift: this.abyssVariant,
+      idleMotion: 1,
+      trailSteps: 3,
     });
     this.starsMid = this.abyssVariant
       ? new StarField({
-          count: 1800,
-          minRadius: 30,
+          count: 2200,
+          minRadius: 28,
           maxRadius: 72,
-          size: 0.022,
-          baseOpacity: 0.78,
+          size: 0.046,
+          baseOpacity: 0.95,
           parallax: 0.78,
           parallaxAmount: 0.08,
           coolBias: true,
           organicDrift: true,
+          idleMotion: 0.55,
+          trailSteps: 2,
         })
       : null;
     this.starsFar = new StarField({
-      count: this.abyssVariant ? 5600 : 3400,
-      minRadius: 28,
+      count: this.abyssVariant ? 6400 : 3400,
+      minRadius: 26,
       maxRadius: this.abyssVariant ? 150 : 58,
-      size: this.abyssVariant ? 0.016 : 0.015,
-      baseOpacity: this.abyssVariant ? 0.72 : 0.72,
+      size: this.abyssVariant ? 0.028 : 0.02,
+      baseOpacity: this.abyssVariant ? 0.95 : 0.8,
       parallax: 0.38,
       parallaxAmount: this.abyssVariant ? 0.05 : 0.04,
       coolBias: this.abyssVariant,
       organicDrift: this.abyssVariant,
+      idleMotion: 0.28,
+      trailSteps: 2,
     });
 
     this.dust = this.profile?.dustMotes ? new DustMoteField() : null;
     this.biolume = this.profile?.biolumeMotes
       ? new BiolumeMoteField({
-          count: 200,
-          size: 0.03,
-          baseOpacity: 0.48,
-          minRadius: 6,
-          maxRadius: 24,
-          intensityScale: 1.35,
+          count: 180,
+          size: 0.018,
+          baseOpacity: 0.45,
+          minRadius: 22,
+          maxRadius: 42,
+          intensityScale: 1.05,
         })
       : null;
     this.biolumeFar = this.profile?.biolumeMotes
       ? new BiolumeMoteField({
-          count: 360,
-          size: 0.014,
-          baseOpacity: 0.22,
-          minRadius: 38,
+          count: 380,
+          size: 0.016,
+          baseOpacity: 0.28,
+          minRadius: 40,
           maxRadius: 110,
-          intensityScale: 0.75,
+          intensityScale: 0.8,
         })
       : null;
     this.cyclorama = this.profile?.studioSpace ? new StudioCyclorama() : null;
@@ -920,10 +1197,13 @@ export class SceneBackground {
     }
 
     this.starsNear.points.visible = sceneEnv.stars;
+    this.starsNear.trailPoints.visible = sceneEnv.stars;
     if (this.starsMid) {
       this.starsMid.points.visible = sceneEnv.stars;
+      this.starsMid.trailPoints.visible = sceneEnv.stars;
     }
     this.starsFar.points.visible = sceneEnv.stars;
+    this.starsFar.trailPoints.visible = sceneEnv.stars;
     if (this.dust) {
       this.dust.points.visible = true;
     }
@@ -944,10 +1224,13 @@ export class SceneBackground {
     if (this.innerDome) {
       scene.add(this.innerDome.mesh);
     }
+    scene.add(this.starsFar.trailPoints);
     scene.add(this.starsFar.points);
     if (this.starsMid) {
+      scene.add(this.starsMid.trailPoints);
       scene.add(this.starsMid.points);
     }
+    scene.add(this.starsNear.trailPoints);
     scene.add(this.starsNear.points);
     if (this.dust) {
       scene.add(this.dust.points);
@@ -1015,13 +1298,23 @@ export class SceneBackground {
 
   setStarsVisible(visible: boolean) {
     this.starsNear.points.visible = visible;
+    this.starsNear.trailPoints.visible = visible;
     if (this.starsMid) {
       this.starsMid.points.visible = visible;
+      this.starsMid.trailPoints.visible = visible;
     }
     this.starsFar.points.visible = visible;
+    this.starsFar.trailPoints.visible = visible;
   }
 
-  update(time: number, bands: AudioBands, deltaTime: number, camera: THREE.PerspectiveCamera) {
+  update(
+    time: number,
+    bands: AudioBands,
+    deltaTime: number,
+    camera: THREE.PerspectiveCamera,
+    pointerNDC: THREE.Vector2 | null = null,
+    starsMotionEnabled = true,
+  ) {
     const targetAudio = bands.overall * 0.55 + bands.melody * 0.45;
     this.audioSmooth += (targetAudio - this.audioSmooth) * Math.min(1, deltaTime * 3.5);
 
@@ -1033,9 +1326,9 @@ export class SceneBackground {
     this.innerDome?.applyParallax(camera.position, this.abyssVariant ? 0.018 : 0.025);
 
     if (this.starsNear.points.visible) {
-      this.starsNear.update(time, bands, deltaTime, camera.position);
-      this.starsMid?.update(time, bands, deltaTime, camera.position);
-      this.starsFar.update(time, bands, deltaTime, camera.position);
+      this.starsNear.update(time, bands, deltaTime, camera, pointerNDC, starsMotionEnabled);
+      this.starsMid?.update(time, bands, deltaTime, camera, pointerNDC, starsMotionEnabled);
+      this.starsFar.update(time, bands, deltaTime, camera, pointerNDC, starsMotionEnabled);
     }
     this.dust?.update(bands, deltaTime, camera.position);
     this.biolume?.update(bands, deltaTime, camera.position);

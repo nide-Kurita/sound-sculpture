@@ -1,12 +1,20 @@
 /**
- * ビジュアルスタイル — classic モードの見た目と完成時の振る舞いを差し替えるレイヤー。
+ * 作品体験（旧・彫刻モード + 作品スタイルを統合）。
+ * URL は `?style=` で切替え。デフォルトは vita。
  *
+ * - vita:          生命に振り切る。暗い環境で膜が真珠光沢に輝き、完成後も呼吸を続ける（基本）
  * - metamorphosis: 形成中は生命体、音が止まると石化・結晶化して彫刻として完成する
- * - vita:          生命に振り切る。暗い環境で膜が真珠光沢に輝き、完成後も呼吸を続ける
  * - monolith:      彫刻に振り切る。膜なし・素材感重視、完成でギャラリー照明が灯る
+ * - carve:         無から音で形が出現する専用エンジン
+ * - amoeba:        アメーバ増殖の専用エンジン
  */
 
+import type { SculptureMode } from "./sculpture-types";
+
 export type VisualStyleId = "metamorphosis" | "vita" | "monolith";
+
+/** 統合された作品モード ID（URL `style` パラメータ） */
+export type ExperienceId = VisualStyleId | "carve" | "amoeba";
 
 export type BackgroundProfile = {
   studioSpace?: boolean;
@@ -206,7 +214,7 @@ const VITA: VisualStyleConfig = {
       domeVariant: "abyss",
       openVoid: true,
       biolumeMotes: true,
-      fogDensity: 0.0022,
+      fogDensity: 0.0012,
     },
   },
 };
@@ -262,8 +270,8 @@ const MONOLITH: VisualStyleConfig = {
 };
 
 export const VISUAL_STYLE_CATALOG: readonly VisualStyleConfig[] = [
-  METAMORPHOSIS,
   VITA,
+  METAMORPHOSIS,
   MONOLITH,
 ];
 
@@ -285,17 +293,101 @@ export const NEUTRAL_ENVIRONMENT: VisualStyleEnv = {
   spotlightIntensity: 0,
 };
 
-export const getVisualStyle = (id: VisualStyleId): VisualStyleConfig =>
-  VISUAL_STYLE_CATALOG.find((style) => style.id === id) ?? METAMORPHOSIS;
-
-export const parseVisualStyleId = (): VisualStyleId => {
-  const param = new URLSearchParams(window.location.search).get("style");
-  if (param === "vita") return "vita";
-  if (param === "monolith") return "monolith";
-  return "metamorphosis";
+export type ExperienceEntry = {
+  id: ExperienceId;
+  label: string;
+  sculptureMode: SculptureMode;
+  /** classic エンジン時のみビジュアルスタイルを持つ */
+  visualStyleId: VisualStyleId | null;
+  introTitle: string;
+  introDescription: string;
 };
 
-let activeStyle: VisualStyleConfig = METAMORPHOSIS;
+export const EXPERIENCE_CATALOG: readonly ExperienceEntry[] = [
+  {
+    id: "vita",
+    label: VITA.label,
+    sculptureMode: "classic",
+    visualStyleId: "vita",
+    introTitle: VITA.introTitle,
+    introDescription: VITA.introDescription,
+  },
+  {
+    id: "metamorphosis",
+    label: METAMORPHOSIS.label,
+    sculptureMode: "classic",
+    visualStyleId: "metamorphosis",
+    introTitle: METAMORPHOSIS.introTitle,
+    introDescription: METAMORPHOSIS.introDescription,
+  },
+  {
+    id: "monolith",
+    label: MONOLITH.label,
+    sculptureMode: "classic",
+    visualStyleId: "monolith",
+    introTitle: MONOLITH.introTitle,
+    introDescription: MONOLITH.introDescription,
+  },
+  {
+    id: "carve",
+    label: "出現 — 無から生み出す",
+    sculptureMode: "carve",
+    visualStyleId: null,
+    introTitle: "音で生み出す",
+    introDescription:
+      "無の中心から、音が触媒となって形が立ち上がります。低音は体積を、中音は表面の流れを、高音は細部を刻みます。曲の長さに合わせて未出現の領域が後から現れ、無音が続くとその瞬間の姿を作品として固定します。",
+  },
+  {
+    id: "amoeba",
+    label: "アメーバ — 増殖する生命体",
+    sculptureMode: "amoeba",
+    visualStyleId: null,
+    introTitle: "音で育てる生命体",
+    introDescription:
+      "音が触媒となり、原生質が増殖する。細胞が出芽し、偽足を伸ばし、膜が広がって群体を形づくります。低音・中音・高音が不可逆に蓄積され、無音が続くとその瞬間の成長結果を固定します。",
+  },
+];
+
+export const getExperience = (id: ExperienceId): ExperienceEntry =>
+  EXPERIENCE_CATALOG.find((entry) => entry.id === id) ?? EXPERIENCE_CATALOG[0];
+
+export const getVisualStyle = (id: VisualStyleId): VisualStyleConfig =>
+  VISUAL_STYLE_CATALOG.find((style) => style.id === id) ?? VITA;
+
+/** @deprecated ExperienceId へ統合。互換のため残す */
+export const parseVisualStyleId = (): VisualStyleId => {
+  const experience = parseExperienceId();
+  if (experience === "metamorphosis" || experience === "monolith" || experience === "vita") {
+    return experience;
+  }
+  return "vita";
+};
+
+/**
+ * URL `?style=` を優先。旧 `?mode=carve|amoeba` も受け付ける。
+ * デフォルトは vita。
+ */
+export const parseExperienceId = (): ExperienceId => {
+  const params = new URLSearchParams(window.location.search);
+  const style = params.get("style");
+  if (style === "vita") return "vita";
+  if (style === "metamorphosis") return "metamorphosis";
+  if (style === "monolith") return "monolith";
+  if (style === "carve") return "carve";
+  if (style === "amoeba") return "amoeba";
+
+  const mode = params.get("mode");
+  if (mode === "carve") return "carve";
+  if (mode === "amoeba") return "amoeba";
+  if (mode === "classic") {
+    // 旧 URL: mode=classic のみ → デフォルト vita
+    return "vita";
+  }
+
+  return "vita";
+};
+
+let activeStyle: VisualStyleConfig = VITA;
 
 export const setActiveVisualStyle = (id: VisualStyleId) => {
   activeStyle = getVisualStyle(id);

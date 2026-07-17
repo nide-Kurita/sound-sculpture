@@ -6,24 +6,12 @@
     <title>Sound Sculpture</title>
   </head>
   <body>
-    <main id="app" class="mode-classic">
+    <main id="app" class="mode-classic style-vita theme-dark">
       <header class="intro" aria-label="Sound Sculpture">
         <p class="eyebrow">Sound Sculpture</p>
-        <h1 id="intro-title">
-          <span class="intro-copy intro-copy--classic">音で彫刻する</span>
-          <span class="intro-copy intro-copy--carve">音で生み出す</span>
-          <span class="intro-copy intro-copy--amoeba">音で育てる生命体</span>
-        </h1>
+        <h1 id="intro-title">音で育てる生命</h1>
         <p id="intro-description" class="description">
-          <span class="intro-copy intro-copy--classic">
-            PCに入力された音を解析し、低音の圧力を不可逆な形状変化として蓄積します。無音が続くと、その瞬間の形を完成作品として固定します。
-          </span>
-          <span class="intro-copy intro-copy--carve">
-            無の中心から、音が触媒となって形が立ち上がります。低音は体積を、中音は表面の流れを、高音は細部を刻みます。曲の長さに合わせて未出現の領域が後から現れ、無音が続くとその瞬間の姿を作品として固定します。
-          </span>
-          <span class="intro-copy intro-copy--amoeba">
-            音が触媒となり、原生質が増殖する。細胞が出芽し、偽足を伸ばし、膜が広がって群体を形づくります。低音・中音・高音が不可逆に蓄積され、無音が続くとその瞬間の成長結果を固定します。
-          </span>
+          音を糧に、深海のような闇の中で生命体が育ちます。膜は真珠のように輝き、完成後もあなたの音の鼓動を記憶して呼吸し続けます。
         </p>
       </header>
 
@@ -51,20 +39,9 @@
         <details class="control-group" open>
           <summary class="control-group__summary">入力・操作</summary>
           <div class="control-group__body">
-            <label class="sculpture-mode">
-              彫刻モード
-              <select id="sculpture-mode" class="sculpture-mode__select">
-                <option value="classic">粘土の成長（現行）</option>
-                <option value="carve">音で生み出す（無から出現）</option>
-                <option value="amoeba">生命体（アメーバ）</option>
-              </select>
-            </label>
-            <label class="sculpture-mode" id="visual-style-field">
+            <label class="sculpture-mode" id="experience-style-field">
               作品スタイル
-              <select id="visual-style" class="sculpture-mode__select">
-                <option value="metamorphosis">変容 — 生命が彫刻になる</option>
-                <option value="vita">生命 — 神秘の生命体</option>
-                <option value="monolith">彫刻 — 石とブロンズ</option>
+              <select id="experience-style" class="sculpture-mode__select">
               </select>
             </label>
             <label class="sculpture-mode">

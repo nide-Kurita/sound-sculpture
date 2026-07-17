@@ -131,7 +131,11 @@ export const curlNoiseSample = (
   out.z = ((Pb_xp - Pb_xn) - (Pa_yp - Pa_yn)) * invDouble;
 };
 
+/** @deprecated `parseExperienceId`（visual-style）へ統合。互換のため残す */
 export const parseSculptureMode = (): SculptureMode => {
+  const style = new URLSearchParams(window.location.search).get("style");
+  if (style === "carve") return "carve";
+  if (style === "amoeba") return "amoeba";
   const param = new URLSearchParams(window.location.search).get("mode");
   if (param === "carve") return "carve";
   if (param === "amoeba") return "amoeba";
