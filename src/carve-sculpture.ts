@@ -519,13 +519,18 @@ export class CarveSculpture implements SculptureExperience {
     this.updateGeometry(this.lastBands ?? this.zeroBands(), 0);
   }
 
-  reset() {
+  reset(seed?: number) {
     this.completed = false;
     this.frozenTime = 0;
     this.formingTime = 0;
     this.activeFormingTime = 0;
     this.spectralPhase = 0;
     this.growthPhase = 0;
+    if (seed !== undefined) {
+      this.morphologySeed = seed;
+    } else {
+      this.morphologySeed = seededUnit(0, 19.7) * 1000;
+    }
     this.kickImpulse = 0;
     this.snareImpulse = 0;
     this.hatImpulse = 0;

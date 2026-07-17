@@ -330,7 +330,7 @@ export class AmoebaSculpture implements SculptureExperience {
     this.completed = true;
   }
 
-  reset() {
+  reset(_seed?: number) {
     this.completed = false;
     this.simTime = 0;
     this.clayColorShift = createClayColorShift();

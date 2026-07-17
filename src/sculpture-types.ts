@@ -75,7 +75,8 @@ export type SculptureExperience = {
   /** クリック毎に粘土色を少しずらす（全モード共通の色条件） */
   nudgeClayColorOnClick?(): void;
   complete(): void;
-  reset(): void;
+  /** 同じ音源再現用。渡されていれば形態シードとして使う実装もある */
+  reset(seed?: number): void;
   createExportGroup(): THREE.Group;
 };
 

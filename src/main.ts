@@ -92,12 +92,25 @@ import {
   type SculptureExperience,
   type SculptureMode,
 } from "./sculpture-types";
+import {
+  buildDeterministicTimeline,
+  hashBytesToMorphologySeed,
+  sampleDeterministicFrame,
+  type DeterministicAudioTimeline,
+  type DeterministicSpectralFrame,
+} from "./deterministic-audio";
 
 type WaveformMetrics = {
   peak: number;
   rms: number;
   peakDelta: number;
   energyDelta: number;
+};
+
+type DeterministicSimStep = {
+  bands: AudioBands;
+  waveform: WaveformMetrics;
+  deltaTime: number;
 };
 
 /** 曲内相対正規化の対象となる帯域キー */
@@ -180,6 +193,29 @@ const defaultStructureSnapshot = (): StructureSnapshot => ({
 });
 
 let latestStructure: StructureSnapshot = defaultStructureSnapshot();
+
+/**
+ * audio-scope 右端の水色バーと、オブジェクト周りの glow dust / sparkle が共有する駆動量 (0–1)。
+ * waveEnergy（RMS）を主、wavePeak で瞬間の立ち上がりを足す。
+ */
+const scopeCyanDrive = (rhythm: RhythmEvents) =>
+  clamp01(rhythm.waveEnergy * 0.82 + rhythm.wavePeak * 0.28);
+
+const emptyBands = (): AudioBands => ({
+  sub: 0,
+  low: 0,
+  mid: 0,
+  melody: 0,
+  high: 0,
+  overall: 0,
+  centroid: 0,
+  bassFocus: 0,
+  melodyFocus: 0,
+  brightness: 0,
+  contrast: 0,
+});
+
+let lastDisplayBands: AudioBands = emptyBands();
 
 const createEmptyAudioProfile = (): AudioProfile => ({
   duration: 0,
@@ -704,6 +740,12 @@ class AudioInput {
   private bufferSource: AudioBufferSourceNode | null = null;
   private devAudioUrl: string | null = null;
   private devAudioBuffer: AudioBuffer | null = null;
+  /** ファイル内容から導出。同じ音源なら同じ形態シード */
+  private morphologySeed: number | null = null;
+  /** バッファ音源用の固定 hop スペクトル時系列 */
+  private timeline: DeterministicAudioTimeline | null = null;
+  private playbackStartAt = -1;
+  private simTime = 0;
   private bands: AudioBands = {
     sub: 0,
     low: 0,
@@ -808,10 +850,14 @@ class AudioInput {
       }
 
       const arrayBuffer = await response.arrayBuffer();
+      this.morphologySeed = hashBytesToMorphologySeed(arrayBuffer);
+      // decodeAudioData は arrayBuffer を切り離すので、先にシードを取る
       this.devAudioBuffer = await this.context!.decodeAudioData(arrayBuffer);
       this.devAudioUrl = audioUrl;
+      this.timeline = buildDeterministicTimeline(this.devAudioBuffer);
     }
 
+    this.resetAnalysisState();
     this.playDevBuffer();
 
     if (this.context!.state === "suspended") {
@@ -823,13 +869,60 @@ class AudioInput {
     return this.devAudioUrl !== null;
   }
 
+  /** バッファ音源を決定論シミュレーションしているか */
+  isDeterministic() {
+    return this.timeline !== null && this.morphologySeed !== null;
+  }
+
+  getMorphologySeed() {
+    return this.morphologySeed;
+  }
+
+  /**
+   * 決定論タイムライン上で再生が終わったか。
+   * wall clock ではなく simTime 基準（追いつき中に premature 完了しない）。
+   */
+  hasPlaybackEnded() {
+    if (!this.timeline) {
+      return false;
+    }
+    return this.simTime >= this.timeline.duration;
+  }
+
   restartDevAudioIfActive() {
     if (!this.devAudioUrl || !this.devAudioBuffer) {
       return false;
     }
-    this.playDevBuffer();
     this.resetAnalysisState();
+    this.playDevBuffer();
     return true;
+  }
+
+  /**
+   * 再生位置まで固定 hop でシミュレーションを進める。
+   * 同じ音源・同じ開始から同じ入力列になる。
+   */
+  drainSimulationSteps(): DeterministicSimStep[] {
+    if (!this.timeline || !this.context || this.playbackStartAt < 0) {
+      return [];
+    }
+
+    const hop = this.timeline.hopSec;
+    const target = Math.max(0, this.context.currentTime - this.playbackStartAt);
+    const steps: DeterministicSimStep[] = [];
+    const maxSteps = 180;
+
+    while (this.simTime + hop <= target + 1e-9 && steps.length < maxSteps) {
+      this.simTime += hop;
+      const frame = sampleDeterministicFrame(this.timeline, this.simTime);
+      steps.push({
+        bands: this.bandsFromDeterministicFrame(frame, hop),
+        waveform: this.waveformFromDeterministicFrame(frame),
+        deltaTime: hop,
+      });
+    }
+
+    return steps;
   }
 
   stopPlayback() {
@@ -909,7 +1002,10 @@ class AudioInput {
     source.loop = false;
     source.connect(this.analyser);
     this.analyser.connect(this.context.destination);
-    source.start(0);
+    const when = this.context.currentTime;
+    source.start(when);
+    this.playbackStartAt = when;
+    this.simTime = 0;
     this.bufferSource = source;
   }
 
@@ -923,8 +1019,16 @@ class AudioInput {
     this.bufferSource = null;
   }
 
+  private clearDeterministicSession() {
+    this.morphologySeed = null;
+    this.timeline = null;
+    this.playbackStartAt = -1;
+    this.simTime = 0;
+  }
+
   private initAnalyser() {
     this.disconnect();
+    this.clearDeterministicSession();
 
     this.context = new AudioContext();
     this.analyser = this.context.createAnalyser();
@@ -1033,6 +1137,34 @@ class AudioInput {
 
   getProfile() {
     return this.profile;
+  }
+
+  private bandsFromDeterministicFrame(frame: DeterministicSpectralFrame, deltaTime: number): AudioBands {
+    this.bands = {
+      sub: this.normalizeBandBySongPeak("sub", smoothstep(0.02, 0.38, frame.sub), deltaTime),
+      low: this.normalizeBandBySongPeak("low", smoothstep(0.025, 0.42, frame.low), deltaTime),
+      mid: this.normalizeBandBySongPeak("mid", smoothstep(0.018, 0.34, frame.mid), deltaTime),
+      melody: this.normalizeBandBySongPeak("melody", smoothstep(0.006, 0.2, frame.melody), deltaTime),
+      high: this.normalizeBandBySongPeak("high", smoothstep(0.005, 0.14, frame.high), deltaTime),
+      overall: this.normalizeBandBySongPeak("overall", smoothstep(0.014, 0.36, frame.overall), deltaTime),
+      centroid: frame.centroid,
+      bassFocus: frame.bassFocus,
+      melodyFocus: frame.melodyFocus,
+      brightness: clamp01(frame.brightness),
+      contrast: clamp01(frame.contrast),
+    };
+    this.updateProfile(this.bands, deltaTime);
+    return this.bands;
+  }
+
+  private waveformFromDeterministicFrame(frame: DeterministicSpectralFrame): WaveformMetrics {
+    const peak = frame.peak;
+    const rms = frame.rms;
+    const peakDelta = Math.max(0, peak - this.prevWavePeak);
+    const energyDelta = Math.max(0, rms - this.prevWaveRms);
+    this.prevWavePeak = peak;
+    this.prevWaveRms = rms;
+    return { peak, rms, peakDelta, energyDelta };
   }
 
   /**
@@ -1393,7 +1525,7 @@ class SoundSculpture {
   private readonly baseScale = new THREE.Vector3(1, 1, 1);
   // --- アイドル揺らぎ（vita: 無音・形成初期も成長アルゴリズムのパターンでホヨホヨ蠢く） ---
   /** formingTime と違い、音が無くても常に進む時計 */
-  private idleTime = Math.random() * 30;
+  private idleTime = 0;
   private idleWobbleAmp = 0;
   private readonly idleWobbleField: Float32Array;
   /** vita アイドル揺らぎの接線方向成分（成長アルゴリズムの flow に則る） */
@@ -1847,8 +1979,9 @@ class SoundSculpture {
     }
   }
 
-  private initMorphology() {
-    this.morphologySeed = Math.random() * 1000;
+  private initMorphology(seed?: number) {
+    this.morphologySeed = seed ?? Math.random() * 1000;
+    this.idleTime = seededUnit(0, this.morphologySeed + 0.71) * 30;
     const axis = growthPlaceOnSphere(0, 1, this.morphologySeed);
     this.morphAxis.set(axis.x, axis.y, axis.z);
     this.waistCenterAlong = (seededUnit(2, this.morphologySeed + 9.1) - 0.5) * 0.5;
@@ -2337,15 +2470,6 @@ class SoundSculpture {
       this.group.scale.lerp(this.baseScale, Math.min(1, deltaTime * 7));
     }
 
-    const hatFlash = Math.max(this.hatImpulse, this.waveImpulse * 0.75);
-    if (bandSoloAllows("high") && hatFlash > 0.0001 && s.detailRamp > 0.3) {
-      const h = hatFlash;
-      this.sparkleMaterial.size = 0.052 + h * 0.08;
-      this.sparkleMaterial.opacity = Math.min(1, this.sparkleMaterial.opacity + h * 0.1);
-      this.glowDustMaterial.size = 0.014 + bands.high * 0.008 + h * 0.012;
-      this.glowDustMaterial.opacity = Math.min(1, this.glowDustMaterial.opacity + h * 0.08);
-    }
-
     const shake = Math.max(this.hatImpulse, this.waveImpulse * 0.5) * s.detailRamp;
     if (
       shake > 0.001 &&
@@ -2399,8 +2523,11 @@ class SoundSculpture {
     }
     const palette = this.completionPalette ?? NEUTRAL_SCULPTURE_PALETTE;
     const uniforms = this.surfaceMaterial.uniforms;
-    (uniforms.uPaletteColor.value as THREE.Color).copy(palette.baseColor);
-    (uniforms.uPaletteAccent.value as THREE.Color).copy(palette.accentColor);
+    // vita: 膜も音パレットの暖色へ飛ばさず、初期の寒色パレットを維持
+    if (!(this.style.completion.mode === "breathe" && this.style.core.pearlVariation > 0)) {
+      (uniforms.uPaletteColor.value as THREE.Color).copy(palette.baseColor);
+      (uniforms.uPaletteAccent.value as THREE.Color).copy(palette.accentColor);
+    }
   }
 
   /**
@@ -2478,15 +2605,32 @@ class SoundSculpture {
           this.baseScale.z * swell,
         );
         this.innerCore.scale.setScalar(1 + this.breathWave * 0.05 * afterlife.breathAmp);
-        this._tmpColor.setHSL(
-          palette.hue,
-          Math.min(0.9, palette.saturation * 1.15 * afterlife.saturationMul),
-          Math.min(0.6, palette.lightness),
-        );
-        this.coreMaterial.color.copy(this.completionStartColor).lerp(this._tmpColor, ease);
-        this.coreMaterial.emissive.copy(palette.emissiveColor);
-        this.coreMaterial.emissiveIntensity =
-          palette.emissiveStrength * (0.22 + this.breathWave * 0.35) * afterlife.emissiveMul;
+        if (st.core.pearlVariation > 0) {
+          // vita: 真珠頂点色を主体に保つ。音パレット（琥珀〜金など）へ寄せない
+          this.coreMaterial.color.set(0xffffff);
+          this.innerCoreMaterial.color.copy(this.completionStartInnerColor);
+          // 発光だけ、初期の寒色寄り＋音の記憶をわずかに混ぜて鼓動する
+          this._tmpColor.setHSL(
+            THREE.MathUtils.lerp(this.clayHueBase, palette.hue, 0.22),
+            Math.min(0.72, this.claySatBase * 0.9 + palette.saturation * 0.25),
+            0.22 + this.breathWave * 0.08,
+          );
+          this.coreMaterial.emissive.lerp(this._tmpColor, Math.min(1, deltaTime * 2.4));
+          this.coreMaterial.emissiveIntensity =
+            (0.14 + this.breathWave * 0.28 + palette.emissiveStrength * 0.12 * ease) *
+            afterlife.emissiveMul *
+            st.core.emissiveScale;
+        } else {
+          this._tmpColor.setHSL(
+            palette.hue,
+            Math.min(0.9, palette.saturation * 1.15 * afterlife.saturationMul),
+            Math.min(0.6, palette.lightness),
+          );
+          this.coreMaterial.color.copy(this.completionStartColor).lerp(this._tmpColor, ease);
+          this.coreMaterial.emissive.copy(palette.emissiveColor);
+          this.coreMaterial.emissiveIntensity =
+            palette.emissiveStrength * (0.22 + this.breathWave * 0.35) * afterlife.emissiveMul;
+        }
         this.surfaceMaterial.uniforms.uBreath.value = this.breathWave;
         break;
       }
@@ -2542,7 +2686,7 @@ class SoundSculpture {
   }
 
   /** 形状・粒子・分裂体を初期化（音入力は維持）。 */
-  reset() {
+  reset(seed?: number) {
     this.completed = false;
     this.frozenTime = 0;
     this.completeFadeOut = 1;
@@ -2631,7 +2775,7 @@ class SoundSculpture {
     this.group.scale.copy(this.baseScale);
     this.innerCore.scale.setScalar(1);
 
-    this.initMorphology();
+    this.initMorphology(seed);
     this.initCrystalAxes();
 
     const corePos = this.geometry.attributes.position.array as Float32Array;
@@ -4426,24 +4570,25 @@ class SoundSculpture {
     // 新: 粒状 detachment は detachmentDust 側で更新する
   }
 
-  private updateGlowDust(bands: AudioBands, deltaTime: number) {
-    const live = this.completed ? 0 : bands.overall;
+  private updateGlowDust(_bands: AudioBands, deltaTime: number) {
+    // Scope 水色バー (scopeCyanDrive) と同じ波形エネルギーで半径・明度・不透明度を動かす
+    const drive = this.completed ? 0 : scopeCyanDrive(latestRhythm);
     const displayTime = this.completed ? this.frozenTime : this.formingTime;
-    const shellPulse = 1.34 + bands.mid * 0.08 + bands.melody * 0.14 + bands.high * 0.08 + Math.sin(displayTime * 1.4) * 0.04;
-    const drift = displayTime * (0.35 + bands.mid * 0.45 + bands.melody * 0.95);
+    const shellPulse = 1.34 + drive * 0.28 + Math.sin(displayTime * 1.4) * (0.012 + drive * 0.04);
+    const drift = displayTime * (0.28 + drive * 1.15);
 
     for (let i = 0; i < SoundSculpture.maxGlowDust; i += 1) {
       const idx = i * 3;
       const nx = this.glowDustBaseDirs[idx];
       const ny = this.glowDustBaseDirs[idx + 1];
       const nz = this.glowDustBaseDirs[idx + 2];
-      const wobble = growthPattern(nx, ny, nz, this.morphologySeed + i * 0.13 + drift) * 0.14;
-      const radius = shellPulse + wobble + seededUnit(i, drift) * 0.08;
+      const wobble = growthPattern(nx, ny, nz, this.morphologySeed + i * 0.13 + drift) * (0.06 + drive * 0.12);
+      const radius = shellPulse + wobble + seededUnit(i, drift) * (0.03 + drive * 0.07);
       this.glowDustPositions[idx] = nx * radius;
       this.glowDustPositions[idx + 1] = ny * radius;
       this.glowDustPositions[idx + 2] = nz * radius;
 
-      const glow = (0.25 + live * 0.75 + bands.high * 0.45) * (0.55 + seededUnit(i, 2.7) * 0.45);
+      const glow = (0.18 + drive * 0.95) * (0.55 + seededUnit(i, 2.7) * 0.45);
       this.glowDustColors[idx] = 0.38 * glow;
       this.glowDustColors[idx + 1] = 0.7 * glow;
       this.glowDustColors[idx + 2] = 1.0 * glow;
@@ -4453,26 +4598,27 @@ class SoundSculpture {
       ? this.style.completion.mode === "breathe"
         ? 0.24 + this.breathWave * 0.12
         : 0.12
-      : 0.42 + bands.high * 0.35 + bands.melody * 0.28 + bands.mid * 0.1;
+      : 0.12 + drive * 0.78;
     this.glowDustMaterial.opacity +=
-      (targetOpacity - this.glowDustMaterial.opacity) * Math.min(1, deltaTime * 4);
-    this.glowDustMaterial.size = 0.014 + bands.high * 0.008 + this.hatImpulse * 0.012 + this.waveImpulse * 0.01;
+      (targetOpacity - this.glowDustMaterial.opacity) * Math.min(1, deltaTime * 10);
+    this.glowDustMaterial.size = 0.012 + drive * 0.028;
 
     this.glowDustGeometry.attributes.position.needsUpdate = true;
     this.glowDustGeometry.attributes.color.needsUpdate = true;
   }
 
-  private spawnSparkle(bands: AudioBands) {
+  private spawnSparkle(bands: AudioBands, drive = scopeCyanDrive(latestRhythm)) {
     const index = this.sparkleCursor();
     const idx = index * 3;
     const origin = new THREE.Vector3();
     this.pickDetachmentOrigin(origin);
-    const jitter = 0.08 + bands.high * 0.06;
-    this.sparklePositions[idx] = origin.x + (Math.random() - 0.5) * jitter;
-    this.sparklePositions[idx + 1] = origin.y + (Math.random() - 0.5) * jitter;
-    this.sparklePositions[idx + 2] = origin.z + (Math.random() - 0.5) * jitter;
+    const jitter = 0.06 + drive * 0.1;
+    // 見た目のジッターのみ — 形態決定論には影響しない
+    this.sparklePositions[idx] = origin.x + (seededUnit(index, this.formingTime + 1.1) - 0.5) * jitter;
+    this.sparklePositions[idx + 1] = origin.y + (seededUnit(index, this.formingTime + 2.2) - 0.5) * jitter;
+    this.sparklePositions[idx + 2] = origin.z + (seededUnit(index, this.formingTime + 3.3) - 0.5) * jitter;
     this.sparkleLife[index] = 1;
-    const glow = 0.7 + bands.high * 0.5;
+    const glow = 0.55 + drive * 0.7 + bands.high * 0.15;
     this.sparkleColors[idx] = 0.55 * glow;
     this.sparkleColors[idx + 1] = 0.85 * glow;
     this.sparkleColors[idx + 2] = 1.0 * glow;
@@ -4485,12 +4631,12 @@ class SoundSculpture {
   }
 
   private updateSparkles(bands: AudioBands, deltaTime: number) {
+    const drive = this.completed ? 0 : scopeCyanDrive(latestRhythm);
     if (!this.completed) {
-      this.sparkleEmission +=
-        (bands.high * 0.6 + bands.melody * 0.45 + bands.mid * 0.15 + bands.brightness * 0.35) * deltaTime * 28;
+      this.sparkleEmission += drive * deltaTime * 36;
       let spawned = 0;
-      while (this.sparkleEmission >= 1 && spawned < 8) {
-        this.spawnSparkle(bands);
+      while (this.sparkleEmission >= 1 && spawned < 10) {
+        this.spawnSparkle(bands, drive);
         this.sparkleEmission -= 1;
         spawned += 1;
       }
@@ -4509,13 +4655,15 @@ class SoundSculpture {
         this.sparklePositions[idx + 2] = 999;
         continue;
       }
-      const twinkle = this.sparkleLife[i] * (0.65 + bands.high * 0.5);
+      const twinkle = this.sparkleLife[i] * (0.45 + drive * 0.7);
       this.sparkleColors[idx] = 0.5 * twinkle;
       this.sparkleColors[idx + 1] = 0.82 * twinkle;
       this.sparkleColors[idx + 2] = 1.0 * twinkle;
     }
 
-    this.sparkleMaterial.opacity += ((this.completed ? 0.08 : 0.88) - this.sparkleMaterial.opacity) * Math.min(1, deltaTime * 5);
+    this.sparkleMaterial.opacity +=
+      ((this.completed ? 0.08 : 0.2 + drive * 0.75) - this.sparkleMaterial.opacity) * Math.min(1, deltaTime * 8);
+    this.sparkleMaterial.size = 0.04 + drive * 0.06;
     this.sparkleGeometry.attributes.position.needsUpdate = true;
     this.sparkleGeometry.attributes.color.needsUpdate = true;
   }
@@ -5163,6 +5311,8 @@ let isAudioReady = false;
 let isComplete = false;
 let hasHeardSound = false;
 let silenceSeconds = 0;
+/** しきい値超えが連続した秒数。一瞬のノイズでは無音カウントを落とさない */
+let loudBurstSeconds = 0;
 const audioScopeContext = audioScopeCanvas.getContext("2d");
 
 const drawAudioScope = (
@@ -5247,15 +5397,16 @@ const drawAudioScope = (
     ctx.stroke();
   }
 
+  const cyanLevel = scopeCyanDrive(rhythmEvents);
   const meterW = 6;
   ctx.fillStyle = "rgba(22,22,22,0.08)";
   ctx.fillRect(w - meterW - 4, 4, meterW, scopeH - 8);
   ctx.fillStyle = "rgba(61,124,255,0.5)";
   ctx.fillRect(
     w - meterW - 4,
-    scopeH - 4 - rhythmEvents.waveEnergy * (scopeH - 12),
+    scopeH - 4 - cyanLevel * (scopeH - 12),
     meterW,
-    rhythmEvents.waveEnergy * (scopeH - 12),
+    cyanLevel * (scopeH - 12),
   );
 
   if (rhythmEvents.kick > 0) {
@@ -5320,7 +5471,7 @@ growthAlgorithmSelect.addEventListener("change", () => {
   }
   window.history.replaceState(null, "", url.toString());
 
-  sculpture.reset();
+  sculpture.reset(audioInput.getMorphologySeed() ?? undefined);
   rhythm.reset();
   structureTracker.reset();
   speciesProfiler.reset();
@@ -5429,6 +5580,7 @@ const completeSculpture = () => {
   isComplete = true;
   isAudioReady = false;
   silenceSeconds = 0;
+  loudBurstSeconds = 0;
   // 音を止める前にプロファイルを確定し、完成形の色・質感を導出する
   const completionPalette = deriveSculpturePalette(audioInput.getProfile());
   const completionSpecies = speciesProfiler.finalizeProfile();
@@ -5452,16 +5604,19 @@ const completeSculpture = () => {
 };
 
 const resetSculptureSession = () => {
-  sculpture.reset();
+  const seed = audioInput.getMorphologySeed() ?? undefined;
+  sculpture.reset(seed);
   rhythm.reset();
   structureTracker.reset();
   speciesProfiler.setCalibrationSeconds(runtimeTuning.speciesCalibrationSeconds);
   speciesProfiler.reset();
   latestStructure = defaultStructureSnapshot();
+  lastDisplayBands = emptyBands();
   audioInput.resetAnalysisState();
   isComplete = false;
   hasHeardSound = false;
   silenceSeconds = 0;
+  loudBurstSeconds = 0;
   latestRhythm = {
     kick: 0,
     snare: 0,
@@ -5550,6 +5705,18 @@ const startAudioInput = async (
   try {
     await start();
     isAudioReady = true;
+    const seed = audioInput.getMorphologySeed() ?? undefined;
+    sculpture.reset(seed);
+    rhythm.reset();
+    structureTracker.reset();
+    speciesProfiler.setCalibrationSeconds(runtimeTuning.speciesCalibrationSeconds);
+    speciesProfiler.reset();
+    latestStructure = defaultStructureSnapshot();
+    hasHeardSound = false;
+    silenceSeconds = 0;
+    loudBurstSeconds = 0;
+    // 解析ロード中に進んだ再生を巻き戻し、シード付きリセットと先頭を揃える
+    audioInput.restartDevAudioIfActive();
     viewControls.enabled = true;
     completeButton.disabled = isComplete;
     resetSculptureButton.disabled = false;
@@ -5610,34 +5777,9 @@ const resize = () => {
 
 window.addEventListener("resize", resize);
 
-const render = () => {
-  const deltaTime = Math.min(0.033, clock.getDelta());
-  const elapsedTime = clock.getElapsedTime();
-  const rawBands = isAudioReady
-    ? audioInput.update(deltaTime)
-    : {
-        sub: 0,
-        low: 0,
-        mid: 0,
-        melody: 0,
-        high: 0,
-        overall: 0,
-        centroid: 0,
-        bassFocus: 0,
-        melodyFocus: 0,
-        brightness: 0,
-        contrast: 0,
-      };
-
-  const waveformMetrics = isAudioReady ? audioInput.getWaveformMetrics() : null;
-  const rhythmEvents = rhythm.update(rawBands, waveformMetrics, deltaTime);
-  latestRhythm = rhythmEvents;
-  const waveform = isAudioReady ? audioInput.getWaveformBytes() : null;
-  const bandMeters = isAudioReady ? snapshotBandMeters(rawBands) : null;
-
-  // 波形(RMS/peak)でゲートして「無音時のノイズ」を彫刻入力から除外する
+const applyWaveGate = (rawBands: AudioBands, waveformMetrics: WaveformMetrics | null): AudioBands => {
   const bands: AudioBands = { ...rawBands };
-  if (isAudioReady && waveformMetrics) {
+  if (waveformMetrics) {
     const waveGate = Math.max(
       smoothstep(0.008, 0.03, waveformMetrics.rms),
       smoothstep(0.03, 0.12, waveformMetrics.peak) * 0.75,
@@ -5649,54 +5791,96 @@ const render = () => {
     bands.high *= waveGate;
     bands.overall *= waveGate;
   }
+  return bands;
+};
 
-  sceneBackground.update(elapsedTime, bands, deltaTime, camera);
+const injectRhythmIntoBands = (bands: AudioBands, rhythmEvents: RhythmEvents) => {
+  if (bandSoloAllows("low") && rhythmEvents.kick > 0) {
+    bands.sub = Math.min(1, bands.sub + rhythmEvents.kick * 0.85);
+    bands.low = Math.min(1, bands.low + rhythmEvents.kick * 0.55);
+    bands.overall = Math.min(1, bands.overall + rhythmEvents.kick * 0.38);
+  }
+  if (bandSoloAllows("mid") && rhythmEvents.snare > 0) {
+    bands.contrast = Math.min(1, bands.contrast + rhythmEvents.snare * 0.25);
+    bands.mid = Math.min(1, bands.mid + rhythmEvents.snare * 0.35);
+    bands.melody = Math.min(1, bands.melody + rhythmEvents.snare * 0.55);
+    bands.overall = Math.min(1, bands.overall + rhythmEvents.snare * 0.12);
+  }
+  if (bandSoloAllows("high") && rhythmEvents.hat > 0) {
+    bands.high = Math.min(1, bands.high + rhythmEvents.hat * 1.05);
+    bands.brightness = Math.min(1, bands.brightness + rhythmEvents.hat * 0.75);
+    bands.overall = Math.min(1, bands.overall + rhythmEvents.hat * 0.12);
+  }
+  if (bandSoloAllows("high") && rhythmEvents.transient > 0) {
+    bands.high = Math.min(1, bands.high + rhythmEvents.transient * 1.1);
+    bands.brightness = Math.min(1, bands.brightness + rhythmEvents.transient * 0.85);
+    bands.overall = Math.min(1, bands.overall + rhythmEvents.transient * 0.32);
+  }
+  if (bandSoloAllows("high") && rhythmEvents.kick > 0) {
+    bands.high = Math.min(1, bands.high + rhythmEvents.kick * 0.18);
+  }
+  if (bandSoloAllows("mid") && rhythmEvents.transient > 0) {
+    bands.melody = Math.min(1, bands.melody + rhythmEvents.transient * 0.35);
+  }
+};
 
-  if (isAudioReady && !isComplete) {
-    if (bands.overall >= SILENCE_THRESHOLD) {
-      hasHeardSound = true;
-    }
-
-    if (hasHeardSound && bands.overall < SILENCE_THRESHOLD) {
-      silenceSeconds += deltaTime;
-    } else {
-      silenceSeconds = 0;
-    }
-
-    if (silenceSeconds >= SILENCE_SECONDS_TO_COMPLETE) {
-      completeSculpture();
-    }
+const trackSilenceForCompletion = (
+  bands: AudioBands,
+  deltaTime: number,
+  _waveformMetrics: WaveformMetrics | null = null,
+) => {
+  if (!isAudioReady || isComplete) {
+    return;
   }
 
-  // 音の「瞬間」に反応を寄せる: kick/snare/hat を彫刻ロジックへ注入
+  // バッファ音源終了後は強制無音。曲間の環境ノイズで完了が止まるのを防ぐ
+  const playbackEnded = audioInput.hasPlaybackEnded();
+  const activity = playbackEnded ? 0 : bands.overall;
+
+  // ヒステリシス: 無音継続中は少し高いしきい値まで割り込みを無視
+  const enterQuiet = SILENCE_THRESHOLD;
+  const exitQuiet = SILENCE_THRESHOLD * 1.9;
+  const quiet = activity < (silenceSeconds > 0.35 ? exitQuiet : enterQuiet);
+
+  if (!quiet) {
+    hasHeardSound = true;
+    loudBurstSeconds += deltaTime;
+    if (loudBurstSeconds >= 0.28) {
+      // きちんと音が戻ったときだけ完了カウントを破棄
+      silenceSeconds = 0;
+    } else if (silenceSeconds > 0) {
+      // 一瞬のノイズ・クリックはわずかに巻き戻すだけ
+      silenceSeconds = Math.max(0, silenceSeconds - deltaTime * 0.6);
+    }
+    return;
+  }
+
+  loudBurstSeconds = 0;
+  if (playbackEnded) {
+    hasHeardSound = true;
+  }
+  if (hasHeardSound) {
+    silenceSeconds += deltaTime;
+  }
+
+  if (silenceSeconds >= SILENCE_SECONDS_TO_COMPLETE) {
+    completeSculpture();
+  }
+};
+
+const advanceSculptureSimulation = (
+  rawBands: AudioBands,
+  waveformMetrics: WaveformMetrics | null,
+  deltaTime: number,
+) => {
+  const rhythmEvents = rhythm.update(rawBands, waveformMetrics, deltaTime);
+  latestRhythm = rhythmEvents;
+
+  const bands = applyWaveGate(rawBands, waveformMetrics);
+  trackSilenceForCompletion(bands, deltaTime, waveformMetrics);
+
   if (!isComplete && isAudioReady) {
-    if (bandSoloAllows("low") && rhythmEvents.kick > 0) {
-      bands.sub = Math.min(1, bands.sub + rhythmEvents.kick * 0.85);
-      bands.low = Math.min(1, bands.low + rhythmEvents.kick * 0.55);
-      bands.overall = Math.min(1, bands.overall + rhythmEvents.kick * 0.38);
-    }
-    if (bandSoloAllows("mid") && rhythmEvents.snare > 0) {
-      bands.contrast = Math.min(1, bands.contrast + rhythmEvents.snare * 0.25);
-      bands.mid = Math.min(1, bands.mid + rhythmEvents.snare * 0.35);
-      bands.melody = Math.min(1, bands.melody + rhythmEvents.snare * 0.55);
-      bands.overall = Math.min(1, bands.overall + rhythmEvents.snare * 0.12);
-    }
-    if (bandSoloAllows("high") && rhythmEvents.hat > 0) {
-      bands.high = Math.min(1, bands.high + rhythmEvents.hat * 1.05);
-      bands.brightness = Math.min(1, bands.brightness + rhythmEvents.hat * 0.75);
-      bands.overall = Math.min(1, bands.overall + rhythmEvents.hat * 0.12);
-    }
-    if (bandSoloAllows("high") && rhythmEvents.transient > 0) {
-      bands.high = Math.min(1, bands.high + rhythmEvents.transient * 1.1);
-      bands.brightness = Math.min(1, bands.brightness + rhythmEvents.transient * 0.85);
-      bands.overall = Math.min(1, bands.overall + rhythmEvents.transient * 0.32);
-    }
-    if (bandSoloAllows("high") && rhythmEvents.kick > 0) {
-      bands.high = Math.min(1, bands.high + rhythmEvents.kick * 0.18);
-    }
-    if (bandSoloAllows("mid") && rhythmEvents.transient > 0) {
-      bands.melody = Math.min(1, bands.melody + rhythmEvents.transient * 0.35);
-    }
+    injectRhythmIntoBands(bands, rhythmEvents);
   }
 
   const isStructureActive = isAudioReady && !isComplete && bands.overall >= SILENCE_THRESHOLD;
@@ -5735,12 +5919,9 @@ const render = () => {
     deltaTime,
     isStructureActive,
   );
+
   const speciesProfile = speciesProfiler.getProfile();
-
-  drawAudioScope(waveform, rhythmEvents, bandMeters, bandSoloMode, latestStructure, speciesProfile);
-
   const sculptureBands = bandSoloMode === "off" ? bands : applyBandSolo(bands, bandSoloMode);
-
   sculpture.update(
     sculptureBands,
     deltaTime,
@@ -5749,6 +5930,71 @@ const render = () => {
     latestStructure,
     speciesProfile,
   );
+
+  return { bands, rhythmEvents, speciesProfile };
+};
+
+const render = () => {
+  const deltaTime = Math.min(0.033, clock.getDelta());
+  const elapsedTime = clock.getElapsedTime();
+
+  let displayBands: AudioBands = lastDisplayBands;
+  let rhythmEvents = latestRhythm;
+  let speciesProfile = speciesProfiler.getProfile();
+  let waveform: Uint8Array | null = null;
+  let bandMeters: BandMeterSnapshot | null = null;
+
+  if (isAudioReady && !isComplete && audioInput.isDeterministic()) {
+    const steps = audioInput.drainSimulationSteps();
+    for (const step of steps) {
+      const result = advanceSculptureSimulation(step.bands, step.waveform, step.deltaTime);
+      displayBands = result.bands;
+      rhythmEvents = result.rhythmEvents;
+      speciesProfile = result.speciesProfile;
+      if (isComplete) {
+        break;
+      }
+    }
+    waveform = audioInput.getWaveformBytes();
+    bandMeters = snapshotBandMeters(displayBands);
+  } else if (isAudioReady) {
+    const rawBands = audioInput.update(deltaTime);
+    const waveformMetrics = audioInput.getWaveformMetrics();
+    waveform = audioInput.getWaveformBytes();
+    bandMeters = snapshotBandMeters(rawBands);
+    if (isComplete) {
+      displayBands = applyWaveGate(rawBands, waveformMetrics);
+      rhythmEvents = latestRhythm;
+      sculpture.update(
+        bandSoloMode === "off" ? displayBands : applyBandSolo(displayBands, bandSoloMode),
+        deltaTime,
+        isViewInteracting,
+        rhythmEvents,
+        latestStructure,
+        speciesProfile,
+      );
+    } else {
+      const result = advanceSculptureSimulation(rawBands, waveformMetrics, deltaTime);
+      displayBands = result.bands;
+      rhythmEvents = result.rhythmEvents;
+      speciesProfile = result.speciesProfile;
+    }
+  } else {
+    displayBands = emptyBands();
+    sculpture.update(
+      displayBands,
+      deltaTime,
+      isViewInteracting,
+      latestRhythm,
+      latestStructure,
+      speciesProfile,
+    );
+  }
+
+  lastDisplayBands = displayBands;
+
+  sceneBackground.update(elapsedTime, displayBands, deltaTime, camera);
+  drawAudioScope(waveform, rhythmEvents, bandMeters, bandSoloMode, latestStructure, speciesProfile);
   updateEnvironmentCrossfade(deltaTime);
   viewControls.update();
   renderer.render(scene, camera);
