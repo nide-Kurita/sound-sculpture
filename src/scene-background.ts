@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import type { AudioBands } from "./sculpture-types";
 import {
+  getGrowthAlgorithmId,
   growthFlow,
   growthModulateScalar,
   growthModulateVector3,
@@ -8,6 +9,81 @@ import {
   type GrowthVec3,
 } from "./growth-algorithm";
 import type { BackgroundProfile, VisualStyleEnv } from "./visual-style";
+
+/**
+ * 星ドリフト用の共有成長フィールド。
+ * 毎星で growthPattern/flow を呼ばず、球面上の少数サンプルを全レイヤーで再利用する。
+ */
+const STAR_GROWTH_SAMPLE_COUNT = 48;
+const STAR_GROWTH_DIRS = (() => {
+  const dirs = new Float32Array(STAR_GROWTH_SAMPLE_COUNT * 3);
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < STAR_GROWTH_SAMPLE_COUNT; i += 1) {
+    const y = 1 - (i / Math.max(1, STAR_GROWTH_SAMPLE_COUNT - 1)) * 2;
+    const r = Math.sqrt(Math.max(0, 1 - y * y));
+    const theta = golden * i;
+    const idx = i * 3;
+    dirs[idx] = Math.cos(theta) * r;
+    dirs[idx + 1] = y;
+    dirs[idx + 2] = Math.sin(theta) * r;
+  }
+  return dirs;
+})();
+
+const starGrowthPatternSlow = new Float32Array(STAR_GROWTH_SAMPLE_COUNT);
+const starGrowthPatternFast = new Float32Array(STAR_GROWTH_SAMPLE_COUNT);
+const starGrowthFlow = new Float32Array(STAR_GROWTH_SAMPLE_COUNT * 3);
+const starGrowthFlowTmp = { x: 0, y: 0, z: 0 };
+let starGrowthFieldClock = -1e9;
+let starGrowthFieldAlgo = "";
+
+const refreshStarGrowthField = (time: number) => {
+  const algoId = getGrowthAlgorithmId();
+  // ~24fps 相当で十分（星は遅い漂い）。アルゴリズム切替時は即更新
+  if (algoId === starGrowthFieldAlgo && time - starGrowthFieldClock < 1 / 24) {
+    return;
+  }
+  starGrowthFieldAlgo = algoId;
+  starGrowthFieldClock = time;
+
+  const slow = time * 0.32;
+  const fast = time * 0.58 + 13.7;
+  const flowSalt = slow * 0.55;
+
+  for (let i = 0; i < STAR_GROWTH_SAMPLE_COUNT; i += 1) {
+    const di = i * 3;
+    const nx = STAR_GROWTH_DIRS[di];
+    const ny = STAR_GROWTH_DIRS[di + 1];
+    const nz = STAR_GROWTH_DIRS[di + 2];
+    starGrowthPatternSlow[i] = growthPattern(nx * 0.75, ny * 0.75, nz * 0.75, slow + i * 0.017);
+    starGrowthPatternFast[i] = growthPattern(nx * 1.35, ny * 1.35, nz * 1.35, fast + i * 0.031);
+    growthFlow(nx * 1.1, ny * 1.1, nz * 1.1, flowSalt + i * 0.11, starGrowthFlowTmp);
+    // 接線成分へ
+    const dot = starGrowthFlowTmp.x * nx + starGrowthFlowTmp.y * ny + starGrowthFlowTmp.z * nz;
+    let fx = starGrowthFlowTmp.x - nx * dot;
+    let fy = starGrowthFlowTmp.y - ny * dot;
+    let fz = starGrowthFlowTmp.z - nz * dot;
+    const len = Math.hypot(fx, fy, fz) || 1;
+    starGrowthFlow[di] = fx / len;
+    starGrowthFlow[di + 1] = fy / len;
+    starGrowthFlow[di + 2] = fz / len;
+  }
+};
+
+const nearestStarGrowthSample = (nx: number, ny: number, nz: number) => {
+  let best = 0;
+  let bestDot = -2;
+  for (let i = 0; i < STAR_GROWTH_SAMPLE_COUNT; i += 1) {
+    const di = i * 3;
+    const d =
+      nx * STAR_GROWTH_DIRS[di] + ny * STAR_GROWTH_DIRS[di + 1] + nz * STAR_GROWTH_DIRS[di + 2];
+    if (d > bestDot) {
+      bestDot = d;
+      best = i;
+    }
+  }
+  return best;
+};
 
 /** Points のデフォルト四角を消すためのソフト円テクスチャ（共有） */
 let sharedPointCircleMap: THREE.CanvasTexture | null = null;
@@ -264,12 +340,14 @@ class StarField {
   /** 近 > 中 > 遠の常時ドリフト強さ */
   private readonly idleMotion: number;
   private readonly avoidOffsets: Float32Array;
+  /** 共有成長フィールド上の最近傍サンプル index */
+  private readonly fieldIndex: Uint8Array | null;
   private readonly _flowOut: GrowthVec3 = { x: 0, y: 0, z: 0 };
   private readonly _world = new THREE.Vector3();
   private readonly _ndc = new THREE.Vector3();
   private readonly _camRight = new THREE.Vector3();
   private readonly _camUp = new THREE.Vector3();
-  /** 曲再生中は止め、停止中だけ進むドリフト時計 */
+  /** 星の有機ドリフト用時計（再生中も停止中と同じく進む） */
   private motionClock = 0;
 
   constructor(options?: {
@@ -281,7 +359,7 @@ class StarField {
     parallax?: number;
     parallaxAmount?: number;
     coolBias?: boolean;
-    /** 成長アルゴリズムに則った深海のふよふよ漂い（vita abyss） */
+    /** 成長アルゴリズム同期のふよふよ漂い（共有フィールド経由で軽量） */
     organicDrift?: boolean;
     /** 常時ドリフトの相対強さ（近=1 / 中≈0.55 / 遠≈0.28） */
     idleMotion?: number;
@@ -302,6 +380,7 @@ class StarField {
     this.baseOpacity = baseOpacity;
     this.anchorPositions = this.organicDrift ? new Float32Array(count * 3) : null;
     this.particleSeed = this.organicDrift ? new Float32Array(count) : null;
+    this.fieldIndex = this.organicDrift ? new Uint8Array(count) : null;
 
     this.positions = new Float32Array(count * 3);
     this.colors = new Float32Array(count * 3);
@@ -336,6 +415,9 @@ class StarField {
       }
       if (this.particleSeed) {
         this.particleSeed[i] = Math.random() * 80 + i * 0.017;
+      }
+      if (this.fieldIndex) {
+        this.fieldIndex[i] = nearestStarGrowthSample(nx, ny, nz);
       }
 
       const dx = (Math.random() - 0.5) * 0.5;
@@ -474,6 +556,8 @@ class StarField {
     camera?: THREE.PerspectiveCamera,
     pointerNDC?: THREE.Vector2 | null,
     motionEnabled = true,
+    /** true=曲中の軽量共有フィールド / false=停止中の全星フル評価 */
+    growthLite = false,
   ) {
     const cameraPosition = camera?.position;
     if (motionEnabled) {
@@ -482,7 +566,11 @@ class StarField {
 
     if (this.organicDrift && this.anchorPositions && this.particleSeed) {
       if (motionEnabled) {
-        this.updateOrganicDrift(this.motionClock, bands, deltaTime, cameraPosition);
+        if (growthLite) {
+          this.updateOrganicDriftLite(this.motionClock, bands, deltaTime, cameraPosition);
+        } else {
+          this.updateOrganicDriftFull(this.motionClock, bands, deltaTime, cameraPosition);
+        }
       } else if (cameraPosition) {
         const px = cameraPosition.x * (1 - this.parallax) * this.parallaxAmount;
         const py = cameraPosition.y * (1 - this.parallax) * this.parallaxAmount * 0.85;
@@ -614,8 +702,10 @@ class StarField {
     }
   }
 
-  /** 彫刻と同じ成長アルゴリズム（pattern / flow / modulate）で漂う */
-  private updateOrganicDrift(
+  /**
+   * 曲停止中: 全星を成長アルゴリズムで直接評価（高品質・高負荷）
+   */
+  private updateOrganicDriftFull(
     time: number,
     bands: AudioBands,
     deltaTime: number,
@@ -625,11 +715,9 @@ class StarField {
     const seeds = this.particleSeed!;
     const activity = bands.overall * 0.45 + bands.melody * 0.4 + bands.brightness * 0.2;
     const motion = this.idleMotion;
-    // SoundSculpture.updateIdleWobble と同じ時間スケールで同期
     const slow = time * 0.32;
     const fast = time * 0.58 + 13.7;
     const flowSaltBase = slow * 0.55;
-    // 近ほど大きく・わかりやすく動く（世界座標）
     const radialScale = (0.55 + motion * 0.95) * (0.85 + activity * 0.55);
     const flowScale = (0.7 + motion * 1.15) * (0.9 + activity * 0.7);
     const count = this.twinklePhase.length;
@@ -647,7 +735,6 @@ class StarField {
       const phase = this.twinklePhase[i];
       const deformSalt = seed + flowSaltBase;
 
-      // 彫刻 idle と同型の pattern ミックス
       const wave =
         growthPattern(nx * 0.75, ny * 0.75, nz * 0.75, seed + slow) * 0.68 +
         growthPattern(nx * 1.35, ny * 1.35, nz * 1.35, seed + fast) * 0.22 +
@@ -655,7 +742,6 @@ class StarField {
       const breathe = wave * 0.5 + 0.5;
 
       growthFlow(nx * 1.1, ny * 1.1, nz * 1.1, deformSalt + i * 0.003, this._flowOut);
-      // 法線成分を抜き tangent flow に（彫刻の spectral flow と同じ）
       const dot = this._flowOut.x * nx + this._flowOut.y * ny + this._flowOut.z * nz;
       let fx = this._flowOut.x - nx * dot;
       let fy = this._flowOut.y - ny * dot;
@@ -693,7 +779,6 @@ class StarField {
         "flow",
       );
 
-      // 第2スケールの flow でアルゴリズム差をはっきり出す
       growthFlow(nx * 1.35, ny * 1.35, nz * 1.35, deformSalt * 0.7 + bands.centroid * 4, this._flowOut);
       const dot2 = this._flowOut.x * nx + this._flowOut.y * ny + this._flowOut.z * nz;
       const sx = (this._flowOut.x - nx * dot2) * flowAmp * 0.45;
@@ -719,6 +804,103 @@ class StarField {
         0.76 +
         0.24 * Math.sin(time * this.twinkleRate[i] * 0.48 + phase) * (0.75 + activity * 0.5 + breathe * 0.25);
       const colorGain = (0.78 + breathe * 0.35 + liveBoost * 0.4) * twinkle;
+      this.colors[idx] = Math.max(0.04, this.baseColors[idx] * colorGain * (0.9 + hueWave * 0.18));
+      this.colors[idx + 1] = Math.max(0.04, this.baseColors[idx + 1] * colorGain * (0.88 + breathe * 0.2));
+      this.colors[idx + 2] = Math.max(0.06, this.baseColors[idx + 2] * colorGain * (0.86 + hueWave * 0.22));
+    }
+
+    if (cameraPosition) {
+      const px = cameraPosition.x * (1 - this.parallax) * this.parallaxAmount;
+      const py = cameraPosition.y * (1 - this.parallax) * this.parallaxAmount * 0.85;
+      const pz = cameraPosition.z * (1 - this.parallax) * this.parallaxAmount;
+      this.points.position.set(px, py, pz);
+    }
+
+    this.geometry.attributes.color.needsUpdate = true;
+    this.material.opacity = this.baseOpacity * (0.95 + activity * 0.14 + bands.high * 0.08);
+  }
+
+  /**
+   * 曲再生中: 共有成長フィールド参照（軽量・アルゴリズム同期）
+   */
+  private updateOrganicDriftLite(
+    time: number,
+    bands: AudioBands,
+    deltaTime: number,
+    cameraPosition?: THREE.Vector3,
+  ) {
+    refreshStarGrowthField(time);
+
+    const anchors = this.anchorPositions!;
+    const seeds = this.particleSeed!;
+    const fieldIndex = this.fieldIndex!;
+    const activity = bands.overall * 0.45 + bands.melody * 0.4 + bands.brightness * 0.2;
+    const motion = this.idleMotion;
+    const radialScale = (0.55 + motion * 0.95) * (0.85 + activity * 0.55);
+    const flowScale = (0.7 + motion * 1.15) * (0.9 + activity * 0.7) * 0.36;
+    const count = this.twinklePhase.length;
+    // 遠方の大量レイヤーだけ間引き（フィールド自体はアルゴリズム同期）
+    const stride = count > 4000 ? 2 : 1;
+    const phase = stride > 1 ? Math.floor(time * 30) % stride : 0;
+
+    for (let i = phase; i < count; i += stride) {
+      const idx = i * 3;
+      const ax = anchors[idx];
+      const ay = anchors[idx + 1];
+      const az = anchors[idx + 2];
+      const shellR = Math.hypot(ax, ay, az) || 1;
+      const nx = ax / shellR;
+      const ny = ay / shellR;
+      const nz = az / shellR;
+      const seed = seeds[i];
+      const phaseTw = this.twinklePhase[i];
+      const sample = fieldIndex[i];
+      const fi = sample * 3;
+
+      // フィールド値 + 星ごとの微小位相で個体差
+      const micro = Math.sin(seed * 0.37 + time * 0.21) * 0.12;
+      const wave =
+        starGrowthPatternSlow[sample] * 0.72 + starGrowthPatternFast[sample] * 0.28 + micro;
+      const breathe = wave * 0.5 + 0.5;
+
+      let fx = starGrowthFlow[fi];
+      let fy = starGrowthFlow[fi + 1];
+      let fz = starGrowthFlow[fi + 2];
+      // 星固有の接線へ再投影（サンプル方向と星方向のズレを吸収）
+      const fDot = fx * nx + fy * ny + fz * nz;
+      fx -= nx * fDot;
+      fy -= ny * fDot;
+      fz -= nz * fDot;
+      const flowLen = Math.hypot(fx, fy, fz) || 1;
+      fx /= flowLen;
+      fy /= flowLen;
+      fz /= flowLen;
+
+      const radialAmp = wave * radialScale;
+      const flowAmp = flowScale * (0.55 + breathe * 0.65 + activity * 0.35);
+      const liveBoost = 0.2 + activity * 0.55;
+
+      let px = ax + nx * radialAmp + fx * flowAmp * (1 + liveBoost * 0.35);
+      let py = ay + ny * radialAmp * 0.72 + fy * flowAmp * (1 + liveBoost * 0.35);
+      let pz = az + nz * radialAmp + fz * flowAmp * (1 + liveBoost * 0.35);
+
+      const cr = Math.hypot(px, py, pz) || 1;
+      const radiusPull = (shellR - cr) * Math.min(1, deltaTime * 1.6 * stride);
+      px += (px / cr) * radiusPull;
+      py += (py / cr) * radiusPull;
+      pz += (pz / cr) * radiusPull;
+
+      this.positions[idx] = px;
+      this.positions[idx + 1] = py;
+      this.positions[idx + 2] = pz;
+
+      const hueWave = starGrowthPatternSlow[sample] * 0.5 + 0.5;
+      const twinkle =
+        0.76 +
+        0.24 *
+          Math.sin(time * this.twinkleRate[i] * 0.48 + phaseTw) *
+          (0.75 + activity * 0.5 + breathe * 0.25);
+      const colorGain = (0.78 + breathe * 0.35 + liveBoost * 0.25) * twinkle;
       this.colors[idx] = Math.max(0.04, this.baseColors[idx] * colorGain * (0.9 + hueWave * 0.18));
       this.colors[idx + 1] = Math.max(0.04, this.baseColors[idx + 1] * colorGain * (0.88 + breathe * 0.2));
       this.colors[idx + 2] = Math.max(0.06, this.baseColors[idx + 2] * colorGain * (0.86 + hueWave * 0.22));
@@ -1314,6 +1496,8 @@ export class SceneBackground {
     camera: THREE.PerspectiveCamera,
     pointerNDC: THREE.Vector2 | null = null,
     starsMotionEnabled = true,
+    /** 曲中は true（軽量）/ 停止中は false（全星フル） */
+    starsGrowthLite = false,
   ) {
     const targetAudio = bands.overall * 0.55 + bands.melody * 0.45;
     this.audioSmooth += (targetAudio - this.audioSmooth) * Math.min(1, deltaTime * 3.5);
@@ -1326,9 +1510,33 @@ export class SceneBackground {
     this.innerDome?.applyParallax(camera.position, this.abyssVariant ? 0.018 : 0.025);
 
     if (this.starsNear.points.visible) {
-      this.starsNear.update(time, bands, deltaTime, camera, pointerNDC, starsMotionEnabled);
-      this.starsMid?.update(time, bands, deltaTime, camera, pointerNDC, starsMotionEnabled);
-      this.starsFar.update(time, bands, deltaTime, camera, pointerNDC, starsMotionEnabled);
+      this.starsNear.update(
+        time,
+        bands,
+        deltaTime,
+        camera,
+        pointerNDC,
+        starsMotionEnabled,
+        starsGrowthLite,
+      );
+      this.starsMid?.update(
+        time,
+        bands,
+        deltaTime,
+        camera,
+        pointerNDC,
+        starsMotionEnabled,
+        starsGrowthLite,
+      );
+      this.starsFar.update(
+        time,
+        bands,
+        deltaTime,
+        camera,
+        pointerNDC,
+        starsMotionEnabled,
+        starsGrowthLite,
+      );
     }
     this.dust?.update(bands, deltaTime, camera.position);
     this.biolume?.update(bands, deltaTime, camera.position);

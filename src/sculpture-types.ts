@@ -74,6 +74,8 @@ export type SculptureExperience = {
   pokeSurface?(localPoint: THREE.Vector3): void;
   /** クリック毎に粘土色を少しずらす（全モード共通の色条件） */
   nudgeClayColorOnClick?(): void;
+  /** 成長アルゴリズム切替時にシルエット偏りを更新 */
+  applyAlgoMorphBias?(): void;
   complete(): void;
   /** 同じ音源再現用。渡されていれば形態シードとして使う実装もある */
   reset(seed?: number): void;
@@ -81,7 +83,10 @@ export type SculptureExperience = {
 };
 
 export const SILENCE_THRESHOLD = 0.025;
+/** マイク等の無音判定で完成するまでの秒数 */
 export const SILENCE_SECONDS_TO_COMPLETE = 2.4;
+/** バッファ音源の再生終了後、形が変わらないうちに完成させる秒数 */
+export const PLAYBACK_ENDED_SECONDS_TO_COMPLETE = 0.08;
 
 export const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 
@@ -103,6 +108,13 @@ export const vertexPattern = (x: number, y: number, z: number, salt: number) => 
   return wave / 3;
 };
 
+/** 軽量ポテンシャル（curl 用）。品質より速度優先の 2 項版 */
+const curlPotential = (x: number, y: number, z: number, salt: number) =>
+  Math.sin(x * 5.13 + y * 1.37 + salt) * 0.62 + Math.sin(y * 4.21 - z * 2.31 + salt * 1.7) * 0.38;
+
+/**
+ * 有限差分 curl。呼び出し側は out を再利用すること（毎回 new しない）。
+ */
 export const curlNoiseSample = (
   x: number,
   y: number,
@@ -112,23 +124,25 @@ export const curlNoiseSample = (
 ) => {
   const eps = 0.42;
   const invDouble = 1 / (2 * eps);
+  const sB = salt + 7.13;
+  const sC = salt + 13.71;
 
-  const Pa_yp = vertexPattern(x, y + eps, z, salt);
-  const Pa_yn = vertexPattern(x, y - eps, z, salt);
-  const Pa_zp = vertexPattern(x, y, z + eps, salt);
-  const Pa_zn = vertexPattern(x, y, z - eps, salt);
-  const Pb_xp = vertexPattern(x + eps, y, z, salt + 7.13);
-  const Pb_xn = vertexPattern(x - eps, y, z, salt + 7.13);
-  const Pb_zp = vertexPattern(x, y, z + eps, salt + 7.13);
-  const Pb_zn = vertexPattern(x, y, z - eps, salt + 7.13);
-  const Pc_xp = vertexPattern(x + eps, y, z, salt + 13.71);
-  const Pc_xn = vertexPattern(x - eps, y, z, salt + 13.71);
-  const Pc_yp = vertexPattern(x, y + eps, z, salt + 13.71);
-  const Pc_yn = vertexPattern(x, y - eps, z, salt + 13.71);
+  const Pa_yp = curlPotential(x, y + eps, z, salt);
+  const Pa_yn = curlPotential(x, y - eps, z, salt);
+  const Pa_zp = curlPotential(x, y, z + eps, salt);
+  const Pa_zn = curlPotential(x, y, z - eps, salt);
+  const Pb_xp = curlPotential(x + eps, y, z, sB);
+  const Pb_xn = curlPotential(x - eps, y, z, sB);
+  const Pb_zp = curlPotential(x, y, z + eps, sB);
+  const Pb_zn = curlPotential(x, y, z - eps, sB);
+  const Pc_xp = curlPotential(x + eps, y, z, sC);
+  const Pc_xn = curlPotential(x - eps, y, z, sC);
+  const Pc_yp = curlPotential(x, y + eps, z, sC);
+  const Pc_yn = curlPotential(x, y - eps, z, sC);
 
-  out.x = ((Pc_yp - Pc_yn) - (Pb_zp - Pb_zn)) * invDouble;
-  out.y = ((Pa_zp - Pa_zn) - (Pc_xp - Pc_xn)) * invDouble;
-  out.z = ((Pb_xp - Pb_xn) - (Pa_yp - Pa_yn)) * invDouble;
+  out.x = (Pc_yp - Pc_yn - (Pb_zp - Pb_zn)) * invDouble;
+  out.y = (Pa_zp - Pa_zn - (Pc_xp - Pc_xn)) * invDouble;
+  out.z = (Pb_xp - Pb_xn - (Pa_yp - Pa_yn)) * invDouble;
 };
 
 /** @deprecated `parseExperienceId`（visual-style）へ統合。互換のため残す */

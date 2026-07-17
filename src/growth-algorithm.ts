@@ -88,7 +88,7 @@ const laplacianPattern = (x: number, y: number, z: number, salt: number, base: (
   return (lx + ly + lz) * 0.25 - c;
 };
 
-const voronoiEdge = (x: number, y: number, z: number, salt: number, cells = 10) => {
+const voronoiEdge = (x: number, y: number, z: number, salt: number, cells = 6) => {
   let best = 1e9;
   let second = 1e9;
   for (let c = 0; c < cells; c += 1) {
@@ -174,17 +174,19 @@ const differentialGrowthAlgo: GrowthAlgorithm = {
   },
   flow: (x, y, z, salt, out) => {
     curlNoiseSample(x, y, z, salt, out);
-    const lap = laplacianPattern(x, y, z, salt, vertexPattern);
-    out.x += x * lap * 0.35;
-    out.y += y * lap * 0.35;
-    out.z += z * lap * 0.35;
+    // 毎頂点の二重ラプラシアンを避け、軽い押し出しだけ足す
+    const push = vertexPattern(x, y, z, salt + 2.1) * 0.22;
+    out.x += x * push;
+    out.y += y * push;
+    out.z += z * push;
   },
   placeOnSphere: (index, total, seed) => {
     const p = uniformSphere(index, total, seed);
     const bulge = seededUnit(index, seed + 3.3) * 0.18;
     return normalize3(p.x * (1 + bulge), p.y * (1 - bulge * 0.5), p.z * (1 + bulge));
   },
-  spikeMask: (x, y, z, salt) => clamp01(laplacianPattern(x, y, z, salt, vertexPattern) * 2.2 + 0.5),
+  // pattern を再計算しない（ラプラシアン二重評価を避ける）
+  spikeMask: (x, y, z, salt) => clamp01(Math.abs(vertexPattern(x, y, z, salt + 5.5)) * 0.85 + 0.2),
 };
 
 const reactionDiffusionAlgo: GrowthAlgorithm = {
@@ -202,13 +204,14 @@ const reactionDiffusionAlgo: GrowthAlgorithm = {
     out.z = dv - du;
   },
   placeOnSphere: phyllotaxisSphere,
-  spikeMask: (x, y, z, salt) => clamp01(Math.abs(reactionDiffusionAlgo.pattern(x, y, z, salt))),
+  spikeMask: (x, y, _z, salt) =>
+    clamp01(Math.abs(Math.sin(x * 8.4 + salt * 0.3) * Math.cos(y * 6.2 - salt * 0.2))),
 };
 
 const voronoiAlgo: GrowthAlgorithm = {
   id: "voronoi",
   pattern: (x, y, z, salt) => voronoiEdge(x, y, z, salt) * 2.4 - 0.35,
-  flow: (x, y, z, salt, out) => flowFromAngle(x, y, z, salt + voronoiEdge(x, y, z, salt), out, 0.8),
+  flow: (x, y, z, salt, out) => flowFromAngle(x, y, z, salt + hash3(x, y, z, salt) * 2, out, 0.8),
   placeOnSphere: (index, _total, seed) => {
     const c = Math.floor(seededUnit(index, seed) * 10);
     const cx = Math.sin(c * 2.399 + seed) * 0.85;
@@ -216,7 +219,7 @@ const voronoiAlgo: GrowthAlgorithm = {
     const cz = Math.sin(c * 3.113 - seed) * 0.85;
     return normalize3(cx, cy, cz);
   },
-  spikeMask: (x, y, z, salt) => clamp01(voronoiEdge(x, y, z, salt) * 3.5),
+  spikeMask: (x, y, z, salt) => clamp01(Math.abs(vertexPattern(x * 3.1, y * 3.1, z * 3.1, salt)) * 0.9 + 0.1),
 };
 
 const dlaAlgo: GrowthAlgorithm = {
@@ -239,7 +242,7 @@ const dlaAlgo: GrowthAlgorithm = {
     const r = 0.55 + seededUnit(index, seed + 2) * 0.45;
     return normalize3(Math.cos(angle) * r, (seededUnit(index, seed + 4) - 0.5) * 0.6, Math.sin(angle) * r);
   },
-  spikeMask: (x, y, z, salt) => clamp01(dlaAlgo.pattern(x, y, z, salt) * 0.8 + 0.35),
+  spikeMask: (x, y, z, salt) => clamp01(Math.abs(hash3(x, y, z, salt + 9) * 2 - 1) * 0.55 + 0.35),
 };
 
 const physarumAlgo: GrowthAlgorithm = {
@@ -251,8 +254,7 @@ const physarumAlgo: GrowthAlgorithm = {
     return (veinA + veinB + veinC) / 3;
   },
   flow: (x, y, z, salt, out) => {
-    const p = physarumAlgo.pattern(x, y, z, salt);
-    flowFromAngle(x, y, z, salt + p * 4, out, 1.1);
+    flowFromAngle(x, y, z, salt + hash3(x, y, z, salt) * 4, out, 1.1);
     out.x += Math.sin(z * 5 + salt) * 0.2;
     out.z += Math.cos(x * 5 - salt) * 0.2;
   },
@@ -262,7 +264,7 @@ const physarumAlgo: GrowthAlgorithm = {
     const spoke = phyllotaxisSphere(index, total, seed);
     return normalize3(base.x * 0.55 + spoke.x * 0.45, base.y * 0.55 + spoke.y * 0.45, base.z * 0.55 + spoke.z * 0.45);
   },
-  spikeMask: (x, y, z, salt) => clamp01(Math.abs(physarumAlgo.pattern(x, y, z, salt))),
+  spikeMask: (x, _y, z, salt) => clamp01(Math.abs(Math.sin(x * 6.5 + z * 4.2 + salt * 0.3))),
 };
 
 const flowFieldAlgo: GrowthAlgorithm = {
@@ -277,39 +279,52 @@ const flowFieldAlgo: GrowthAlgorithm = {
     const drift = hash3(p.x, p.y, p.z, seed) * 0.25;
     return normalize3(p.x + drift, p.y, p.z - drift * 0.5);
   },
-  spikeMask: (x, y, z, salt) => clamp01(Math.abs(flowFieldAlgo.pattern(x, y, z, salt)) * 0.75),
+  spikeMask: (x, y, z, salt) => clamp01(Math.abs(hash3(x, y, z, salt + 3) * 2 - 1) * 0.75),
 };
 
+/**
+ * curl-noise のスカラー模様は有限差分 curl を使わない。
+ * （growthModulate が毎頂点・毎チャネルで pattern を呼ぶため、フル curl だと落ちる）
+ * 見た目の渦感は flow() 側の本命 curl で出す。
+ */
 const curlNoiseAlgo: GrowthAlgorithm = {
   id: "curl-noise",
   pattern: (x, y, z, salt) => {
-    const tmp = { x: 0, y: 0, z: 0 };
-    curlNoiseSample(x * 1.6, y * 1.6, z * 1.6, salt, tmp);
-    return (tmp.x + tmp.y + tmp.z) / 3;
+    const sx = x * 1.6;
+    const sy = y * 1.6;
+    const sz = z * 1.6;
+    return (
+      Math.sin(sx * 3.1 + sy * 2.4 + salt) * Math.cos(sz * 2.7 - salt * 0.45) * 0.55 +
+      Math.sin((sx - sz) * 2.35 + salt * 1.1) * 0.28 +
+      Math.cos(sy * 3.6 + salt * 0.7) * 0.17
+    );
   },
   flow: (x, y, z, salt, out) => curlNoiseSample(x * 1.45, y * 1.45, z * 1.45, salt, out),
   placeOnSphere: uniformSphere,
-  spikeMask: (x, y, z, salt) => clamp01(Math.abs(curlNoiseAlgo.pattern(x, y, z, salt))),
+  spikeMask: (x, y, z, salt) =>
+    clamp01(Math.abs(Math.sin(x * 4.2 + y * 3.1 - z * 2.8 + salt)) * 0.75 + 0.12),
 };
 
 const spaceColonizationAlgo: GrowthAlgorithm = {
   id: "space-colonization",
   pattern: (x, y, z, salt) => {
+    // 6点フル評価は重いので 3 点 + ハッシュで近似
     let attract = 0;
-    for (let a = 0; a < 6; a += 1) {
+    for (let a = 0; a < 3; a += 1) {
       const ax = Math.sin(a * 2.1 + salt * 0.13) * 0.75;
       const ay = Math.cos(a * 1.7 + salt * 0.19) * 0.75;
       const az = Math.sin(a * 2.9 - salt * 0.11) * 0.75;
       const d = Math.hypot(x - ax, y - ay, z - az);
       attract += Math.exp(-d * 4.5);
     }
-    return attract * 2 - 0.6;
+    attract += hash3(x, y, z, salt) * 0.35;
+    return attract * 1.6 - 0.55;
   },
   flow: (x, y, z, salt, out) => {
     let ax = 0;
     let ay = 0;
     let az = 0;
-    for (let a = 0; a < 4; a += 1) {
+    for (let a = 0; a < 3; a += 1) {
       const tx = Math.sin(a * 2.1 + salt) * 0.8 - x;
       const ty = Math.cos(a * 1.7 + salt) * 0.8 - y;
       const tz = Math.sin(a * 2.9 - salt) * 0.8 - z;
@@ -333,7 +348,7 @@ const spaceColonizationAlgo: GrowthAlgorithm = {
       target.z * (1 - t) + growth.z * t,
     );
   },
-  spikeMask: (x, y, z, salt) => clamp01(spaceColonizationAlgo.pattern(x, y, z, salt)),
+  spikeMask: (x, y, z, salt) => clamp01(hash3(x, y, z, salt + 2) * 0.85 + 0.1),
 };
 
 const crystalGrowthAlgo: GrowthAlgorithm = {
@@ -366,10 +381,14 @@ const erosionAlgo: GrowthAlgorithm = {
   pattern: (x, y, z, salt) => {
     const raw = vertexPattern(x, y, z, salt);
     const worn = raw * 0.35 - Math.abs(vertexPattern(x * 1.4, y * 1.4, z * 1.4, salt + 4.7)) * 0.55;
-    return worn + laplacianPattern(x, y, z, salt, vertexPattern) * 0.4;
+    // フルラプラシアンは重いので 1 軸差分で近似
+    const eps = 0.08;
+    const lapApprox =
+      (vertexPattern(x + eps, y, z, salt) + vertexPattern(x - eps, y, z, salt)) * 0.5 - raw;
+    return worn + lapApprox * 0.35;
   },
   flow: (x, y, z, salt, out) => {
-    const downhill = -laplacianPattern(x, y, z, salt, vertexPattern);
+    const downhill = -vertexPattern(x, y, z, salt + 1.3);
     out.x = x * downhill * 0.5;
     out.y = y * downhill * 0.35 - 0.08;
     out.z = z * downhill * 0.5;
@@ -397,6 +416,10 @@ const ALGORITHMS: Record<GrowthAlgorithmId, GrowthAlgorithm> = {
 let activeGrowthAlgorithmId: GrowthAlgorithmId = "fibonacci";
 
 export const getGrowthAlgorithmId = () => activeGrowthAlgorithmId;
+
+/** flow() が重いアルゴリズム（毎頂点フル評価すると落ちやすい） */
+export const isHeavyGrowthFlowAlgorithm = (id: GrowthAlgorithmId = activeGrowthAlgorithmId) =>
+  id === "curl-noise" || id === "differential-growth" || id === "voronoi" || id === "space-colonization";
 
 export const getGrowthAlgorithm = (id: GrowthAlgorithmId = activeGrowthAlgorithmId) => ALGORITHMS[id];
 
@@ -463,19 +486,57 @@ const deformSmooth01 = (value: number) => {
 const ALGO_CHANNEL_BIAS: Partial<
   Record<GrowthAlgorithmId, Partial<Record<GrowthDeformChannel, number>>>
 > = {
-  fibonacci: { bulk: 1, mid: 1, global: 1 },
-  phyllotaxis: { bulk: 1.08, global: 1.12, anchor: 1.15 },
-  lsystem: { anchor: 1.25, flow: 1.18, mid: 1.1 },
-  "differential-growth": { bulk: 1.14, mid: 1.16, flow: 1.1 },
-  "reaction-diffusion": { mid: 1.2, surface: 1.22, erosion: 1.12 },
-  voronoi: { bulk: 1.18, mid: 1.22, high: 0.92, global: 1.08 },
-  dla: { high: 1.2, anchor: 1.18, flow: 1.12 },
-  physarum: { flow: 1.28, anchor: 1.2, surface: 1.15 },
-  "flow-field": { flow: 1.32, surface: 1.18, live: 1.1 },
-  "curl-noise": { flow: 1.26, live: 1.14, idle: 1.12 },
-  "space-colonization": { anchor: 1.3, bulk: 1.1, global: 1.08 },
-  "crystal-growth": { high: 1.38, bulk: 0.86, mid: 0.92 },
-  erosion: { erosion: 1.45, bulk: 0.8, global: 0.88 },
+  fibonacci: { bulk: 1, mid: 1, global: 1, memory: 1.05 },
+  phyllotaxis: { bulk: 1.22, global: 1.28, anchor: 1.35, surface: 1.18 },
+  lsystem: { anchor: 1.45, flow: 1.32, mid: 1.22, bulk: 1.12 },
+  "differential-growth": { bulk: 1.32, mid: 1.28, flow: 1.22, surface: 1.2 },
+  "reaction-diffusion": { mid: 1.38, surface: 1.4, erosion: 1.28, bulk: 1.1 },
+  voronoi: { bulk: 1.42, mid: 1.38, high: 1.05, global: 1.25 },
+  dla: { high: 1.4, anchor: 1.35, flow: 1.28, bulk: 1.12 },
+  physarum: { flow: 1.48, anchor: 1.35, surface: 1.3, mid: 1.18 },
+  "flow-field": { flow: 1.55, surface: 1.32, live: 1.22, bulk: 1.1 },
+  "curl-noise": { flow: 1.42, live: 1.28, idle: 1.22, bulk: 1.18, surface: 1.2 },
+  "space-colonization": { anchor: 1.5, bulk: 1.28, global: 1.22, mid: 1.15 },
+  "crystal-growth": { high: 1.65, bulk: 0.72, mid: 0.78, global: 1.15 },
+  erosion: { erosion: 1.7, bulk: 0.68, global: 0.78, mid: 0.85 },
+};
+
+/** 大域シルエットへのアルゴリズム偏り（morphWeights 乗数） */
+export type GrowthAlgoSilhouetteBias = {
+  diabolo: number;
+  torus: number;
+  monolith: number;
+  coral: number;
+  spindle: number;
+};
+
+export const getGrowthAlgoSilhouetteBias = (
+  id: GrowthAlgorithmId = activeGrowthAlgorithmId,
+): GrowthAlgoSilhouetteBias => {
+  switch (id) {
+    case "phyllotaxis":
+      return { diabolo: 0.9, torus: 1.45, monolith: 0.85, coral: 1.05, spindle: 1.25 };
+    case "lsystem":
+    case "space-colonization":
+      return { diabolo: 0.85, torus: 0.9, monolith: 1.05, coral: 1.3, spindle: 1.5 };
+    case "differential-growth":
+    case "curl-noise":
+      return { diabolo: 1.2, torus: 1.05, monolith: 0.8, coral: 1.45, spindle: 0.95 };
+    case "reaction-diffusion":
+    case "voronoi":
+      return { diabolo: 0.88, torus: 1.1, monolith: 0.9, coral: 1.55, spindle: 1.0 };
+    case "dla":
+      return { diabolo: 0.8, torus: 0.95, monolith: 1.0, coral: 1.4, spindle: 1.35 };
+    case "physarum":
+    case "flow-field":
+      return { diabolo: 1.05, torus: 1.35, monolith: 0.85, coral: 1.25, spindle: 1.1 };
+    case "crystal-growth":
+      return { diabolo: 0.7, torus: 0.75, monolith: 1.55, coral: 0.75, spindle: 1.4 };
+    case "erosion":
+      return { diabolo: 0.75, torus: 0.85, monolith: 1.4, coral: 0.9, spindle: 1.15 };
+    default:
+      return { diabolo: 1, torus: 1, monolith: 1, coral: 1, spindle: 1 };
+  }
 };
 
 const rawChannelGain = (
@@ -486,44 +547,45 @@ const rawChannelGain = (
 ) => {
   const wave = deformSmooth01(pattern * 0.5 + 0.5);
   const edge = deformSmooth01(spike);
-  let gain = 0.76 + wave * 0.48;
+  // 振幅を広げ、アルゴリズム差が永続形状にも残るようにする
+  let gain = 0.42 + wave * 1.05;
 
   switch (channel) {
     case "bulk":
-      gain *= 0.84 + wave * 0.32;
+      gain *= 0.72 + wave * 0.55;
       break;
     case "mid":
-      gain *= 0.78 + Math.abs(pattern) * 0.38;
+      gain *= 0.65 + Math.abs(pattern) * 0.55;
       break;
     case "high":
-      gain *= 0.52 + edge * 0.98;
+      gain *= 0.4 + edge * 1.15;
       break;
     case "flow":
-      gain *= 0.72 + Math.abs(pattern) * 0.52;
+      gain *= 0.58 + Math.abs(pattern) * 0.72;
       break;
     case "erosion":
-      gain *= 0.68 + (1 - wave) * 0.48 + edge * 0.22;
+      gain *= 0.55 + (1 - wave) * 0.65 + edge * 0.35;
       break;
     case "live":
-      gain *= 0.8 + wave * 0.4;
+      gain *= 0.7 + wave * 0.55;
       break;
     case "idle":
-      gain *= 0.86 + wave * 0.28;
+      gain *= 0.78 + wave * 0.4;
       break;
     case "click":
-      gain *= 0.88 + edge * 0.38;
+      gain *= 0.82 + edge * 0.5;
       break;
     case "global":
-      gain *= 0.7 + wave * 0.6;
+      gain *= 0.55 + wave * 0.85;
       break;
     case "anchor":
-      gain *= 0.66 + wave * 0.68;
+      gain *= 0.52 + wave * 0.9;
       break;
     case "memory":
-      gain *= 0.78 + wave * 0.32;
+      gain *= 0.65 + wave * 0.5;
       break;
     case "surface":
-      gain *= 0.82 + Math.abs(pattern) * 0.36;
+      gain *= 0.7 + Math.abs(pattern) * 0.55;
       break;
     default:
       break;
@@ -535,6 +597,7 @@ const rawChannelGain = (
 /**
  * スカラー変位・圧力・蓄積量を成長アルゴリズムのパターンで変調して返す。
  * amount=0 は即 0（パターン評価をスキップ）。
+ * spikeMask は高コストになりやすいので、edge を使うチャネルだけ評価する。
  */
 export const growthModulateScalar = (
   amount: number,
@@ -549,7 +612,11 @@ export const growthModulateScalar = (
   }
   const algo = getGrowthAlgorithm();
   const pattern = algo.pattern(nx, ny, nz, salt);
-  const spike = algo.spikeMask(nx, ny, nz, salt);
+  const needsSpike =
+    channel === "high" || channel === "click" || channel === "erosion";
+  const spike = needsSpike
+    ? algo.spikeMask(nx, ny, nz, salt)
+    : deformSmooth01(Math.abs(pattern));
   const gain = rawChannelGain(channel, pattern, spike, algo.id);
   const blended = 1 + (gain - 1) * growthDeformInfluence;
   return amount * blended;

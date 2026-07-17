@@ -38,6 +38,8 @@ import {
 import { fib, fibRatio, fibUnit } from "./fibonacci";
 import {
   GROWTH_ALGORITHM_CATALOG,
+  getGrowthAlgoSilhouetteBias,
+  getGrowthAlgorithmId,
   getGrowthAlgorithmMeta,
   growthFlow,
   growthModulateScalar,
@@ -45,6 +47,7 @@ import {
   growthPattern,
   growthPlaceOnSphere,
   growthSpikeMask,
+  isHeavyGrowthFlowAlgorithm,
   parseGrowthAlgorithmId,
   setGrowthAlgorithmId,
   type GrowthAlgorithmId,
@@ -86,6 +89,7 @@ import {
   clamp01,
   seededUnit,
   SILENCE_SECONDS_TO_COMPLETE,
+  PLAYBACK_ENDED_SECONDS_TO_COMPLETE,
   SILENCE_THRESHOLD,
   smoothstep,
   type AudioBands,
@@ -1451,8 +1455,27 @@ class SoundSculpture {
   private readonly highSpikes: Float32Array;
   private readonly erosionField: Float32Array;
   private readonly sculptureMemory: Float32Array;
+  /** 成長アルゴリズム固有の永続起伏（完成形の差を残す） */
+  private readonly algoIdentity: Float32Array;
   private readonly liveOffset: Float32Array;
   private readonly surfaceLiveOffset: Float32Array;
+  /** コア接触による膜の外向き圧力（頂点ごと） */
+  private readonly membranePressure: Float32Array;
+  private readonly membranePressureScratch: Float32Array;
+  /** 膜メッシュの1-ring近傍（拡散用、-1 終端） */
+  private readonly membraneNeighbors: Int32Array;
+  private static readonly membraneNeighborCap = 8;
+  /** 接触緊張の全体インパルス（シェーダ用 0..1） */
+  private membranePressureImpulse = 0;
+  /** 膜が粘土へ作用する同化量（頂点ごと 0..1） */
+  private readonly clayAssimilation: Float32Array;
+  /** 膜を突き抜けた量（頂点ごと — 半透明・発光用） */
+  private readonly pierceAmount: Float32Array;
+  /** 焼き込み時のコア頂点色（同化ブレンドの基準） */
+  private readonly coreColorBase: Float32Array;
+  private readonly baseCoreClearcoat: number;
+  private readonly baseCoreSheen: number;
+  private readonly baseCoreIridescence: number;
   // Per-vertex directional offset (任意方向への変位場)。
   // accumulated/midBumps/highSpikes が "法線方向のスカラ" であるのに対し、
   // ここは横方向・接線方向・結晶軸など、任意ベクトルの蓄積を担う。
@@ -1518,6 +1541,8 @@ class SoundSculpture {
   private completed = false;
   private frozenTime = 0;
   private completeFadeOut = 1;
+  /** 1→0: 完成直後の残存モーションを滑らかに止める */
+  private completionSettle = 0;
   // --- ビジュアルスタイル（変容/生命/彫刻）と完成後の変化 ---
   private readonly style = getActiveVisualStyle();
   private completionProgress = 0;
@@ -1597,8 +1622,11 @@ class SoundSculpture {
       this.coreMaterial.clearcoat = styleCore.clearcoat;
       this.coreMaterial.clearcoatRoughness = 0.35;
     }
+    if (this.style.membrane.vita) {
+      this.installCorePierceShader(this.coreMaterial);
+    }
 
-    // “粘土の中身”を感じるための内側の塊
+    // “粘土の中身”を感じるための内側の塊（突き抜け発光は載せない＝常に粘土質）
     this.innerCoreMaterial = new THREE.MeshPhysicalMaterial({
       color: CLAY_CORE_COLOR,
       emissive: 0x000000,
@@ -1651,8 +1679,8 @@ class SoundSculpture {
     this.core.receiveShadow = true;
     this.innerCore.castShadow = true;
     this.innerCore.receiveShadow = true;
-    // 初期は外側と一体の粘土球。形成が進むと内側の厚みが見える
-    this.innerCore.scale.setScalar(1);
+    // 内側は一回り小さくし、外側コアの突き抜け先端が前面に出るようにする
+    this.innerCore.scale.setScalar(this.style.membrane.vita ? 0.9 : 1);
     this.surface.castShadow = false;
     this.surface.receiveShadow = false;
 
@@ -1831,8 +1859,19 @@ class SoundSculpture {
     this.highSpikes = new Float32Array(this.accumulated.length);
     this.erosionField = new Float32Array(this.accumulated.length);
     this.sculptureMemory = new Float32Array(this.accumulated.length);
+    this.algoIdentity = new Float32Array(this.accumulated.length);
     this.liveOffset = new Float32Array(this.accumulated.length);
     this.surfaceLiveOffset = new Float32Array(this.accumulated.length);
+    this.membranePressure = new Float32Array(this.accumulated.length);
+    this.membranePressureScratch = new Float32Array(this.accumulated.length);
+    this.clayAssimilation = new Float32Array(this.accumulated.length);
+    this.pierceAmount = new Float32Array(this.accumulated.length);
+    this.geometry.setAttribute("aPierce", new THREE.BufferAttribute(this.pierceAmount, 1));
+    this.coreColorBase = new Float32Array(this.accumulated.length * 3);
+    this.membraneNeighbors = this.buildMembraneNeighbors(
+      this.surfaceGeometry,
+      this.accumulated.length,
+    );
     this.vectorField = new Float32Array(this.accumulated.length * 3);
     this.flowField = new Float32Array(this.accumulated.length * 3);
     this.crystalAxes = new Float32Array(this.accumulated.length * 3);
@@ -1841,6 +1880,9 @@ class SoundSculpture {
     this.idleWobbleVector = new Float32Array(this.accumulated.length * 3);
     this.clickRepulsion = createClickRepulsionState(this.accumulated.length);
     this.surfaceClickRepulsion = createClickRepulsionState(this.accumulated.length);
+    this.baseCoreClearcoat = styleCore.clearcoat;
+    this.baseCoreSheen = styleCore.sheen;
+    this.baseCoreIridescence = styleCore.iridescence;
     this.initCrystalAxes();
     this.initMorphology();
     this.syncClayColors();
@@ -1885,6 +1927,7 @@ class SoundSculpture {
       colors[idx + 2] = color.b;
     }
     this.geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    this.coreColorBase.set(colors);
     this.coreMaterial.vertexColors = true;
     this.coreMaterial.needsUpdate = true;
   }
@@ -1915,6 +1958,7 @@ class SoundSculpture {
       colors[idx + 2] = color.b;
     }
     this.geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    this.coreColorBase.set(colors);
     this.coreMaterial.vertexColors = true;
     this.coreMaterial.color.set(0xffffff);
     this.coreMaterial.needsUpdate = true;
@@ -2035,6 +2079,17 @@ class SoundSculpture {
       coral: 0.14 + seededUnit(6, this.morphologySeed) * 0.28,
       spindle: 0.14 + seededUnit(7, this.morphologySeed) * 0.28,
     };
+    this.applyAlgoMorphBias();
+  }
+
+  /** 成長アルゴリズムに応じて大域シルエットの偏りを乗せる */
+  applyAlgoMorphBias() {
+    const bias = getGrowthAlgoSilhouetteBias(getGrowthAlgorithmId());
+    this.morphWeights.diabolo *= bias.diabolo;
+    this.morphWeights.torus *= bias.torus;
+    this.morphWeights.monolith *= bias.monolith;
+    this.morphWeights.coral *= bias.coral;
+    this.morphWeights.spindle *= bias.spindle;
     this.normalizeMorphWeights();
   }
 
@@ -2179,6 +2234,26 @@ class SoundSculpture {
     targetWeights.coral *= inv;
     targetWeights.spindle *= inv;
 
+    // アルゴリズム差を大域シルエットにも残す
+    const algoBias = getGrowthAlgoSilhouetteBias();
+    targetWeights.diabolo *= algoBias.diabolo;
+    targetWeights.torus *= algoBias.torus;
+    targetWeights.monolith *= algoBias.monolith;
+    targetWeights.coral *= algoBias.coral;
+    targetWeights.spindle *= algoBias.spindle;
+    const biasedSum =
+      targetWeights.diabolo +
+      targetWeights.torus +
+      targetWeights.monolith +
+      targetWeights.coral +
+      targetWeights.spindle;
+    const biasedInv = 1 / Math.max(0.0001, biasedSum);
+    targetWeights.diabolo *= biasedInv;
+    targetWeights.torus *= biasedInv;
+    targetWeights.monolith *= biasedInv;
+    targetWeights.coral *= biasedInv;
+    targetWeights.spindle *= biasedInv;
+
     this.lerpMorphWeights(targetWeights, lerp);
     this.waistCenterAlong += (bands.centroid - 0.5) * deltaTime * 0.35;
     this.waistCenterAlong = Math.min(0.55, Math.max(-0.55, this.waistCenterAlong));
@@ -2322,20 +2397,16 @@ class SoundSculpture {
       this.updateParticles(bands, deltaTime);
     }
 
-    const innerBase = 1;
-    const pulseFloor = runtimeTuning.pulseConfidenceFloor;
-    const syncPulse =
-      latestRhythm.pulseEnvelope * (pulseFloor + latestRhythm.pulseConfidence * (1 - pulseFloor));
-    const kickPulse = this.completed ? 0 : 1 + Math.max(this.kickImpulse, syncPulse) * fibUnit(8, 13) * runtimeTuning.liveLow;
-    this.innerCore.scale.setScalar(innerBase * kickPulse);
-
+    const innerBase = this.style.membrane.vita ? 0.9 : 1;
     if (!this.completed) {
+      const pulseFloor = runtimeTuning.pulseConfidenceFloor;
+      const syncPulse =
+        latestRhythm.pulseEnvelope * (pulseFloor + latestRhythm.pulseConfidence * (1 - pulseFloor));
+      const kickPulse =
+        1 + Math.max(this.kickImpulse, syncPulse) * fibUnit(8, 13) * runtimeTuning.liveLow;
+      this.innerCore.scale.setScalar(innerBase * kickPulse);
       this.applyRhythmImpulses(deltaTime, bands);
-    } else if (bandSoloAllows("low")) {
-      this.group.scale.lerp(this.baseScale, Math.min(1, deltaTime * 12));
-    }
-
-    if (this.completed) {
+    } else {
       this.updateAfterlife(deltaTime);
     }
   }
@@ -2388,7 +2459,13 @@ class SoundSculpture {
         (0.072 + pokeBoost) *
         (1 - activity * 0.38) *
         (1 - this.currentStructure.formationRamp * 0.5);
-    this.idleWobbleAmp += (targetAmp - this.idleWobbleAmp) * Math.min(1, deltaTime * 2.2);
+    const ampFollow = this.completed ? 1.1 : 2.2;
+    this.idleWobbleAmp += (targetAmp - this.idleWobbleAmp) * Math.min(1, deltaTime * ampFollow);
+
+    // 完成後はフィールドを消さず凍結（クリアすると形が変わる）
+    if (this.completed && this.idlePokeImpulse < 0.01) {
+      return;
+    }
 
     if (this.idleWobbleAmp < 0.001 && this.idlePokeImpulse < 0.01) {
       this.idleWobbleField.fill(0);
@@ -2399,6 +2476,10 @@ class SoundSculpture {
     const slow = this.idleTime * 0.32;
     const fast = this.idleTime * 0.58 + 13.7;
     const flowSalt = this.morphologySeed + slow * 0.55;
+    const heavyFlow = isHeavyGrowthFlowAlgorithm();
+    // 重い flow は頂点を交互更新（見た目はほぼ同じで負荷半減）
+    const flowStride = heavyFlow ? 2 : 1;
+    const flowPhase = heavyFlow ? (Math.floor(this.idleTime * 30) & 1) : 0;
     for (let i = 0; i < this.idleWobbleField.length; i += 1) {
       const index = i * 3;
       const x = this.basePositions[index];
@@ -2408,12 +2489,14 @@ class SoundSculpture {
       const nx = x / r;
       const ny = y / r;
       const nz = z / r;
-      // 低周波を多めにして輪郭を丸く保ちつつ、わずかな有機感だけ残す
+      // 低周波中心。第3オクターブは負荷の割に効きが薄いので省略
       const wave =
-        growthPattern(nx * 0.75, ny * 0.75, nz * 0.75, slow) * 0.68 +
-        growthPattern(nx * 1.35, ny * 1.35, nz * 1.35, fast) * 0.22 +
-        growthPattern(nx * 0.5, ny * 0.5, nz * 0.5, slow * 0.47 + 8.2) * 0.1;
+        growthPattern(nx * 0.75, ny * 0.75, nz * 0.75, slow) * 0.78 +
+        growthPattern(nx * 1.35, ny * 1.35, nz * 1.35, fast) * 0.22;
       this.idleWobbleField[i] = wave * this.idleWobbleAmp;
+      if ((i + flowPhase) % flowStride !== 0) {
+        continue;
+      }
       growthFlow(nx * 1.1, ny * 1.1, nz * 1.1, flowSalt + i * 0.003, this._curlOut);
       const flowAmp = this.idleWobbleAmp * 0.18;
       this.idleWobbleVector[index] = this._curlOut.x * flowAmp;
@@ -2543,6 +2626,7 @@ class SoundSculpture {
   }
 
   complete() {
+    // いま見えている形をそのまま永久形状として確定（追加スタンプなし）
     this.bakeFinalSculptureMemory();
     // 膜シェーダーの uTime と連続になるよう、アイドル分も含めて凍結する
     this.frozenTime =
@@ -2550,6 +2634,8 @@ class SoundSculpture {
     this.completeFadeOut = 1;
     this.completed = true;
     this.completionProgress = 0;
+    // 形の settle 変形はしない（終了瞬間のシルエットを維持）
+    this.completionSettle = 0;
     this.breathTime = 0;
     this.breathWave = 0;
     const bpm = latestRhythm.bpm;
@@ -2557,10 +2643,9 @@ class SoundSculpture {
     this.completionStartColor.copy(this.coreMaterial.color);
     this.completionStartInnerColor.copy(this.innerCoreMaterial.color);
     this.completionStartRoughness = this.coreMaterial.roughness;
-    this.liveOffset.fill(0);
-    this.surfaceLiveOffset.fill(0);
+    // 現在のスケールを基準に呼吸（完成時にカクッと戻さない）
+    this.baseScale.copy(this.group.scale);
     if (this.style.completion.mode === "monolith") {
-      // 石は即座に静止する。生命系スタイルは afterlife で緩やかに減衰させる
       this.flowField.fill(0);
     }
     const palette = this.completionPalette ?? NEUTRAL_SCULPTURE_PALETTE;
@@ -2590,12 +2675,25 @@ class SoundSculpture {
     const p = this.completionProgress;
     const ease = p * p * (3 - 2 * p);
 
-    if (st.completion.mode !== "monolith" && p < 1) {
-      const flowDecay = Math.exp(-deltaTime * 1.3);
-      for (let i = 0; i < this.flowField.length; i += 1) {
-        this.flowField[i] *= flowDecay;
-      }
+    // 形は完成瞬間で凍結。ライブ変位・flow は動かさない（見た目を変えない）
+    const pressureDecay = Math.exp(-deltaTime * 2.4);
+    for (let i = 0; i < this.membranePressure.length; i += 1) {
+      this.membranePressure[i] *= pressureDecay;
+      this.clayAssimilation[i] *= pressureDecay;
+      this.pierceAmount[i] *= pressureDecay;
     }
+    this.membranePressureImpulse *= pressureDecay;
+    const pierceAttr = this.geometry.getAttribute("aPierce");
+    if (pierceAttr) {
+      pierceAttr.needsUpdate = true;
+    }
+    this.kickImpulse *= Math.exp(-deltaTime * 3.2);
+    this.snareImpulse *= Math.exp(-deltaTime * 3.6);
+    this.hatImpulse *= Math.exp(-deltaTime * 4.2);
+    this.waveImpulse *= Math.exp(-deltaTime * 3.8);
+
+    const innerBase = st.membrane.vita ? 0.9 : 1;
+    const scaleFollow = Math.min(1, deltaTime * 1.8);
 
     switch (st.completion.mode) {
       case "petrify": {
@@ -2627,6 +2725,10 @@ class SoundSculpture {
           afterlife.emissiveMul;
         this.surfaceMaterial.uniforms.uPetrify.value =
           ease * afterlife.petrifyBoost;
+        this.group.scale.lerp(this.baseScale, scaleFollow);
+        this.innerCore.scale.setScalar(
+          THREE.MathUtils.lerp(this.innerCore.scale.x, innerBase, scaleFollow),
+        );
         break;
       }
       case "breathe": {
@@ -2641,12 +2743,14 @@ class SoundSculpture {
           SoundSculpture.AFTERLIFE_BREATH_STRENGTH;
         this.breathWave = wave * 0.5 + 0.5;
         const swell = 1 + wave * 0.016 * (0.6 + palette.energy * 0.7);
-        this.group.scale.set(
-          this.baseScale.x * swell,
-          this.baseScale.y * (2 - swell),
-          this.baseScale.z * swell,
+        // 完成直前のスケールから呼吸へ滑らかに乗り換える
+        this.group.scale.x += (this.baseScale.x * swell - this.group.scale.x) * scaleFollow;
+        this.group.scale.y += (this.baseScale.y * (2 - swell) - this.group.scale.y) * scaleFollow;
+        this.group.scale.z += (this.baseScale.z * swell - this.group.scale.z) * scaleFollow;
+        const innerTarget = innerBase * (1 + this.breathWave * 0.05 * afterlife.breathAmp);
+        this.innerCore.scale.setScalar(
+          THREE.MathUtils.lerp(this.innerCore.scale.x, innerTarget, scaleFollow),
         );
-        this.innerCore.scale.setScalar(1 + this.breathWave * 0.05 * afterlife.breathAmp);
         if (st.core.pearlVariation > 0) {
           // vita: 真珠頂点色を主体に保つ。音パレット（琥珀〜金など）へ寄せない
           this.coreMaterial.color.set(0xffffff);
@@ -2694,37 +2798,19 @@ class SoundSculpture {
         this.coreMaterial.metalness = metal * ease;
         this.coreMaterial.clearcoat = (0.3 + (1 - metal) * 0.3) * afterlife.clearcoatMul * ease;
         this.coreMaterial.emissiveIntensity *= Math.max(0, 1 - deltaTime * 2);
+        this.group.scale.lerp(this.baseScale, scaleFollow);
+        this.innerCore.scale.setScalar(
+          THREE.MathUtils.lerp(this.innerCore.scale.x, innerBase, scaleFollow),
+        );
         break;
       }
     }
   }
 
-  /** 完了時: LIVE で見えていた変位を永久形状に焼き込む */
+  /** 完了時: 形は書き換えず、その瞬間の変位フィールドを凍結する */
   private bakeFinalSculptureMemory() {
-    for (let i = 0; i < this.accumulated.length; i += 1) {
-      const index = i * 3;
-      const x = this.basePositions[index];
-      const y = this.basePositions[index + 1];
-      const z = this.basePositions[index + 2];
-      const radius = Math.hypot(x, y, z) || 1;
-      const nx = x / radius;
-      const ny = y / radius;
-      const nz = z / radius;
-      const vfScalar = this.getVectorNormalDisplacement(i, nx, ny, nz);
-      const t = runtimeTuning;
-      const liveBake =
-        this.liveOffset[i] * t.liveLow * 0.58 +
-        this.surfaceLiveOffset[i] * t.liveMid * 0.68;
-      this.sculptureMemory[i] =
-        this.accumulated[i] +
-        this.midBumps[i] +
-        this.highSpikes[i] +
-        liveBake +
-        vfScalar * 0.92 +
-        this.erosionField[i];
-    }
-    this.liveOffset.fill(0);
-    this.surfaceLiveOffset.fill(0);
+    // liveOffset / surfaceLiveOffset / flowField / sculptureMemory はそのまま残す。
+    // ここで上書きすると完成直前の見た目からズレる。
   }
 
   /** 形状・粒子・分裂体を初期化（音入力は維持）。 */
@@ -2733,6 +2819,7 @@ class SoundSculpture {
     this.frozenTime = 0;
     this.completeFadeOut = 1;
     this.completionProgress = 0;
+    this.completionSettle = 0;
     this.completionPalette = null;
     this.completionSpecies = null;
     this.breathTime = 0;
@@ -2785,8 +2872,18 @@ class SoundSculpture {
     this.highSpikes.fill(0);
     this.erosionField.fill(0);
     this.sculptureMemory.fill(0);
+    this.algoIdentity.fill(0);
     this.liveOffset.fill(0);
     this.surfaceLiveOffset.fill(0);
+    this.membranePressure.fill(0);
+    this.membranePressureScratch.fill(0);
+    this.membranePressureImpulse = 0;
+    this.clayAssimilation.fill(0);
+    this.pierceAmount.fill(0);
+    const pierceAttrReset = this.geometry.getAttribute("aPierce");
+    if (pierceAttrReset) {
+      pierceAttrReset.needsUpdate = true;
+    }
     this.vectorField.fill(0);
     this.flowField.fill(0);
     this.detachmentCarve.fill(0);
@@ -3187,21 +3284,47 @@ class SoundSculpture {
     } else {
       this.coreMaterial.color.set(0xffffff);
     }
-    this.coreMaterial.emissive.lerp(this.targetCoreEmissive, colorLerp * audioBlend);
     const sp = this.getSpecies();
-    // vita: 無音時も鼓動のように微かに発光する
-    const idleGlow =
-      this.style.idleWobble * (0.07 + (Math.sin(this.idleTime * 0.55) * 0.5 + 0.5) * 0.08);
-    const targetEmissive =
-      (bands.overall * fibUnit(5, 21) + bands.brightness * fibUnit(3, 21) + bands.contrast * t.coreEmissive * fibUnit(3, 21)) *
-        (t.coreEmissive / fibUnit(3, 21)) *
-        (fibUnit(5, 8) + sp.aggressive * fibUnit(8, 13)) *
-        st.emissiveScale *
-        audioBlend +
-      idleGlow;
-    const emissiveLerp = Math.min(1, deltaTime * (1.4 + bands.overall * 2.2 * audioBlend));
-    this.coreMaterial.emissiveIntensity +=
-      (targetEmissive - this.coreMaterial.emissiveIntensity) * emissiveLerp;
+    // vita: 全体発光は使わず、突き抜け頂点のシェーダー発光に任せる
+    if (this.style.membrane.vita) {
+      this.coreMaterial.emissive.set(0x000000);
+      this.coreMaterial.emissiveIntensity *= Math.max(0, 1 - deltaTime * 8);
+      this.coreMaterial.vertexColors = true;
+      this.coreMaterial.color.set(0xffffff);
+      this.innerCoreMaterial.vertexColors = false;
+      this.innerCoreMaterial.emissive.set(0x000000);
+      this.innerCoreMaterial.emissiveIntensity *= Math.max(0, 1 - deltaTime * 6);
+    } else {
+      this.coreMaterial.emissive.lerp(this.targetCoreEmissive, colorLerp * audioBlend);
+      const idleGlow =
+        this.style.idleWobble * (0.07 + (Math.sin(this.idleTime * 0.55) * 0.5 + 0.5) * 0.08);
+      const targetEmissive =
+        (bands.overall * fibUnit(5, 21) + bands.brightness * fibUnit(3, 21) + bands.contrast * t.coreEmissive * fibUnit(3, 21)) *
+          (t.coreEmissive / fibUnit(3, 21)) *
+          (fibUnit(5, 8) + sp.aggressive * fibUnit(8, 13)) *
+          st.emissiveScale *
+          audioBlend +
+        idleGlow;
+      const emissiveLerp = Math.min(1, deltaTime * (1.4 + bands.overall * 2.2 * audioBlend));
+      this.coreMaterial.emissiveIntensity +=
+        (targetEmissive - this.coreMaterial.emissiveIntensity) * emissiveLerp;
+    }
+
+    // 膜の質感が粘土へ移るのは控えめに（全体が発光体に見えない範囲）
+    const membraneBleed = this.membranePressureImpulse * 0.35;
+    this.coreMaterial.clearcoat = Math.min(
+      1,
+      this.baseCoreClearcoat + membraneBleed * 0.25,
+    );
+    this.coreMaterial.clearcoatRoughness = Math.max(0.2, 0.35 - membraneBleed * 0.08);
+    if (this.baseCoreSheen > 0 || membraneBleed > 0.08) {
+      this.coreMaterial.sheen = Math.min(1, this.baseCoreSheen + membraneBleed * 0.2);
+      this.coreMaterial.sheenRoughness = Math.max(0.35, 0.55 - membraneBleed * 0.08);
+    }
+    if (this.baseCoreIridescence > 0 || membraneBleed > 0.12) {
+      this.coreMaterial.iridescence = Math.min(1, this.baseCoreIridescence + membraneBleed * 0.15);
+      this.coreMaterial.iridescenceIOR = 1.5;
+    }
     const baseRoughness =
       fibRatio(11, 12) +
       fibUnit(5, 21) -
@@ -3480,15 +3603,23 @@ class SoundSculpture {
     sy *= blendScale(spindleAlong * spindlePerp - 1, w.spindle);
     sz *= blendScale(spindleAlong * spindlePerp - 1, w.spindle);
 
-    // coral: 3D ノイズで塊のクラスタ (垂直対称を壊す)。
-    // formDevelopment でゲートし、未形成時は真球を崩さない
+    // coral / 全アルゴリズム: pattern で塊のクラスタ（垂直対称を壊す）
     const coralNoise =
       growthPattern(px * 1.15, py * 1.08, pz * 1.12, this.morphologySeed + this.formingTime * 0.16) *
       this.formDevelopment;
-    const coralBump = 1 + coralNoise * 0.14 * (0.45 + this.formTwist * 0.08);
-    sx *= blendScale(coralBump - 1, w.coral);
-    sy *= blendScale(coralBump - 1, w.coral);
-    sz *= blendScale(coralBump - 1, w.coral);
+    const coralBump = 1 + coralNoise * 0.26 * (0.45 + this.formTwist * 0.08);
+    sx *= blendScale(coralBump - 1, Math.max(w.coral, 0.35));
+    sy *= blendScale(coralBump - 1, Math.max(w.coral, 0.35));
+    sz *= blendScale(coralBump - 1, Math.max(w.coral, 0.35));
+
+    // アルゴリズム固有の半径うねり（coral 以外でも常に薄く効かせる）
+    const algoWarp =
+      growthPattern(px * 0.92, py * 1.05, pz * 0.88, this.morphologySeed + 41.2 + this.formingTime * 0.09) *
+      this.formDevelopment *
+      0.11;
+    sx *= 1 + algoWarp;
+    sy *= 1 + algoWarp * 0.85;
+    sz *= 1 + algoWarp;
 
     const sidePull =
       this.formAsymmetry * (1 - along * along) * perp * runtimeTuning.asymmetrySidePull;
@@ -3618,6 +3749,9 @@ class SoundSculpture {
       const carveMask = smoothstep(0.04, 0.82, -largeForm + chiselNoise * 0.45 + axisFocusA * 0.42) * localFocus;
       const pushMask = smoothstep(0.12, 0.9, largeForm + surfaceGrain * 0.32 + axisFocusB * 0.22) * (0.38 + axisFocusB * 0.62);
       const ridge = Math.abs(surfaceGrain - chiselNoise) * midTexture;
+      // 共通モーフは弱め、アルゴリズム pattern を完成形に残す
+      const idolMix = 0.52;
+      const algoGrain = largeForm * 0.85 + surfaceGrain * 0.42 + chiselNoise * 0.35;
       const idolBulge =
         w.diabolo * diaboloBulge +
         w.torus * torusRing +
@@ -3630,12 +3764,13 @@ class SoundSculpture {
         w.torus * smoothstep(0.72, 1.0, Math.abs(along)) * 0.28 * bands.overall +
         smoothstep(0.56, 0.96, -nx * axisA.x - nz * axisA.z) * axisFocusA * 0.36 * (0.35 + w.coral * 0.65);
       const roundedPressure =
-        pushMask * pushBias * 0.22 -
-        carveMask * (carveBias + 0.82) -
-        smoothstep(0.0, 0.78, -largeForm + axisFocusA * 0.3) * 0.34 +
-        ridge * 0.08 +
-        idolBulge -
-        idolCarve;
+        pushMask * pushBias * 0.28 -
+        carveMask * (carveBias + 0.92) -
+        smoothstep(0.0, 0.78, -largeForm + axisFocusA * 0.3) * 0.42 +
+        ridge * 0.12 +
+        algoGrain * 0.62 +
+        idolBulge * idolMix -
+        idolCarve * idolMix;
       const bumpPressure =
         surfaceGrain * 0.36 +
         chiselNoise * 0.28 +
@@ -3690,6 +3825,24 @@ class SoundSculpture {
           (this.highSpikes[i] * (1 - deltaTime * 0.35)) + highDelta,
         ),
       );
+
+      // アルゴリズム固有の起伏を永続レイヤーへ直接蓄積
+      const identityDrive =
+        (lowAmount + midAmount * 0.75 + highAmount * 0.4) * (0.6 + formation * 0.5);
+      if (identityDrive > 1e-6) {
+        const identityDelta = growthModulateScalar(
+          identityDrive * (largeForm * 0.7 + surfaceGrain * 0.28 + chiselNoise * 0.22),
+          nx,
+          ny,
+          nz,
+          audioSalt + 51.3,
+          "memory",
+        );
+        this.algoIdentity[i] = Math.min(
+          0.52,
+          Math.max(-0.45, this.algoIdentity[i] + identityDelta * 1.4),
+        );
+      }
 
       // 結晶軸方向の "結晶化 / 粒子化" 変位。
       // 高音 + 高ブライトネス時、頂点ごとに固定された結晶軸方向に
@@ -4020,6 +4173,9 @@ class SoundSculpture {
       sp.flowGain;
     const salt = this.spectralPhase * 0.7 + bands.centroid * 4.0;
     const skipLive = liveAmount < 0.0001;
+    const heavyFlow = isHeavyGrowthFlowAlgorithm();
+    const flowStride = heavyFlow ? 2 : 1;
+    const flowPhase = heavyFlow ? (Math.floor(this.formingTime * 28) & 1) : 0;
 
     for (let i = 0; i < this.accumulated.length; i += 1) {
       const idx = i * 3;
@@ -4027,7 +4183,7 @@ class SoundSculpture {
       this.flowField[idx] *= decayRate;
       this.flowField[idx + 1] *= decayRate;
       this.flowField[idx + 2] *= decayRate;
-      if (skipLive) {
+      if (skipLive || (i + flowPhase) % flowStride !== 0) {
         continue;
       }
 
@@ -4046,8 +4202,16 @@ class SoundSculpture {
       const ty = this._curlOut.y - ny * dot;
       const tz = this._curlOut.z - nz * dot;
       const deformSalt = this.vertexDeformSalt(i, salt);
-      const liveMod = growthModulateScalar(liveAmount, nx, ny, nz, deformSalt, "flow");
-      const persistMod = growthModulateScalar(persistAmount, nx, ny, nz, deformSalt + 4.1, "memory");
+      const strideBoost = flowStride;
+      const liveMod = growthModulateScalar(liveAmount * strideBoost, nx, ny, nz, deformSalt, "flow");
+      const persistMod = growthModulateScalar(
+        persistAmount * strideBoost,
+        nx,
+        ny,
+        nz,
+        deformSalt + 4.1,
+        "memory",
+      );
 
       this.flowField[idx] += tx * liveMod;
       this.flowField[idx + 1] += ty * liveMod;
@@ -4073,7 +4237,7 @@ class SoundSculpture {
     const t = runtimeTuning;
     const rate = deltaTime * 1.4;
 
-    const bleedRate = 0.027;
+    const bleedRate = 0.058;
 
     for (let i = 0; i < this.accumulated.length; i += 1) {
       const index = i * 3;
@@ -4140,7 +4304,8 @@ class SoundSculpture {
         this.accumulated[i] +
         this.midBumps[i] +
         this.highSpikes[i] +
-        vfScalar * 0.88;
+        vfScalar * 0.88 +
+        this.algoIdentity[i];
       this.rememberSculptedDisplacement(i, sculpted, deltaTime);
     }
   }
@@ -4259,7 +4424,10 @@ class SoundSculpture {
         "live",
       );
 
-      this.liveOffset[i] += (pulse - this.liveOffset[i]) * Math.min(1, deltaTime * 8);
+      // 完成後はパルス追従せず、残存 liveOffset を afterlife で減衰させる
+      if (!this.completed) {
+        this.liveOffset[i] += (pulse - this.liveOffset[i]) * Math.min(1, deltaTime * 8);
+      }
 
       const carve = this.detachmentCarve[i];
       const erosion = this.erosionField[i];
@@ -4313,45 +4481,42 @@ class SoundSculpture {
     this.constrainEnvelope(
       positions as Float32Array,
       this.targetCoreMeanRadius,
-      1.012 + this.formDevelopment * 0.11 + this.getFormationScale() * 0.2,
+      1.02 + this.formDevelopment * 0.2 + this.getFormationScale() * 0.28,
     );
 
-    if (!this.completed || this.hasActiveClickWobble()) {
-      for (let i = 0; i < this.accumulated.length; i += 1) {
-        const index = i * 3;
-        const x = this.basePositions[index];
-        const y = this.basePositions[index + 1];
-        const z = this.basePositions[index + 2];
-        const radius = Math.hypot(x, y, z) || 1;
-        const nx = x / radius;
-        const ny = y / radius;
-        const nz = z / radius;
-        const live =
-          (this.completed
-            ? 0
-            : this.liveOffset[i] * (1 - this.detachmentCarve[i] * 0.88)) + this.idleWobbleField[i];
-        const liveScalar = growthModulateScalar(
-          live,
-          nx,
-          ny,
-          nz,
-          this.vertexDeformSalt(i),
-          this.completed ? "idle" : "live",
-        );
-        const wobbleVec = growthModulateVector3(
-          this.idleWobbleVector[index],
-          this.idleWobbleVector[index + 1],
-          this.idleWobbleVector[index + 2],
-          nx,
-          ny,
-          nz,
-          this.vertexDeformSalt(i, 1.7),
-          "idle",
-        );
-        positions[index] += nx * liveScalar + wobbleVec.x;
-        positions[index + 1] += ny * liveScalar + wobbleVec.y;
-        positions[index + 2] += nz * liveScalar + wobbleVec.z;
-      }
+    // 完成後も凍結した liveOffset / idle を描画（クリアすると形が変わる）
+    for (let i = 0; i < this.accumulated.length; i += 1) {
+      const index = i * 3;
+      const x = this.basePositions[index];
+      const y = this.basePositions[index + 1];
+      const z = this.basePositions[index + 2];
+      const radius = Math.hypot(x, y, z) || 1;
+      const nx = x / radius;
+      const ny = y / radius;
+      const nz = z / radius;
+      const live =
+        this.liveOffset[i] * (1 - this.detachmentCarve[i] * 0.88) + this.idleWobbleField[i];
+      const liveScalar = growthModulateScalar(
+        live,
+        nx,
+        ny,
+        nz,
+        this.vertexDeformSalt(i),
+        this.completed ? "idle" : "live",
+      );
+      const wobbleVec = growthModulateVector3(
+        this.idleWobbleVector[index],
+        this.idleWobbleVector[index + 1],
+        this.idleWobbleVector[index + 2],
+        nx,
+        ny,
+        nz,
+        this.vertexDeformSalt(i, 1.7),
+        "idle",
+      );
+      positions[index] += nx * liveScalar + wobbleVec.x;
+      positions[index + 1] += ny * liveScalar + wobbleVec.y;
+      positions[index + 2] += nz * liveScalar + wobbleVec.z;
     }
 
     applyClickRepulsionToPositions(this.clickRepulsion, this.basePositions, positions as Float32Array);
@@ -4361,20 +4526,496 @@ class SoundSculpture {
   }
 
   /**
-   * vita のコアを膜より十分内側に収める。
-   * コアと膜は同じ頂点トポロジーなので、対応頂点の半径を比較して
-   * 膜の動きが読める空間を全周に確保する。
+   * 突き抜け頂点だけ半透明＋発光するためのコアシェーダ拡張（誇張版）。
+   * core / innerCore の両方に入れる（同一ジオメトリのため片方だけだと隠れる）。
+   */
+  private installCorePierceShader(material: THREE.MeshPhysicalMaterial) {
+    material.transparent = true;
+    material.opacity = 1;
+    // 膜内の粘土は通常の不透明感を保ち、突き抜け先端だけ透過＋発光
+    material.depthWrite = true;
+    material.vertexColors = true;
+    material.color.set(0xffffff);
+    material.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          /* glsl */ `
+          #include <common>
+          attribute float aPierce;
+          varying float vPierce;
+          `,
+        )
+        .replace(
+          "#include <begin_vertex>",
+          /* glsl */ `
+          #include <begin_vertex>
+          vPierce = aPierce;
+          `,
+        );
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <common>",
+          /* glsl */ `
+          #include <common>
+          varying float vPierce;
+          `,
+        )
+        .replace(
+          "vec4 diffuseColor = vec4( diffuse, opacity );",
+          /* glsl */ `
+          // 真の突き抜けだけ弱い発光。膜内は頂点色の粘土質のまま
+          float pierceMask = smoothstep(0.4, 0.9, vPierce);
+          vec3 pierceTint = mix(diffuse, vec3(0.82, 0.52, 0.72), pierceMask * 0.12);
+          vec4 diffuseColor = vec4( pierceTint, opacity * mix(1.0, 0.72, pierceMask) );
+          `,
+        )
+        .replace(
+          "#include <emissivemap_fragment>",
+          /* glsl */ `
+          #include <emissivemap_fragment>
+          float pierceGlow = smoothstep(0.45, 0.95, vPierce);
+          totalEmissiveRadiance += vec3(0.7, 0.4, 0.65) * pierceGlow * 0.45;
+          totalEmissiveRadiance += vec3(0.35, 0.55, 0.75) * pierceGlow * pierceGlow * 0.22;
+          `,
+        );
+    };
+    material.customProgramCacheKey = () => "vita-core-pierce-tips-soft-v6";
+    material.needsUpdate = true;
+  }
+
+  /**
+   * 膜メッシュの1-ring近傍を構築（接触圧の柔らかい拡散用）。
+   */
+  private buildMembraneNeighbors(geometry: THREE.BufferGeometry, vertexCount: number) {
+    const cap = SoundSculpture.membraneNeighborCap;
+    const neighbors = new Int32Array(vertexCount * cap);
+    neighbors.fill(-1);
+    const counts = new Uint8Array(vertexCount);
+    const indexAttr = geometry.getIndex();
+    if (!indexAttr) {
+      return neighbors;
+    }
+    const indices = indexAttr.array;
+    const addEdge = (a: number, b: number) => {
+      if (a === b || a < 0 || b < 0 || a >= vertexCount || b >= vertexCount) {
+        return;
+      }
+      const base = a * cap;
+      const n = counts[a];
+      if (n >= cap) {
+        return;
+      }
+      for (let k = 0; k < n; k += 1) {
+        if (neighbors[base + k] === b) {
+          return;
+        }
+      }
+      neighbors[base + n] = b;
+      counts[a] = n + 1;
+    };
+    for (let i = 0; i + 2 < indices.length; i += 3) {
+      const a = indices[i];
+      const b = indices[i + 1];
+      const c = indices[i + 2];
+      addEdge(a, b);
+      addEdge(b, a);
+      addEdge(a, c);
+      addEdge(c, a);
+      addEdge(b, c);
+      addEdge(c, b);
+    }
+    return neighbors;
+  }
+
+  /**
+   * コアが膜に近づいた／突き抜けた頂点で圧力を溜め、近傍へ拡散する。
+   * 完成後は新規加算せず減衰のみ。
+   * ※ 膜接着の前に呼ぶこと — ここで aPierce も更新する。
+   */
+  private updateMembraneContactPressure(deltaTime: number) {
+    const decay = Math.exp(-4 * deltaTime);
+    const impulseDecay = Math.exp(-5.2 * deltaTime);
+    const pierceDecay = Math.exp(-3.8 * deltaTime);
+    const pierceAttack = Math.min(1, deltaTime * 18);
+    const count = this.membranePressure.length;
+    let pierceChanged = false;
+
+    for (let i = 0; i < count; i += 1) {
+      this.membranePressure[i] *= decay;
+      if (this.membranePressure[i] < 1e-5) {
+        this.membranePressure[i] = 0;
+      }
+      // 接触なしフレームでも pierce は減衰
+      const prevPierce = this.pierceAmount[i];
+      this.pierceAmount[i] *= pierceDecay;
+      if (this.pierceAmount[i] < 1e-4) {
+        this.pierceAmount[i] = 0;
+      }
+      if (this.pierceAmount[i] !== prevPierce) {
+        pierceChanged = true;
+      }
+    }
+
+    if (!this.style.membrane.vita) {
+      this.membranePressureImpulse *= impulseDecay;
+      if (pierceChanged) {
+        const pierceAttr = this.geometry.getAttribute("aPierce");
+        if (pierceAttr) {
+          pierceAttr.needsUpdate = true;
+        }
+      }
+      return;
+    }
+
+    let hit = 0;
+    if (!this.completed) {
+      const corePositions = this.geometry.attributes.position.array as Float32Array;
+      const surfacePositions = this.surfaceGeometry.attributes.position.array as Float32Array;
+      const softGap = 0.35;
+      const vertexCount = Math.min(count, Math.min(corePositions.length, surfacePositions.length) / 3);
+
+      for (let i = 0; i < vertexCount; i += 1) {
+        const index = i * 3;
+        const coreRadius = Math.hypot(
+          corePositions[index],
+          corePositions[index + 1],
+          corePositions[index + 2],
+        );
+        if (coreRadius < 0.0001) {
+          continue;
+        }
+        const surfaceRadius = Math.hypot(
+          surfacePositions[index],
+          surfacePositions[index + 1],
+          surfacePositions[index + 2],
+        );
+        const gap = surfaceRadius - coreRadius;
+        if (gap >= softGap) {
+          continue;
+        }
+
+        const bx = this.baseSurfacePositions[index];
+        const by = this.baseSurfacePositions[index + 1];
+        const bz = this.baseSurfacePositions[index + 2];
+        const br = Math.hypot(bx, by, bz) || 1;
+        const nx = bx / br;
+        const ny = by / br;
+        const nz = bz / br;
+
+        let push = 0;
+        if (gap < 0) {
+          push = 0.085 + Math.min(0.24, -gap * 0.9);
+        } else {
+          const t = 1 - gap / softGap;
+          push = t * t * 0.058;
+        }
+        push = growthModulateScalar(push, nx, ny, nz, this.vertexDeformSalt(i, 21.4), "surface");
+        this.membranePressure[i] = Math.min(0.38, this.membranePressure[i] + push);
+        hit = Math.max(hit, push);
+
+        // 膜を突き抜けた頂点だけ発光マスク（接近だけでは立てない）
+        if (gap < 0) {
+          const pierceTarget = Math.min(1, (-gap / 0.1) * 0.95);
+          if (pierceTarget > this.pierceAmount[i]) {
+            this.pierceAmount[i] += (pierceTarget - this.pierceAmount[i]) * pierceAttack;
+          } else {
+            this.pierceAmount[i] = Math.max(this.pierceAmount[i] * pierceDecay, pierceTarget);
+          }
+          pierceChanged = true;
+        }
+      }
+
+      // 接触圧のみ 1-ring へ柔らかい拡散（pierce は拡散しない＝膜内が光らない）
+      const cap = SoundSculpture.membraneNeighborCap;
+      for (let i = 0; i < count; i += 1) {
+        let sum = this.membranePressure[i];
+        let n = 1;
+        const base = i * cap;
+        for (let k = 0; k < cap; k += 1) {
+          const j = this.membraneNeighbors[base + k];
+          if (j < 0) {
+            break;
+          }
+          sum += this.membranePressure[j];
+          n += 1;
+        }
+        this.membranePressureScratch[i] = this.membranePressure[i] * 0.7 + (sum / n) * 0.3;
+      }
+      this.membranePressure.set(this.membranePressureScratch);
+    }
+
+    this.membranePressureImpulse = Math.min(
+      1,
+      this.membranePressureImpulse * impulseDecay + hit * 3.8,
+    );
+
+    if (pierceChanged) {
+      const pierceAttr = this.geometry.getAttribute("aPierce");
+      if (pierceAttr) {
+        pierceAttr.needsUpdate = true;
+      }
+    }
+  }
+
+  /**
+   * 接触圧に応じて膜を粘土側へ引っ張る（接着）。
+   * 粘土が膨らめば膜も一緒に外へ、近づけば膜が内側へ吸い付く。
+   */
+  private applyMembranePressureBulge(positions: Float32Array | ArrayLike<number>) {
+    if (!this.style.membrane.vita || this.completed) {
+      return;
+    }
+    const pos = positions as Float32Array;
+    const corePositions = this.geometry.attributes.position.array as Float32Array;
+    const count = Math.min(this.membranePressure.length, corePositions.length / 3);
+    const filmGap = 0.055;
+
+    for (let i = 0; i < count; i += 1) {
+      const pressure = this.membranePressure[i];
+      if (pressure < 1e-5) {
+        continue;
+      }
+      const index = i * 3;
+      const cx = corePositions[index];
+      const cy = corePositions[index + 1];
+      const cz = corePositions[index + 2];
+      const coreRadius = Math.hypot(cx, cy, cz);
+      if (coreRadius < 0.0001) {
+        continue;
+      }
+
+      const sx = pos[index];
+      const sy = pos[index + 1];
+      const sz = pos[index + 2];
+      const surfaceRadius = Math.hypot(sx, sy, sz) || 1;
+
+      // 粘土表面のすぐ外側へ膜を引き寄せる目標点
+      const targetRadius = coreRadius + filmGap;
+      const cnx = cx / coreRadius;
+      const cny = cy / coreRadius;
+      const cnz = cz / coreRadius;
+      const targetX = cnx * targetRadius;
+      const targetY = cny * targetRadius;
+      const targetZ = cnz * targetRadius;
+
+      const nx = sx / surfaceRadius;
+      const ny = sy / surfaceRadius;
+      const nz = sz / surfaceRadius;
+      // 圧力が強いほど強く張り付く（突き抜け時は特に粘土に引っ張られる）
+      const pierceBoost = surfaceRadius < coreRadius ? 1.35 : 1;
+      const adhesion = Math.min(
+        0.92,
+        growthModulateScalar(
+          Math.min(1, pressure * 2.4) * pierceBoost,
+          nx,
+          ny,
+          nz,
+          this.vertexDeformSalt(i, 23.7),
+          "surface",
+        ),
+      );
+
+      pos[index] = sx + (targetX - sx) * adhesion;
+      pos[index + 1] = sy + (targetY - sy) * adhesion;
+      pos[index + 2] = sz + (targetZ - sz) * adhesion;
+    }
+  }
+
+  /**
+   * 膜に引っ張られた反作用として、粘土コアを接触点で内側へへこませる。
+   */
+  private applyClayContactCompress() {
+    if (!this.style.membrane.vita || this.completed) {
+      return;
+    }
+    const corePositions = this.geometry.attributes.position.array as Float32Array;
+    const count = Math.min(this.membranePressure.length, corePositions.length / 3);
+    let changed = false;
+
+    for (let i = 0; i < count; i += 1) {
+      const pressure = this.membranePressure[i];
+      if (pressure < 1e-5) {
+        continue;
+      }
+      const index = i * 3;
+      const cx = corePositions[index];
+      const cy = corePositions[index + 1];
+      const cz = corePositions[index + 2];
+      const cr = Math.hypot(cx, cy, cz) || 1;
+      const nx = cx / cr;
+      const ny = cy / cr;
+      const nz = cz / cr;
+      // 膜に引っ張られる感触の反作用 — やや控えめに内側へ
+      const amount = growthModulateScalar(
+        pressure * 0.42,
+        nx,
+        ny,
+        nz,
+        this.vertexDeformSalt(i, 25.1),
+        "live",
+      );
+      growthFlow(nx * 1.15, ny * 1.15, nz * 1.15, this.vertexDeformSalt(i, 26.4), this._curlOut);
+      const dot = this._curlOut.x * nx + this._curlOut.y * ny + this._curlOut.z * nz;
+      const tx = this._curlOut.x - nx * dot;
+      const ty = this._curlOut.y - ny * dot;
+      const tz = this._curlOut.z - nz * dot;
+      const tLen = Math.hypot(tx, ty, tz) || 1;
+      const lateral = amount * 0.22;
+
+      corePositions[index] = cx - nx * amount + (tx / tLen) * lateral;
+      corePositions[index + 1] = cy - ny * amount + (ty / tLen) * lateral;
+      corePositions[index + 2] = cz - nz * amount + (tz / tLen) * lateral;
+      changed = true;
+    }
+
+    if (changed) {
+      this.geometry.attributes.position.needsUpdate = true;
+      this.geometry.computeVertexNormals();
+    }
+  }
+
+  /**
+   * 膜が粘土に作用して少し同化する。
+   * pierce マスクは updateMembraneContactPressure（膜接着前）で更新済み。
+   */
+  private applyClayMembraneAssimilation(deltaTime: number) {
+    if (!this.style.membrane.vita) {
+      return;
+    }
+
+    const decay = Math.exp(-3.4 * deltaTime);
+    const corePositions = this.geometry.attributes.position.array as Float32Array;
+    const surfacePositions = this.surfaceGeometry.attributes.position.array as Float32Array;
+    const count = Math.min(
+      this.clayAssimilation.length,
+      Math.min(corePositions.length, surfacePositions.length) / 3,
+    );
+    const softGap = 0.2;
+    const colorAttr = this.geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
+    const colors = colorAttr ? (colorAttr.array as Float32Array) : null;
+    let geomChanged = false;
+    let colorChanged = false;
+
+    for (let i = 0; i < count; i += 1) {
+      this.clayAssimilation[i] *= decay;
+      if (this.clayAssimilation[i] < 1e-5) {
+        this.clayAssimilation[i] = 0;
+      }
+
+      const index = i * 3;
+      const cx = corePositions[index];
+      const cy = corePositions[index + 1];
+      const cz = corePositions[index + 2];
+      const coreRadius = Math.hypot(cx, cy, cz);
+      if (coreRadius < 0.0001) {
+        continue;
+      }
+      const surfaceRadius = Math.hypot(
+        surfacePositions[index],
+        surfacePositions[index + 1],
+        surfacePositions[index + 2],
+      );
+      const gap = surfaceRadius - coreRadius;
+      const pierce = this.pierceAmount[i];
+
+      if (!this.completed && (gap < softGap || this.membranePressure[i] > 0.02)) {
+        const nx = cx / coreRadius;
+        const ny = cy / coreRadius;
+        const nz = cz / coreRadius;
+        let gain = 0;
+        if (gap < 0) {
+          gain = 0.12 + Math.min(0.35, -gap * 1.1);
+        } else if (gap < softGap) {
+          const t = 1 - gap / softGap;
+          gain = t * t * 0.06 + this.membranePressure[i] * 0.08;
+        } else {
+          gain = this.membranePressure[i] * 0.05;
+        }
+        gain = growthModulateScalar(gain, nx, ny, nz, this.vertexDeformSalt(i, 28.2), "live");
+        this.clayAssimilation[i] = Math.min(1, this.clayAssimilation[i] + gain);
+      }
+
+      const assimil = this.clayAssimilation[i];
+      if (assimil < 1e-4 && pierce < 1e-4) {
+        if (colors) {
+          colors[index] = this.coreColorBase[index];
+          colors[index + 1] = this.coreColorBase[index + 1];
+          colors[index + 2] = this.coreColorBase[index + 2];
+          colorChanged = true;
+        }
+        continue;
+      }
+
+      const nx = cx / coreRadius;
+      const ny = cy / coreRadius;
+      const nz = cz / coreRadius;
+
+      // 突き抜けを消さないよう、引き戻しは弱め
+      const membraneInner = Math.max(0.15, surfaceRadius - 0.025);
+      if (
+        !this.completed &&
+        assimil > 1e-4 &&
+        pierce < 0.35 &&
+        coreRadius > membraneInner
+      ) {
+        const pull = Math.min(
+          0.35,
+          growthModulateScalar(assimil * 0.28, nx, ny, nz, this.vertexDeformSalt(i, 29.1), "live"),
+        );
+        const newRadius = coreRadius + (membraneInner - coreRadius) * pull;
+        corePositions[index] = nx * newRadius;
+        corePositions[index + 1] = ny * newRadius;
+        corePositions[index + 2] = nz * newRadius;
+        geomChanged = true;
+      }
+
+      if (colors) {
+        // 膜内は粘土色のまま。突き抜け先端もごく弱く寄せるだけ
+        const tintStrength = Math.min(1, Math.max(0, (pierce - 0.4) / 0.55) * 0.1);
+        if (tintStrength > 0.015) {
+          const tr = 0.78;
+          const tg = 0.5 + pierce * 0.06;
+          const tb = 0.62 + pierce * 0.05;
+          colors[index] = this.coreColorBase[index] + (tr - this.coreColorBase[index]) * tintStrength;
+          colors[index + 1] =
+            this.coreColorBase[index + 1] + (tg - this.coreColorBase[index + 1]) * tintStrength;
+          colors[index + 2] =
+            this.coreColorBase[index + 2] + (tb - this.coreColorBase[index + 2]) * tintStrength;
+          colorChanged = true;
+        } else {
+          colors[index] = this.coreColorBase[index];
+          colors[index + 1] = this.coreColorBase[index + 1];
+          colors[index + 2] = this.coreColorBase[index + 2];
+          colorChanged = true;
+        }
+      }
+    }
+
+    if (geomChanged) {
+      this.geometry.attributes.position.needsUpdate = true;
+      this.geometry.computeVertexNormals();
+    }
+    if (colorChanged && colorAttr) {
+      colorAttr.needsUpdate = true;
+    }
+  }
+
+  /**
+   * vita のコアを膜より内側に収める安全弁。
+   * 突き抜けは許容し、極端な飛び出しだけ抑える。
    */
   private enforceVitaMembraneClearance() {
-    if (!this.style.membrane.vita) {
+    if (!this.style.membrane.vita || this.completed) {
       return;
     }
 
     const corePositions = this.geometry.attributes.position.array as Float32Array;
     const surfacePositions = this.surfaceGeometry.attributes.position.array as Float32Array;
     const vertexCount = Math.min(corePositions.length, surfacePositions.length) / 3;
-    const coreToSurfaceRatio = 0.88;
-    const minimumGap = 0.14;
+    // 突き抜け許容幅 — これ以上だけ強制クランプ
+    const maxOvershoot = 0.32;
     let changed = false;
 
     for (let i = 0; i < vertexCount; i += 1) {
@@ -4392,10 +5033,7 @@ class SoundSculpture {
         surfacePositions[index + 1],
         surfacePositions[index + 2],
       );
-      const maxCoreRadius = Math.max(
-        0.2,
-        Math.min(surfaceRadius * coreToSurfaceRatio, surfaceRadius - minimumGap),
-      );
+      const maxCoreRadius = surfaceRadius + maxOvershoot;
       if (coreRadius <= maxCoreRadius) {
         continue;
       }
@@ -4435,8 +5073,10 @@ class SoundSculpture {
       const ripple = growthPattern(nx, ny, nz, this.formingTime * 3.6 + this.carvingPhase * 0.7);
       const surfacePattern = flow * 0.22 + ripple * 0.09;
       const targetSurfaceLive = midDrive * surfacePattern;
-      this.surfaceLiveOffset[i] +=
-        (targetSurfaceLive - this.surfaceLiveOffset[i]) * Math.min(1, deltaTime * 9);
+      if (!this.completed) {
+        this.surfaceLiveOffset[i] +=
+          (targetSurfaceLive - this.surfaceLiveOffset[i]) * Math.min(1, deltaTime * 9);
+      }
       const remembered = this.getPermanentScalarDisplacement(i);
       const deformSalt = this.vertexDeformSalt(i, 9.2);
       const scalarDisp = growthModulateScalar(
@@ -4479,41 +5119,38 @@ class SoundSculpture {
 
     this.constrainEnvelope(positions as Float32Array, this.targetSurfaceMeanRadius, 1.32);
 
-    if (!this.completed || this.hasActiveClickWobble()) {
-      for (let i = 0; i < this.accumulated.length; i += 1) {
-        const index = i * 3;
-        const x = this.baseSurfacePositions[index];
-        const y = this.baseSurfacePositions[index + 1];
-        const z = this.baseSurfacePositions[index + 2];
-        const radius = Math.hypot(x, y, z) || 1;
-        const nx = x / radius;
-        const ny = y / radius;
-        const nz = z / radius;
-        // 膜はコアより僅かに大きくホヨホヨさせて「柔らかい外皮」を演出
-        const live =
-          (this.completed ? 0 : this.surfaceLiveOffset[i]) + this.idleWobbleField[i] * 1.18;
-        const liveScalar = growthModulateScalar(
-          live,
-          nx,
-          ny,
-          nz,
-          this.vertexDeformSalt(i, 11.5),
-          this.completed ? "idle" : "surface",
-        );
-        const wobbleVec = growthModulateVector3(
-          this.idleWobbleVector[index] * 1.05,
-          this.idleWobbleVector[index + 1] * 1.05,
-          this.idleWobbleVector[index + 2] * 1.05,
-          nx,
-          ny,
-          nz,
-          this.vertexDeformSalt(i, 13.1),
-          "idle",
-        );
-        positions[index] += nx * liveScalar + wobbleVec.x;
-        positions[index + 1] += ny * liveScalar + wobbleVec.y;
-        positions[index + 2] += nz * liveScalar + wobbleVec.z;
-      }
+    // 完成後も凍結した surfaceLive / idle を描画
+    for (let i = 0; i < this.accumulated.length; i += 1) {
+      const index = i * 3;
+      const x = this.baseSurfacePositions[index];
+      const y = this.baseSurfacePositions[index + 1];
+      const z = this.baseSurfacePositions[index + 2];
+      const radius = Math.hypot(x, y, z) || 1;
+      const nx = x / radius;
+      const ny = y / radius;
+      const nz = z / radius;
+      const live = this.surfaceLiveOffset[i] + this.idleWobbleField[i] * 1.18;
+      const liveScalar = growthModulateScalar(
+        live,
+        nx,
+        ny,
+        nz,
+        this.vertexDeformSalt(i, 11.5),
+        this.completed ? "idle" : "surface",
+      );
+      const wobbleVec = growthModulateVector3(
+        this.idleWobbleVector[index] * 1.05,
+        this.idleWobbleVector[index + 1] * 1.05,
+        this.idleWobbleVector[index + 2] * 1.05,
+        nx,
+        ny,
+        nz,
+        this.vertexDeformSalt(i, 13.1),
+        "idle",
+      );
+      positions[index] += nx * liveScalar + wobbleVec.x;
+      positions[index + 1] += ny * liveScalar + wobbleVec.y;
+      positions[index + 2] += nz * liveScalar + wobbleVec.z;
     }
 
     applyClickRepulsionToPositions(
@@ -4521,6 +5158,12 @@ class SoundSculpture {
       this.baseSurfacePositions,
       positions as Float32Array,
     );
+
+    // 接触圧 → 膜が粘土に引っ張られる → 粘土へこみ → 膜が粘土を同化する → 極端飛び出しのみ安全弁
+    this.updateMembraneContactPressure(deltaTime);
+    this.applyMembranePressureBulge(positions as Float32Array);
+    this.applyClayContactCompress();
+    this.applyClayMembraneAssimilation(deltaTime);
     this.enforceVitaMembraneClearance();
 
     const uniforms = this.surfaceMaterial.uniforms;
@@ -4535,9 +5178,10 @@ class SoundSculpture {
     uniforms.uMid.value += (bands.mid - uniforms.uMid.value) * Math.min(1, deltaTime * 9);
     uniforms.uMelody.value += (bands.melody - uniforms.uMelody.value) * Math.min(1, deltaTime * 9);
     uniforms.uHigh.value += (bands.high - uniforms.uHigh.value) * Math.min(1, deltaTime * 9);
-    const targetLive = this.getMembraneLiveTarget(bands);
+    const tension = this.membranePressureImpulse;
+    const targetLive = this.getMembraneLiveTarget(bands) + tension * 0.7;
     uniforms.uLive.value += (targetLive - uniforms.uLive.value) * Math.min(1, deltaTime * 14);
-    const targetGlow = this.getMembraneGlowTarget(bands);
+    const targetGlow = this.getMembraneGlowTarget(bands) + tension * 0.9;
     uniforms.uGlow.value += (targetGlow - uniforms.uGlow.value) * Math.min(1, deltaTime * 5);
     // 外殻の透明感を抑えて「中身が詰まっている」印象に寄せる
     const sp = this.getSpecies();
@@ -4547,10 +5191,20 @@ class SoundSculpture {
       (this.completed
         ? stMembrane.completedOpacity
         : (fibUnit(5, 21) + sp.membraneGain * fibUnit(8, 21) - sp.aggressive * fibUnit(5, 21)) *
-          stMembrane.opacityScale) * initialGate;
-    uniforms.uOpacity.value += (membraneOpacity - uniforms.uOpacity.value) * Math.min(1, deltaTime * fib(3));
+          stMembrane.opacityScale) *
+        initialGate +
+      tension * 0.14;
+    const opacityFollow = this.completed
+      ? 0.7 + (1 - this.completionSettle) * 1.4
+      : fib(3);
+    uniforms.uOpacity.value +=
+      (membraneOpacity - uniforms.uOpacity.value) * Math.min(1, deltaTime * opacityFollow);
     const freezeTarget = this.completed ? stMembrane.freezeTarget : 0;
-    uniforms.uCompleted.value += (freezeTarget - uniforms.uCompleted.value) * Math.min(1, deltaTime * 2);
+    const freezeFollow = this.completed
+      ? 0.55 + (1 - this.completionSettle) * 1.1
+      : 2;
+    uniforms.uCompleted.value +=
+      (freezeTarget - uniforms.uCompleted.value) * Math.min(1, deltaTime * freezeFollow);
 
     this.surfaceGeometry.attributes.position.needsUpdate = true;
     this.surfaceGeometry.computeVertexNormals();
@@ -5296,6 +5950,54 @@ viewControls.addEventListener("end", () => {
   isViewInteracting = false;
 });
 
+/** 再生中だけカメラに載せる、音連動のごく弱い浮遊揺らぎ */
+const cameraSwayRight = new THREE.Vector3();
+const cameraSwayUp = new THREE.Vector3();
+const cameraSwayFwd = new THREE.Vector3();
+let cameraSwayAmp = 0;
+let cameraSwayPhase = 0;
+
+const updateAudioCameraSway = (
+  deltaTime: number,
+  bands: AudioBands,
+  rhythm: RhythmEvents,
+  active: boolean,
+) => {
+  // 音量に合わせて振幅。酔わないようごく弱く
+  const energy = active
+    ? Math.min(1, smoothstep(0.04, 0.32, bands.overall) * (0.45 + bands.sub * 0.25 + bands.mid * 0.15))
+    : 0;
+  const interactDamp = isViewInteracting ? 0.08 : 1;
+  const targetAmp = energy * interactDamp;
+  cameraSwayAmp += (targetAmp - cameraSwayAmp) * Math.min(1, deltaTime * 1.2);
+
+  if (cameraSwayAmp < 0.002) {
+    return;
+  }
+
+  const pulse = rhythm.pulseEnvelope * (0.2 + rhythm.pulseConfidence * 0.6);
+  cameraSwayPhase += deltaTime * (0.28 + cameraSwayAmp * 0.18 + pulse * 0.12);
+
+  const t = cameraSwayPhase;
+  const a = cameraSwayAmp;
+  // カメラローカルの平行移動のみ（回転は触らない＝酔いづらい）
+  const yaw = Math.sin(t * 0.55) * 0.012 + Math.sin(t * 1.05) * 0.004;
+  const pitch = Math.cos(t * 0.42) * 0.008 + Math.sin(t * 0.91) * 0.003;
+  const dolly =
+    Math.sin(t * 0.31 + 0.9) * 0.01 +
+    pulse * 0.004 +
+    Math.max(rhythm.kick, 0) * 0.003;
+
+  const strength = a * 0.18;
+  cameraSwayRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  cameraSwayUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  camera.getWorldDirection(cameraSwayFwd);
+
+  camera.position.addScaledVector(cameraSwayRight, yaw * strength);
+  camera.position.addScaledVector(cameraSwayUp, pitch * strength);
+  camera.position.addScaledVector(cameraSwayFwd, -dolly * strength);
+};
+
 const sculpture: SculptureExperience =
   sculptureMode === "amoeba"
     ? new AmoebaSculpture({
@@ -5616,6 +6318,7 @@ growthAlgorithmSelect.addEventListener("change", () => {
   growthAlgorithmId = nextId;
   setGrowthAlgorithmId(nextId);
   applyGrowthAlgorithmUi(nextId);
+  sculpture.applyAlgoMorphBias?.();
 
   const url = new URL(window.location.href);
   if (nextId === "fibonacci") {
@@ -6017,7 +6720,10 @@ const trackSilenceForCompletion = (
     silenceSeconds += deltaTime;
   }
 
-  if (silenceSeconds >= SILENCE_SECONDS_TO_COMPLETE) {
+  const silenceTarget = playbackEnded
+    ? PLAYBACK_ENDED_SECONDS_TO_COMPLETE
+    : SILENCE_SECONDS_TO_COMPLETE;
+  if (silenceSeconds >= silenceTarget) {
     completeSculpture();
   }
 };
@@ -6153,12 +6859,19 @@ const render = () => {
     deltaTime,
     camera,
     starPointerActive ? starPointerNdc : null,
-    // 曲再生中は静止、開始前・完成後は漂う
-    !(isAudioReady && !isComplete),
+    true,
+    // 曲再生中は軽量フィールド、停止中・完成後は全星フル評価
+    isAudioReady && !isComplete,
   );
   drawAudioScope(waveform, rhythmEvents, bandMeters, bandSoloMode, latestStructure, speciesProfile);
   updateEnvironmentCrossfade(deltaTime);
   viewControls.update();
+  updateAudioCameraSway(
+    deltaTime,
+    displayBands,
+    rhythmEvents,
+    isAudioReady && !isComplete,
+  );
   renderer.render(scene, camera);
   requestAnimationFrame(render);
 };
