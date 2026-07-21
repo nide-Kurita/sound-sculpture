@@ -97,12 +97,12 @@ const RUNTIME_BASELINE: RuntimeSculptureTuning = {
 };
 
 export const DEFAULT_SCULPTURE_TUNING: SculptureTuning = {
-  formation: FIB_SLIDER_DEFAULT,
+  formation: FIB_SLIDER_MIN,
   pulse: FIB_SLIDER_DEFAULT,
   liveSurface: FIB_SLIDER_DEFAULT,
   liveMembrane: FIB_SLIDER_DEFAULT,
-  growth: FIB_SLIDER_DEFAULT,
-  mineral: FIB_SLIDER_DEFAULT,
+  growth: FIB_SLIDER_MIN,
+  mineral: FIB_SLIDER_MIN,
 };
 
 export const expandSculptureTuning = (knobs: SculptureTuning): RuntimeSculptureTuning => {

@@ -61,6 +61,7 @@ export type VisualStyleConfig = {
   label: string;
   introTitle: string;
   introDescription: string;
+  introDescriptionEn?: string;
   themeDark: boolean;
   membrane: {
     visible: boolean;
@@ -105,7 +106,7 @@ export type VisualStyleConfig = {
 const METAMORPHOSIS: VisualStyleConfig = {
   id: "metamorphosis",
   label: "変容 — 生命が彫刻になる",
-  introTitle: "音で彫刻する",
+  introTitle: "音の彫刻",
   introDescription:
     "音は膜の中で生命のように蠢き、形を蓄積します。演奏が終わり静寂が訪れると生命は結晶化し、音の記憶を刻んだ鉱物の彫刻として完成します。",
   themeDark: false,
@@ -160,9 +161,11 @@ const METAMORPHOSIS: VisualStyleConfig = {
 const VITA: VisualStyleConfig = {
   id: "vita",
   label: "生命 — 神秘の生命体",
-  introTitle: "音で育てる生命",
+  introTitle: "音の彫刻",
   introDescription:
-    "音を糧に、深海のような闇の中で生命体が育ちます。膜は真珠のように輝き、完成後もあなたの音の鼓動を記憶して呼吸し続けます。",
+    "音を糧に、深海のような闇の中で生命体が育つ。膜は真珠のように輝き、完成後も音の鼓動を記憶して呼吸し続けます。",
+  introDescriptionEn:
+    "Fed by sound, a life-form grows. Its membrane gleams like a pearl, remembering the pulse of sound as it continues to breathe.",
   themeDark: true,
   membrane: {
     visible: true,
@@ -194,12 +197,12 @@ const VITA: VisualStyleConfig = {
     background: 0x060910,
     backgroundComplete: 0x070b12,
     exposure: 1.12,
-    key: 1.95,
-    keyComplete: 1.72,
-    fill: 0.82,
-    fillComplete: 0.72,
-    ambient: 0.56,
-    ambientComplete: 0.48,
+    key: 1.35,
+    keyComplete: 1.2,
+    fill: 1.3,
+    fillComplete: 1.15,
+    ambient: 1.15,
+    ambientComplete: 0.98,
     stars: true,
     environmentMap: false,
     pedestal: false,
@@ -208,8 +211,8 @@ const VITA: VisualStyleConfig = {
     cameraFar: 220,
     hemisphereGround: 0x0c1018,
     fillColor: 0x6a7280,
-    rimLightIntensity: 0.26,
-    rimLightColor: 0x3d4f62,
+    rimLightIntensity: 0.38,
+    rimLightColor: 0x4a6078,
     backgroundProfile: {
       domeVariant: "abyss",
       openVoid: true,
@@ -222,7 +225,7 @@ const VITA: VisualStyleConfig = {
 const MONOLITH: VisualStyleConfig = {
   id: "monolith",
   label: "彫刻 — 石とブロンズ",
-  introTitle: "音で刻む彫刻",
+  introTitle: "音の彫刻",
   introDescription:
     "低音が量塊を盛り、中音が面を流し、高音がノミの跡を刻みます。静寂とともにギャラリーの照明が灯り、音の性質から生まれた素材 — 大理石、ブロンズ、黒曜石 — の彫刻が現れます。",
   themeDark: false,
@@ -301,6 +304,7 @@ export type ExperienceEntry = {
   visualStyleId: VisualStyleId | null;
   introTitle: string;
   introDescription: string;
+  introDescriptionEn?: string;
 };
 
 export const EXPERIENCE_CATALOG: readonly ExperienceEntry[] = [
@@ -311,6 +315,7 @@ export const EXPERIENCE_CATALOG: readonly ExperienceEntry[] = [
     visualStyleId: "vita",
     introTitle: VITA.introTitle,
     introDescription: VITA.introDescription,
+    introDescriptionEn: VITA.introDescriptionEn,
   },
   {
     id: "metamorphosis",
@@ -333,7 +338,7 @@ export const EXPERIENCE_CATALOG: readonly ExperienceEntry[] = [
     label: "出現 — 無から生み出す",
     sculptureMode: "carve",
     visualStyleId: null,
-    introTitle: "音で生み出す",
+    introTitle: "音の彫刻",
     introDescription:
       "無の中心から、音が触媒となって形が立ち上がります。低音は体積を、中音は表面の流れを、高音は細部を刻みます。曲の長さに合わせて未出現の領域が後から現れ、無音が続くとその瞬間の姿を作品として固定します。",
   },
@@ -342,7 +347,7 @@ export const EXPERIENCE_CATALOG: readonly ExperienceEntry[] = [
     label: "アメーバ — 増殖する生命体",
     sculptureMode: "amoeba",
     visualStyleId: null,
-    introTitle: "音で育てる生命体",
+    introTitle: "音の彫刻",
     introDescription:
       "音が触媒となり、原生質が増殖する。細胞が出芽し、偽足を伸ばし、膜が広がって群体を形づくります。低音・中音・高音が不可逆に蓄積され、無音が続くとその瞬間の成長結果を固定します。",
   },

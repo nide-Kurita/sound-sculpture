@@ -41,130 +41,444 @@ body {
   display: block;
 }
 
+:root {
+  --hud-mono:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Courier New", monospace;
+}
+
+[hidden] {
+  display: none !important;
+}
+
 .intro {
   position: absolute;
   z-index: 2;
-  top: clamp(1.5rem, 5vw, 4rem);
-  left: clamp(1.5rem, 5vw, 4rem);
-  width: min(24rem, calc(100vw - 3rem));
+  top: clamp(2rem, 6vw, 4.5rem);
+  left: clamp(2rem, 6vw, 4.5rem);
   pointer-events: none;
 }
 
-.eyebrow {
-  margin: 0 0 0.75rem;
-  color: #77736a;
-  font-size: 0.72rem;
-  letter-spacing: 0.18em;
+.intro-heading {
+  display: grid;
+  margin: 0;
+  font-family: var(--hud-mono);
+  font-size: clamp(2rem, 5.2vw, 3.6rem);
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  line-height: 1.16;
   text-transform: uppercase;
 }
 
-h1 {
+.intro-rule {
+  display: block;
+  width: 1.6rem;
+  height: 2px;
+  margin: 1.1rem 0 0;
+  background: currentcolor;
+  opacity: 0.75;
+}
+
+.intro-subtitle {
+  position: fixed;
+  top: clamp(2rem, 6vw, 4.5rem);
+  right: clamp(2rem, 6vw, 4.5rem);
   margin: 0;
-  font-size: clamp(2.4rem, 7vw, 5.6rem);
-  font-weight: 400;
-  letter-spacing: -0.08em;
-  line-height: 0.92;
+  font-family: var(--hud-mono);
+  font-size: clamp(2rem, 5.2vw, 3.6rem);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  line-height: 1.16;
+  text-transform: uppercase;
+  writing-mode: vertical-rl;
+  color: inherit;
+  margin-top: 8px;
 }
 
 .description {
-  max-width: 22rem;
+  max-width: 20rem;
   margin: 1.25rem 0 0;
   color: #58544d;
-  font-size: 0.92rem;
-  line-height: 1.8;
+  font-family: var(--hud-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  line-height: 2;
+}
+
+.description-ja {
+  position: fixed;
+  top: clamp(2rem, 6vw, 4.5rem);
+  right: calc(clamp(2rem, 6vw, 4.5rem) + clamp(2rem, 5.2vw, 3.6rem) + 2.4rem);
+  max-height: min(400px, calc(100vh - 8rem));
+  margin: 0;
+  color: #58544d;
+  font-family: var(--hud-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  line-height: 1.2;
+  white-space: pre-line;
+  writing-mode: vertical-rl;
+  margin-top: 12px;
+}
+
+/* --- HUD (計測風あしらい) --- */
+
+.hud {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  pointer-events: none;
+  font-family: var(--hud-mono);
+  color: #3d3a34;
+}
+
+.hud-corner {
+  position: absolute;
+  width: 1.05rem;
+  height: 1.05rem;
+  opacity: 0.35;
+}
+
+.hud-corner--tl {
+  top: 0.9rem;
+  left: 0.9rem;
+  border-top: 1.5px solid currentcolor;
+  border-left: 1.5px solid currentcolor;
+}
+
+.hud-corner--tr {
+  top: 0.9rem;
+  right: 0.9rem;
+  border-top: 1.5px solid currentcolor;
+  border-right: 1.5px solid currentcolor;
+}
+
+.hud-corner--bl {
+  bottom: 0.9rem;
+  left: 0.9rem;
+  border-bottom: 1.5px solid currentcolor;
+  border-left: 1.5px solid currentcolor;
+}
+
+.hud-corner--br {
+  bottom: 0.9rem;
+  right: 0.9rem;
+  border-bottom: 1.5px solid currentcolor;
+  border-right: 1.5px solid currentcolor;
+}
+
+/* 左中央のレティクル（正方形＋円＋十字）= オブジェクト回転スティック */
+.hud-reticle {
+  --stick-x: 0px;
+  --stick-y: 0px;
+
+  position: absolute;
+  top: 50%;
+  left: clamp(2rem, 6vw, 4.5rem);
+  width: 4.4rem;
+  height: 4.4rem;
+  transform: translateY(-50%);
+  border: 1px solid currentcolor;
+  opacity: 0.55;
+  display: grid;
+  place-items: center;
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.hud-reticle::before {
+  content: "";
+  position: absolute;
+  inset: 0.55rem;
+  border: 1px solid currentcolor;
+  border-radius: 50%;
+}
+
+.hud-reticle__plus {
+  position: relative;
+  z-index: 1;
+  font-size: 1.15rem;
+  line-height: 1;
+  transform: translate(var(--stick-x), var(--stick-y));
+  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.hud-reticle.is-active {
+  opacity: 0.9;
+  cursor: grabbing;
+}
+
+.hud-reticle.is-active .hud-reticle__plus {
+  transition: none;
+}
+
+/* 右端の目盛り: 向きに近い線がぬるっと横へ伸縮 */
+.hud-ticks {
+  position: absolute;
+  top: 50%;
+  right: 0.95rem;
+  width: 0.62rem;
+  height: 9rem;
+  margin: 0;
+  transform: translateY(-50%);
+  opacity: 0.6;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+
+.hud-ticks .hud-tick-mark {
+  --tick-grow: 0;
+
+  display: block;
+  width: 0.32rem;
+  height: 1px;
+  background: currentcolor;
+  transform: scaleX(calc(1 + var(--tick-grow)));
+  transform-origin: right center;
+  will-change: transform;
+}
+
+/* 下端の目盛り: 向きに近い線がぬるっと縦へ伸縮 */
+.hud-ticks-x {
+  position: absolute;
+  bottom: 0.95rem;
+  left: 50%;
+  width: 9rem;
+  height: 0.62rem;
+  margin: 0;
+  transform: translateX(-50%);
+  opacity: 0.6;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+
+.hud-ticks-x .hud-tick-mark {
+  --tick-grow: 0;
+
+  display: block;
+  width: 1px;
+  height: 0.32rem;
+  background: currentcolor;
+  transform: scaleY(calc(1 + var(--tick-grow)));
+  transform-origin: center bottom;
+  will-change: transform;
+}
+
+/* 左下: 帯域メーター + 進行バー */
+.hud-left-bottom {
+  position: absolute;
+  bottom: clamp(2rem, 6vw, 4.4rem);
+  left: clamp(2rem, 6vw, 4.5rem);
+  display: grid;
+  gap: 1.1rem;
+  margin-top: 12px;
+}
+
+.hud-meters {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.hud-meter {
+  display: grid;
+  grid-template-columns: 1rem 6.5rem 3rem;
+  align-items: baseline;
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.hud-meter__plus {
+  opacity: 0.55;
+}
+
+.hud-meter__value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+}
+
+.hud-scope {
+  margin: 0.2rem 0 0;
+  min-height: 1em;
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+
+/* 右下: ステータス */
+.hud-right-bottom {
+  position: absolute;
+  right: clamp(2rem, 6vw, 4.5rem);
+  bottom: clamp(2rem, 6vw, 4rem);
+  display: grid;
+  justify-items: end;
+  gap: 0.9rem;
+  text-align: right;
+}
+
+.hud-field {
+  display: grid;
+  gap: 0.28rem;
+}
+
+.hud-field__label {
+  margin: 0;
+  font-size: 0.62rem;
+  letter-spacing: 0.24em;
+  opacity: 0.62;
+}
+
+.hud-field__value {
+  margin: 0;
+  font-size: 0.74rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-field__value::after {
+  content: "";
+  display: block;
+  width: 0.9rem;
+  height: 1px;
+  margin: 0.34rem 0 0 auto;
+  background: currentcolor;
+  opacity: 0.5;
 }
 
 .intro-copy {
   display: block;
 }
 
+/* 右中央: 操作パネル呼び出し兼移動ハンドル（9ドットの正方形アイコン） */
+.hud-panel-toggle {
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  display: grid;
+  place-items: center;
+  color: #3d3a34;
+  cursor: grab;
+  touch-action: none;
+  opacity: 0.7;
+  transition:
+    opacity 160ms ease,
+    transform 480ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 開いている間はアイコンがメニュー（シェル幅いっぱい）の中央上へ滑る */
+.control-panel-shell:not(.is-collapsed) .hud-panel-toggle {
+  transform: translateX(calc(1rem - min(22rem, 100vw - 3rem) / 2));
+}
+
+.hud-panel-toggle:hover {
+  border: none;
+  background: transparent;
+  opacity: 1;
+}
+
+.hud-panel-toggle:active {
+  cursor: grabbing;
+}
+
+.hud-panel-toggle__dots {
+  display: block;
+  width: 1.5rem;
+  height: 1.5rem;
+  background: radial-gradient(circle, currentcolor 1.4px, transparent 1.9px) 0 0 / 0.5rem 0.5rem;
+}
+
 .control-panel-shell {
   position: fixed;
   z-index: 3;
-  top: clamp(1.5rem, 5vw, 4rem);
-  right: clamp(1.5rem, 5vw, 4rem);
+
+  /* アイコン(2rem)の中心が画面の縦センターに来るように置く。パネルはその下に開く */
+  top: calc(50% - 1rem);
+  right: clamp(2rem, 6vw, 4.5rem);
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 0.55rem;
   max-width: min(22rem, calc(100vw - 3rem));
   pointer-events: none;
+
+  /* ゲームメニュー風: 開閉時にドック位置と画面中央の間を滑らかに移動する */
+  transition:
+    left 480ms cubic-bezier(0.22, 1, 0.36, 1),
+    top 480ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .control-panel-shell.is-dragging {
   user-select: none;
+  transition: none;
 }
 
 .control-panel-shell > * {
   pointer-events: auto;
 }
 
-.control-panel__handle {
-  width: 3.25rem;
-  height: 1.2rem;
-  border: 1px solid rgb(22 22 22 / 10%);
-  border-radius: 999px;
-  background: rgb(255 255 255 / 54%);
-  backdrop-filter: blur(16px);
-  box-shadow: 0 0.75rem 2rem rgb(30 26 18 / 6%);
-  display: grid;
-  place-items: center;
-  cursor: grab;
-  touch-action: none;
-}
-
-.control-panel__handle:active {
-  cursor: grabbing;
-}
-
-.control-panel__handle:focus-visible {
-  outline: 2px solid rgb(88 132 196 / 55%);
-  outline-offset: 3px;
-}
-
-.control-panel__handle-dots {
-  width: 1.6rem;
-  height: 0.5rem;
-  background:
-    radial-gradient(circle, rgb(120 114 106 / 65%) 2px, transparent 2.5px) 0 0 / 0.5rem 0.5rem;
-  opacity: 0.9;
-}
-
 .control-panel-shell.is-collapsed .control-panel {
   display: none;
 }
 
-.control-panel__toggle {
-  flex-shrink: 0;
-  padding: 0.65rem 1rem;
-  font-size: 0.78rem;
-  letter-spacing: 0.06em;
-}
+@keyframes control-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.6rem);
+  }
 
-.control-panel-shell:not(.is-collapsed) .control-panel__toggle-label--show {
-  display: none;
-}
-
-.control-panel-shell.is-collapsed .control-panel__toggle-label--hide {
-  display: none;
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .control-panel {
   width: 100%;
-  max-height: calc(100vh - clamp(3.5rem, 10vw, 5.5rem) - 1.5rem);
+
+  /* 画面中央のメニューとして開くため、アイコン分を差し引いた高さに収める */
+  max-height: calc(100vh - 9rem);
   overflow: auto;
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
   scrollbar-width: thin;
+  animation: control-panel-in 340ms cubic-bezier(0.22, 1, 0.36, 1) 140ms backwards;
 }
 
+/* HUDフィールドと同じ計測風トーン */
 .control-group {
-  border: 1px solid rgb(22 22 22 / 10%);
-  border-radius: 1.1rem;
-  background: rgb(255 255 255 / 68%);
-  box-shadow: 0 1rem 3rem rgb(30 26 18 / 6%);
+  border: 1px solid rgb(61 58 52 / 30%);
+  border-radius: 0;
+  background: rgb(255 255 255 / 62%);
+  box-shadow: none;
   backdrop-filter: blur(18px);
+  font-family: var(--hud-mono);
+}
+
+/* パネル内部も角丸をなくし、HUDの直線的なトーンに揃える */
+.control-panel button,
+.control-panel select,
+.control-panel .input-device-panel,
+.control-panel .band-test-panel,
+.control-panel .tuning-slider__help,
+.control-panel .tuning-export__text,
+.control-panel .audio-scope canvas {
+  border-radius: 0;
 }
 
 .control-group__summary {
@@ -201,7 +515,8 @@ h1 {
   overflow: auto;
 }
 
-.sculpture-mode {
+.sculpture-mode,
+.input-device-mode {
   display: grid;
   gap: 0.45rem;
   margin: 0 0 1rem;
@@ -230,52 +545,13 @@ h1 {
 }
 
 .input-device-panel {
-  margin-top: 0.85rem;
-  border: 1px solid rgb(22 22 22 / 12%);
-  border-radius: 1rem;
-  background: rgb(255 255 255 / 42%);
-  overflow: hidden;
-}
-
-.input-device-panel__summary {
-  padding: 0.75rem 1rem;
-  color: #5e594f;
-  font-size: 0.78rem;
-  letter-spacing: 0.06em;
-  cursor: pointer;
-  list-style: none;
-}
-
-.input-device-panel__summary::-webkit-details-marker {
-  display: none;
-}
-
-.input-device-panel__summary::before {
-  content: "▸ ";
-  display: inline-block;
-  transition: transform 160ms ease;
-}
-
-.input-device-panel[open] > .input-device-panel__summary::before {
-  transform: rotate(90deg);
-}
-
-.input-device-panel__body {
-  padding: 0 1rem 1rem;
+  margin: 0 0 1rem;
   display: grid;
-  gap: 0.55rem;
+  gap: 0.35rem;
 }
 
-.input-device-panel__field {
-  display: grid;
-  gap: 0.4rem;
-  margin: 0;
-}
-
-.input-device-panel__label {
-  color: #77736a;
-  font-size: 0.72rem;
-  letter-spacing: 0.06em;
+.input-device-mode {
+  margin-bottom: 0;
 }
 
 .input-device__select {
@@ -283,11 +559,21 @@ h1 {
 }
 
 .input-device__refresh {
-  width: 100%;
-  padding: 0.65rem 0.95rem;
-  font-size: 0.76rem;
-  border-color: rgb(22 22 22 / 16%);
-  background: rgb(255 255 255 / 58%);
+  justify-self: end;
+  width: auto;
+  padding: 0.35rem 0.75rem;
+  border: 1px solid rgb(22 22 22 / 22%);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #5e594f;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+}
+
+.input-device__refresh:hover {
+  border-color: rgb(22 22 22 / 45%);
+  background: rgb(255 255 255 / 40%);
 }
 
 .audio-scope {
@@ -489,12 +775,6 @@ input[type="range"] {
   accent-color: #161616;
 }
 
-#reset-view {
-  justify-self: start;
-  padding: 0.65rem 0.95rem;
-  font-size: 0.82rem;
-}
-
 .tuning-hint {
   margin: 0 0 0.85rem;
   color: #8a857b;
@@ -649,7 +929,8 @@ input[type="range"] {
   mix-blend-mode: normal;
 }
 
-.is-complete .description {
+.is-complete .description,
+.is-complete .description-ja {
   color: #6b675f;
 }
 
@@ -665,39 +946,50 @@ input[type="range"] {
     linear-gradient(180deg, #0b0e15 0%, #06080d 100%);
 }
 
-.theme-dark .eyebrow {
-  color: #7f8aa0;
+.theme-dark .intro-heading {
+  color: #f0eee7;
 }
 
-.theme-dark h1 {
+.theme-dark .intro-subtitle {
   color: #f0eee7;
 }
 
 .theme-dark .description,
-.theme-dark.is-complete .description {
+.theme-dark .description-ja,
+.theme-dark.is-complete .description,
+.theme-dark.is-complete .description-ja {
   color: #a9b1c2;
 }
 
-.theme-dark .control-panel__handle {
-  border-color: rgb(255 255 255 / 12%);
-  background: rgb(18 22 32 / 62%);
+.theme-dark .hud {
+  color: #aab2c2;
+}
+
+.theme-dark .hud-panel-toggle {
+  border: none;
+  background: transparent;
+  color: #aab2c2;
+}
+
+.theme-dark .hud-panel-toggle:hover {
+  border: none;
+  background: transparent;
 }
 
 .theme-dark .control-group {
-  border-color: rgb(255 255 255 / 10%);
-  background: rgb(14 17 26 / 74%);
-  box-shadow: 0 1rem 3rem rgb(0 0 0 / 35%);
+  border-color: rgb(170 178 194 / 24%);
+  background: rgb(8 12 18 / 80%);
+  box-shadow: none;
 }
 
 .theme-dark .control-group__summary,
-.theme-dark .input-device-panel__summary,
 .theme-dark .band-test-panel__summary,
 .theme-dark .tuning-advanced__summary {
   color: #a0a8b8;
 }
 
 .theme-dark .sculpture-mode,
-.theme-dark .input-device-panel__label,
+.theme-dark .input-device-mode,
 .theme-dark label {
   color: #96a0b2;
 }
@@ -718,6 +1010,17 @@ input[type="range"] {
 .theme-dark button:hover {
   border-color: rgb(255 255 255 / 30%);
   background: rgb(42 48 64 / 88%);
+}
+
+.theme-dark .input-device__refresh {
+  border: 1px solid rgb(255 255 255 / 22%);
+  background: transparent;
+  color: #a0a8b8;
+}
+
+.theme-dark .input-device__refresh:hover {
+  border-color: rgb(255 255 255 / 45%);
+  background: rgb(42 48 64 / 55%);
 }
 
 .theme-dark #start-audio,
@@ -757,7 +1060,6 @@ input[type="range"] {
   color: #b3bac9;
 }
 
-.theme-dark .input-device-panel,
 .theme-dark .band-test-panel {
   border-color: rgb(255 255 255 / 10%);
   background: rgb(20 24 34 / 55%);
@@ -791,17 +1093,33 @@ input[type="range"] {
 
 @media (max-width: 720px) {
   .intro {
-    top: 1rem;
-    left: 1rem;
+    top: 1.4rem;
+    left: 1.4rem;
   }
 
   .description {
     max-width: 18rem;
   }
 
+  .hud-ticks {
+    display: none;
+  }
+
+  .hud-ticks-x {
+    display: none;
+  }
+
+  .hud-left-bottom {
+    bottom: 1.4rem;
+    left: 1.4rem;
+  }
+
+  .hud-right-bottom {
+    right: 1.4rem;
+    bottom: 1.4rem;
+  }
+
   .control-panel-shell {
-    top: 1rem;
-    right: 1rem;
     max-width: calc(100vw - 2rem);
   }
 

@@ -76,6 +76,8 @@ export type SculptureExperience = {
   nudgeClayColorOnClick?(): void;
   /** 成長アルゴリズム切替時にシルエット偏りを更新 */
   applyAlgoMorphBias?(): void;
+  /** 曲終了後〜完成までの形凍結 */
+  holdShapeForCompletion?(): void;
   complete(): void;
   /** 同じ音源再現用。渡されていれば形態シードとして使う実装もある */
   reset(seed?: number): void;
@@ -83,10 +85,10 @@ export type SculptureExperience = {
 };
 
 export const SILENCE_THRESHOLD = 0.025;
-/** マイク等の無音判定で完成するまでの秒数 */
+/** マイク等の無音待ち（秒） */
 export const SILENCE_SECONDS_TO_COMPLETE = 2.4;
-/** バッファ音源の再生終了後、形が変わらないうちに完成させる秒数 */
-export const PLAYBACK_ENDED_SECONDS_TO_COMPLETE = 0.08;
+/** バッファ音源が終わったあとの短い確定待ち（秒）— 形が動かないうちに完成させる */
+export const PLAYBACK_END_SECONDS_TO_COMPLETE = 0.2;
 
 export const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 

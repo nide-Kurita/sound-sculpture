@@ -8,49 +8,119 @@
   <body>
     <main id="app" class="mode-classic style-vita theme-dark">
       <header class="intro" aria-label="Sound Sculpture">
-        <p class="eyebrow">Sound Sculpture</p>
-        <h1 id="intro-title">音で育てる生命</h1>
+        <h1 class="intro-heading"><span>SOUND</span><span>SCULPTURE</span></h1>
+        <span class="intro-rule" aria-hidden="true"></span>
+        <p id="intro-title" class="intro-subtitle">音の彫刻</p>
         <p id="intro-description" class="description">
-          音を糧に、深海のような闇の中で生命体が育ちます。膜は真珠のように輝き、完成後もあなたの音の鼓動を記憶して呼吸し続けます。
+          Fed by sound, a life-form grows. Its membrane gleams like a pearl, remembering the pulse of sound as it continues to breathe.
+        </p>
+        <p id="intro-description-ja" class="description-ja">
+          音を糧に、深海のような闇の中で生命体が育つ。<br>
+          膜は真珠のように輝き、<br>
+          完成後も音の鼓動を記憶して<br>
+          呼吸し続けます。
         </p>
       </header>
 
-      <aside class="control-panel-shell" id="control-panel-shell">
+      <div class="hud" aria-hidden="true">
+        <span class="hud-corner hud-corner--tl"></span>
+        <span class="hud-corner hud-corner--tr"></span>
+        <span class="hud-corner hud-corner--bl"></span>
+        <span class="hud-corner hud-corner--br"></span>
+        <p id="hud-ticks" class="hud-ticks"></p>
+        <p id="hud-ticks-x" class="hud-ticks-x"></p>
         <div
-          id="control-panel-handle"
-          class="control-panel__handle"
-          role="button"
-          tabindex="0"
-          aria-label="操作パネルをドラッグして移動"
+          id="sculpture-stick"
+          class="hud-reticle"
+          role="application"
+          aria-label="オブジェクト回転スティック"
         >
-          <span class="control-panel__handle-dots" aria-hidden="true"></span>
+          <span class="hud-reticle__plus" aria-hidden="true">+</span>
         </div>
+        <div class="hud-left-bottom">
+          <div class="hud-meters">
+            <p class="hud-meter">
+              <span class="hud-meter__plus">+</span>
+              <span class="hud-meter__label">LOW</span>
+              <span id="hud-low" class="hud-meter__value">0.00</span>
+            </p>
+            <p class="hud-meter">
+              <span class="hud-meter__plus">+</span>
+              <span class="hud-meter__label">MID</span>
+              <span id="hud-mid" class="hud-meter__value">0.00</span>
+            </p>
+            <p class="hud-meter">
+              <span class="hud-meter__plus">+</span>
+              <span class="hud-meter__label">HIGH</span>
+              <span id="hud-high" class="hud-meter__value">0.00</span>
+            </p>
+          </div>
+          <p id="hud-scope" class="hud-scope">////////////////////</p>
+        </div>
+        <div class="hud-right-bottom">
+          <div class="hud-field">
+            <p class="hud-field__label">SIGNAL_TYPE</p>
+            <p id="hud-signal" class="hud-field__value">---</p>
+          </div>
+          <div class="hud-field">
+            <p class="hud-field__label">SYS_STATUS</p>
+            <p id="hud-status" class="hud-field__value">STANDBY</p>
+          </div>
+          <div class="hud-field">
+            <p class="hud-field__label">ALGO</p>
+            <p id="hud-algo" class="hud-field__value">---</p>
+          </div>
+          <div class="hud-field">
+            <p class="hud-field__label">BPM / TIME</p>
+            <p class="hud-field__value"><span id="hud-bpm">---</span>&nbsp;/&nbsp;<span id="hud-timecode">00.00.00</span></p>
+          </div>
+        </div>
+      </div>
+
+      <aside class="control-panel-shell is-collapsed" id="control-panel-shell">
         <button
-          id="toggle-control-panel"
+          id="hud-panel-toggle"
+          class="hud-panel-toggle"
           type="button"
-          class="control-panel__toggle"
-          aria-expanded="true"
           aria-controls="control-panel"
+          aria-expanded="false"
+          aria-label="操作パネルを開閉（ドラッグで移動）"
         >
-          <span class="control-panel__toggle-label control-panel__toggle-label--hide">パネルを隠す</span>
-          <span class="control-panel__toggle-label control-panel__toggle-label--show">操作パネル</span>
+          <span class="hud-panel-toggle__dots" aria-hidden="true"></span>
         </button>
         <section class="control-panel" id="control-panel" aria-label="設定と操作">
         <details class="control-group" open>
           <summary class="control-group__summary">入力・操作</summary>
           <div class="control-group__body">
-            <label class="sculpture-mode" id="experience-style-field">
+            <label class="sculpture-mode" id="experience-style-field" hidden>
               作品スタイル
               <select id="experience-style" class="sculpture-mode__select">
               </select>
             </label>
-            <label class="sculpture-mode">
+            <label class="sculpture-mode" hidden>
               成長アルゴリズム
               <select id="growth-algorithm" class="sculpture-mode__select growth-algorithm__select">
               </select>
             </label>
             <p id="growth-algorithm-hint" class="growth-algorithm-hint"></p>
-            <section class="audio-scope" aria-label="Audio scope">
+            <div class="input-device-panel">
+              <label class="input-device-mode">
+                入力デバイス
+                <select id="audio-input-device" class="sculpture-mode__select input-device__select">
+                  <option value="default">既定の入力</option>
+                </select>
+              </label>
+              <button
+                id="refresh-audio-devices"
+                type="button"
+                class="input-device__refresh"
+                data-status-success="入力デバイス一覧を更新しました"
+                data-status-error="入力デバイス一覧の更新に失敗しました"
+              >
+                デバイス一覧を更新
+              </button>
+            </div>
+            <section class="audio-scope" aria-label="Audio scope" hidden>
               <canvas id="audio-scope" width="420" height="120"></canvas>
             </section>
             <div class="actions">
@@ -59,7 +129,7 @@
                   id="start-audio"
                   type="button"
                   data-status-preparing="マイク入力を準備中"
-                  data-status-ready="形成中 - ドラッグで視点を回せます"
+                  data-status-ready="形成中 - ドラッグでオブジェクトを回せます"
                 >
                   マイク入力を開始
                 </button>
@@ -67,7 +137,7 @@
                   id="start-system-audio"
                   type="button"
                   data-status-preparing="PC/タブ音声を準備中"
-                  data-status-ready="形成中 - ドラッグで視点を回せます"
+                  data-status-ready="形成中 - ドラッグでオブジェクトを回せます"
                 >
                   PC/タブ音声を開始
                 </button>
@@ -76,7 +146,7 @@
                   type="button"
                   hidden
                   data-status-preparing="開発用音源を準備中"
-                  data-status-ready="形成中 (s04) - ドラッグで視点を回せます"
+                  data-status-ready="形成中 (s04) - ドラッグでオブジェクトを回せます"
                 >
                   開発用音源 (s04)
                 </button>
@@ -128,26 +198,6 @@
                 <button id="band-tone-test" type="button" disabled>テスト音を再生（低→中→高）</button>
               </div>
             </details>
-            <details class="input-device-panel">
-              <summary class="input-device-panel__summary">入力デバイス</summary>
-              <div class="input-device-panel__body">
-                <label class="input-device-panel__field">
-                  <span class="input-device-panel__label">マイク / オーディオ入力</span>
-                  <select id="audio-input-device" class="sculpture-mode__select input-device__select">
-                    <option value="default">既定の入力</option>
-                  </select>
-                </label>
-                <button
-                  id="refresh-audio-devices"
-                  type="button"
-                  class="input-device__refresh"
-                  data-status-success="入力デバイス一覧を更新しました"
-                  data-status-error="入力デバイス一覧の更新に失敗しました"
-                >
-                  デバイス一覧を更新
-                </button>
-              </div>
-            </details>
             <p id="status" class="status" data-status-idle="待機中">待機中</p>
           </div>
         </details>
@@ -159,7 +209,7 @@
               6項目に整理しました。<strong>LIVE・呼吸</strong>は即時反映、<strong>形成・成長</strong>はこれからの蓄積に効きます。数値スケールは選択中の成長アルゴリズムとフィボナッチ比率です。
             </p>
             <div id="tuning-sliders" class="tuning-sliders"></div>
-            <div class="tuning-export">
+            <div class="tuning-export" hidden>
               <label class="tuning-export__label" for="tuning-export-text">
                 調整結果（コピー用）
                 <textarea id="tuning-export-text" class="tuning-export__text" rows="10" readonly></textarea>
@@ -176,27 +226,6 @@
                 <button id="reset-tuning" type="button">既定値に戻す</button>
               </div>
             </div>
-          </div>
-        </details>
-
-        <details class="control-group">
-          <summary class="control-group__summary">展示調整</summary>
-          <div class="control-group__body">
-            <fieldset id="viewer-control-fields" disabled>
-              <label>
-                ライト方向
-                <input id="light-azimuth" type="range" min="-180" max="180" value="0" />
-              </label>
-              <label>
-                ライト高さ
-                <input id="light-elevation" type="range" min="5" max="85" value="85" />
-              </label>
-              <label>
-                ライト強度
-                <input id="light-intensity" type="range" min="1" max="7" step="0.1" value="3.4" />
-              </label>
-              <button id="reset-view" type="button">視点を戻す</button>
-            </fieldset>
           </div>
         </details>
         </section>

@@ -637,9 +637,6 @@ class StarField {
     // 近いレイヤーほど強く避ける（parallax が大きいほど手前）
     const layerGain = 0.55 + this.parallax * 0.35;
     const screenPush = 0.014 * layerGain;
-    const ox = this.points.position.x;
-    const oy = this.points.position.y;
-    const oz = this.points.position.z;
     const active = Boolean(camera && pointerNDC);
 
     if (active && camera && pointerNDC) {
@@ -650,7 +647,8 @@ class StarField {
 
       for (let i = 0; i < count; i += 1) {
         const idx = i * 3;
-        this._world.set(this.positions[idx] + ox, this.positions[idx + 1] + oy, this.positions[idx + 2] + oz);
+        this._world.set(this.positions[idx], this.positions[idx + 1], this.positions[idx + 2]);
+        this.points.localToWorld(this._world);
         this._ndc.copy(this._world).project(camera);
         if (this._ndc.z < -1 || this._ndc.z > 1) {
           this.avoidOffsets[idx] += (0 - this.avoidOffsets[idx]) * settle;
@@ -1249,6 +1247,8 @@ class StudioFloor {
 }
 
 export class SceneBackground {
+  private readonly parallaxRoot = new THREE.Group();
+  private readonly viewDelta = new THREE.Quaternion();
   private readonly dome: BackgroundDome;
   private readonly innerDome: BackgroundDome | null;
   private readonly starsNear: StarField;
@@ -1402,26 +1402,27 @@ export class SceneBackground {
   }
 
   addToScene(scene: THREE.Scene) {
-    scene.add(this.dome.mesh);
+    scene.add(this.parallaxRoot);
+    this.parallaxRoot.add(this.dome.mesh);
     if (this.innerDome) {
-      scene.add(this.innerDome.mesh);
+      this.parallaxRoot.add(this.innerDome.mesh);
     }
-    scene.add(this.starsFar.trailPoints);
-    scene.add(this.starsFar.points);
+    this.parallaxRoot.add(this.starsFar.trailPoints);
+    this.parallaxRoot.add(this.starsFar.points);
     if (this.starsMid) {
-      scene.add(this.starsMid.trailPoints);
-      scene.add(this.starsMid.points);
+      this.parallaxRoot.add(this.starsMid.trailPoints);
+      this.parallaxRoot.add(this.starsMid.points);
     }
-    scene.add(this.starsNear.trailPoints);
-    scene.add(this.starsNear.points);
+    this.parallaxRoot.add(this.starsNear.trailPoints);
+    this.parallaxRoot.add(this.starsNear.points);
     if (this.dust) {
-      scene.add(this.dust.points);
+      this.parallaxRoot.add(this.dust.points);
     }
     if (this.biolume) {
-      scene.add(this.biolume.points);
+      this.parallaxRoot.add(this.biolume.points);
     }
     if (this.biolumeFar) {
-      scene.add(this.biolumeFar.points);
+      this.parallaxRoot.add(this.biolumeFar.points);
     }
     if (this.cyclorama) {
       scene.add(this.cyclorama.mesh);
@@ -1431,6 +1432,13 @@ export class SceneBackground {
     } else if (this.floor.receiveShadow) {
       scene.add(this.floor);
     }
+  }
+
+  /** オブジェクト操作量の一部だけ背景へ加え、奥行きの視差を作る。 */
+  rotateView(axis: THREE.Vector3, angle: number) {
+    this.viewDelta.setFromAxisAngle(axis, angle);
+    this.parallaxRoot.quaternion.premultiply(this.viewDelta);
+    this.parallaxRoot.updateMatrixWorld();
   }
 
   setPedestalLayout(usePedestal: boolean) {

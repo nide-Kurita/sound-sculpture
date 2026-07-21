@@ -89,7 +89,7 @@ import {
   clamp01,
   seededUnit,
   SILENCE_SECONDS_TO_COMPLETE,
-  PLAYBACK_ENDED_SECONDS_TO_COMPLETE,
+  PLAYBACK_END_SECONDS_TO_COMPLETE,
   SILENCE_THRESHOLD,
   smoothstep,
   type AudioBands,
@@ -277,7 +277,6 @@ class RhythmTracker {
   private snareIndex = 0;
   private hatIndex = 0;
   private transientIndex = 0;
-  private tempoPhase = 0;
   private bpm = 0;
   private elapsed = 0;
   private lastPulseTime = 0;
@@ -313,7 +312,6 @@ class RhythmTracker {
     this.snareIndex = 0;
     this.hatIndex = 0;
     this.transientIndex = 0;
-    this.tempoPhase = 0;
     this.bpm = 0;
     this.elapsed = 0;
     this.lastPulseTime = 0;
@@ -325,7 +323,7 @@ class RhythmTracker {
     this.pulseIndex = 0;
   }
 
-  private registerPulse(strength: number, deltaTime: number) {
+  private registerPulse(strength: number) {
     const now = this.elapsed;
     if (this.lastPulseTime > 0) {
       const interval = now - this.lastPulseTime;
@@ -334,23 +332,34 @@ class RhythmTracker {
         if (this.pulseIntervals.length > fib(5)) {
           this.pulseIntervals.shift();
         }
-        const mean =
-          this.pulseIntervals.reduce((sum, value) => sum + value, 0) / this.pulseIntervals.length;
+        const sortedIntervals = [...this.pulseIntervals].sort((a, b) => a - b);
+        const middle = Math.floor(sortedIntervals.length / 2);
+        const median =
+          sortedIntervals.length % 2 === 0
+            ? (sortedIntervals[middle - 1] + sortedIntervals[middle]) * 0.5
+            : sortedIntervals[middle];
         const variance =
-          this.pulseIntervals.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
+          this.pulseIntervals.reduce((sum, value) => sum + (value - median) ** 2, 0) /
           this.pulseIntervals.length;
-        const cv = Math.sqrt(variance) / Math.max(fibUnit(2, 21), mean);
-        this.pulseConfidence = clamp01(1 - cv * fibRatio(5, 3));
-        this.expectedPulseInterval = mean;
+        const cv = Math.sqrt(variance) / Math.max(fibUnit(2, 21), median);
+        const sampleConfidence = clamp01((this.pulseIntervals.length - 1) / 3);
+        this.pulseConfidence = clamp01(1 - cv * fibRatio(5, 3)) * sampleConfidence;
+        this.expectedPulseInterval = median;
+
+        // 倍テン・半テンを一般的な表示域へ正規化し、イベント単位で安定追従させる。
+        // deltaTime を係数にすると0から延々と増え続けて見えるため使わない。
+        if (this.pulseIntervals.length >= 3) {
+          let estimatedBpm = 60 / median;
+          while (estimatedBpm < 70) estimatedBpm *= 2;
+          while (estimatedBpm > 180) estimatedBpm *= 0.5;
+          this.bpm += (estimatedBpm - this.bpm) * (this.bpm <= 0 ? 1 : 0.22);
+        }
       }
     }
     this.lastPulseTime = now;
     this.pulsePhase = 0;
     this.pulseIndex += 1;
     this.pulseEnvelope = Math.min(1, fibUnit(8, 9) + strength * fibRatio(8, 5));
-    if (this.expectedPulseInterval > fibUnit(3, 21)) {
-      this.bpm += ((60 / this.expectedPulseInterval) - this.bpm) * Math.min(1, deltaTime * fibUnit(5, 8));
-    }
   }
 
   update(bands: AudioBands, waveform: WaveformMetrics | null, deltaTime: number): RhythmEvents {
@@ -499,26 +508,23 @@ class RhythmTracker {
         : 0;
     const pulseStrength = kick > 0 ? kick : fallbackPulseStrength;
     if (pulseStrength > fibUnit(3, 21)) {
-      this.registerPulse(pulseStrength, deltaTime);
+      this.registerPulse(pulseStrength);
     } else if (this.expectedPulseInterval > fibUnit(3, 21)) {
       this.pulsePhase = Math.min(1, this.pulsePhase + deltaTime / this.expectedPulseInterval);
     }
     const pulseInterval = Math.max(fibUnit(3, 21), this.expectedPulseInterval);
     const decayRate = fib(5) / (pulseInterval * runtimeTuning.pulseHold);
     this.pulseEnvelope *= Math.exp(-deltaTime * (decayRate + (1 - this.pulseConfidence) * fibUnit(5, 8)));
+    if (
+      this.lastPulseTime > 0 &&
+      this.elapsed - this.lastPulseTime > this.expectedPulseInterval * 2.5
+    ) {
+      this.pulseConfidence *= Math.exp(-deltaTime * 1.2);
+    }
 
     if (beat > 0) {
-      const beatInterval = Math.max(fibUnit(3, 21), this.tempoPhase);
-      const instantBpm = 60 / beatInterval;
-      if (instantBpm > 40 && instantBpm < 220) {
-        const lerp = Math.min(1, deltaTime * 4.2);
-        this.bpm += (instantBpm - this.bpm) * (this.bpm <= 0 ? 1 : lerp);
-      }
-      this.tempoPhase = 0;
       this.beatIndex += 1;
       this.lastBeat = 0;
-    } else {
-      this.tempoPhase += deltaTime;
     }
 
     const downbeat = beat > 0 && this.beatIndex % 4 === 0;
@@ -1539,6 +1545,8 @@ class SoundSculpture {
   private previousBandsForSeparation: AudioBands | null = null;
   private fragmentSpawnCooldown = 0;
   private completed = false;
+  /** 曲終了〜完成までの短い待ちで、形を動かさない */
+  private shapeHold = false;
   private frozenTime = 0;
   private completeFadeOut = 1;
   /** 1→0: 完成直後の残存モーションを滑らかに止める */
@@ -2344,6 +2352,16 @@ class SoundSculpture {
     this.lastBands = bands;
     this.currentStructure = structure;
     this.speciesProfile = species;
+
+    // 曲終了直後〜完成まで: 形を凍結したまま描画だけ更新
+    if (this.shapeHold && !this.completed) {
+      this.updateCoreGeometry(bands, deltaTime);
+      if (this.surface.visible) {
+        this.updateSurfaceGeometry(bands, deltaTime);
+      }
+      return;
+    }
+
     const activity = this.completed ? 0 : smoothstep(SILENCE_THRESHOLD, 0.22, bands.overall);
     const timeAdvance = this.completed ? 0 : deltaTime * activity;
     if (!this.completed) {
@@ -2454,18 +2472,13 @@ class SoundSculpture {
     const pokeBoost = this.idlePokeImpulse * 0.42;
 
     const targetAmp = this.completed
-      ? gain * pokeBoost
+      ? gain * (pokeBoost + this.completionSettle * 0.045)
       : gain *
         (0.072 + pokeBoost) *
         (1 - activity * 0.38) *
         (1 - this.currentStructure.formationRamp * 0.5);
     const ampFollow = this.completed ? 1.1 : 2.2;
     this.idleWobbleAmp += (targetAmp - this.idleWobbleAmp) * Math.min(1, deltaTime * ampFollow);
-
-    // 完成後はフィールドを消さず凍結（クリアすると形が変わる）
-    if (this.completed && this.idlePokeImpulse < 0.01) {
-      return;
-    }
 
     if (this.idleWobbleAmp < 0.001 && this.idlePokeImpulse < 0.01) {
       this.idleWobbleField.fill(0);
@@ -2625,16 +2638,27 @@ class SoundSculpture {
     }
   }
 
+  /** 曲終了後、完成確定までのあいだ形を動かさない */
+  holdShapeForCompletion() {
+    if (this.completed || this.shapeHold) {
+      return;
+    }
+    this.shapeHold = true;
+    // 振幅だけ止める。場の値は最終フレームのまま残して形を維持する
+    this.idleWobbleAmp = 0;
+    this.idlePokeImpulse = 0;
+  }
+
   complete() {
-    // いま見えている形をそのまま永久形状として確定（追加スタンプなし）
+    // 永久レイヤーは shapeHold 時点で止まっている。ハード焼き込みはしない（形が変わらない）
     this.bakeFinalSculptureMemory();
     // 膜シェーダーの uTime と連続になるよう、アイドル分も含めて凍結する
     this.frozenTime =
       this.formingTime + (this.style.idleWobble > 0 ? this.idleTime * 0.3 : 0);
     this.completeFadeOut = 1;
     this.completed = true;
+    this.shapeHold = false;
     this.completionProgress = 0;
-    // 形の settle 変形はしない（終了瞬間のシルエットを維持）
     this.completionSettle = 0;
     this.breathTime = 0;
     this.breathWave = 0;
@@ -2643,11 +2667,14 @@ class SoundSculpture {
     this.completionStartColor.copy(this.coreMaterial.color);
     this.completionStartInnerColor.copy(this.innerCoreMaterial.color);
     this.completionStartRoughness = this.coreMaterial.roughness;
-    // 現在のスケールを基準に呼吸（完成時にカクッと戻さない）
-    this.baseScale.copy(this.group.scale);
-    if (this.style.completion.mode === "monolith") {
-      this.flowField.fill(0);
-    }
+    // ライブ／フロー／膜圧はゼロにせず、最終フレームの値で固定する
+    this.idleWobbleAmp = 0;
+    this.idlePokeImpulse = 0;
+    this.kickImpulse = 0;
+    this.snareImpulse = 0;
+    this.hatImpulse = 0;
+    this.waveImpulse = 0;
+    this.membranePressureImpulse = 0;
     const palette = this.completionPalette ?? NEUTRAL_SCULPTURE_PALETTE;
     const uniforms = this.surfaceMaterial.uniforms;
     // vita: 膜も音パレットの暖色へ飛ばさず、初期の寒色パレットを維持
@@ -2675,25 +2702,15 @@ class SoundSculpture {
     const p = this.completionProgress;
     const ease = p * p * (3 - 2 * p);
 
-    // 形は完成瞬間で凍結。ライブ変位・flow は動かさない（見た目を変えない）
-    const pressureDecay = Math.exp(-deltaTime * 2.4);
-    for (let i = 0; i < this.membranePressure.length; i += 1) {
-      this.membranePressure[i] *= pressureDecay;
-      this.clayAssimilation[i] *= pressureDecay;
-      this.pierceAmount[i] *= pressureDecay;
-    }
-    this.membranePressureImpulse *= pressureDecay;
-    const pierceAttr = this.geometry.getAttribute("aPierce");
-    if (pierceAttr) {
-      pierceAttr.needsUpdate = true;
-    }
+    // 形状は complete() で確定済み。ここではマテリアル／呼吸のみ
+    this.completionSettle = 0;
     this.kickImpulse *= Math.exp(-deltaTime * 3.2);
     this.snareImpulse *= Math.exp(-deltaTime * 3.6);
     this.hatImpulse *= Math.exp(-deltaTime * 4.2);
     this.waveImpulse *= Math.exp(-deltaTime * 3.8);
 
     const innerBase = st.membrane.vita ? 0.9 : 1;
-    const scaleFollow = Math.min(1, deltaTime * 1.8);
+    const scaleFollow = Math.min(1, deltaTime * 2.2);
 
     switch (st.completion.mode) {
       case "petrify": {
@@ -2807,15 +2824,18 @@ class SoundSculpture {
     }
   }
 
-  /** 完了時: 形は書き換えず、その瞬間の変位フィールドを凍結する */
+  /**
+   * 完了時フック。永久メモリはすでに追従済みなので触らない
+   * （ハード再計算するとライブ層との合計が変わり、形がずれる）。
+   */
   private bakeFinalSculptureMemory() {
-    // liveOffset / surfaceLiveOffset / flowField / sculptureMemory はそのまま残す。
-    // ここで上書きすると完成直前の見た目からズレる。
+    // no-op: live / flow / membrane を最終値のまま描画し続ける
   }
 
   /** 形状・粒子・分裂体を初期化（音入力は維持）。 */
   reset(seed?: number) {
     this.completed = false;
+    this.shapeHold = false;
     this.frozenTime = 0;
     this.completeFadeOut = 1;
     this.completionProgress = 0;
@@ -4424,8 +4444,8 @@ class SoundSculpture {
         "live",
       );
 
-      // 完成後はパルス追従せず、残存 liveOffset を afterlife で減衰させる
-      if (!this.completed) {
+      // 完成／ホールド中は liveOffset を動かさない（最終形を維持）
+      if (!this.completed && !this.shapeHold) {
         this.liveOffset[i] += (pulse - this.liveOffset[i]) * Math.min(1, deltaTime * 8);
       }
 
@@ -4484,39 +4504,49 @@ class SoundSculpture {
       1.02 + this.formDevelopment * 0.2 + this.getFormationScale() * 0.28,
     );
 
-    // 完成後も凍結した liveOffset / idle を描画（クリアすると形が変わる）
-    for (let i = 0; i < this.accumulated.length; i += 1) {
-      const index = i * 3;
-      const x = this.basePositions[index];
-      const y = this.basePositions[index + 1];
-      const z = this.basePositions[index + 2];
-      const radius = Math.hypot(x, y, z) || 1;
-      const nx = x / radius;
-      const ny = y / radius;
-      const nz = z / radius;
-      const live =
-        this.liveOffset[i] * (1 - this.detachmentCarve[i] * 0.88) + this.idleWobbleField[i];
-      const liveScalar = growthModulateScalar(
-        live,
-        nx,
-        ny,
-        nz,
-        this.vertexDeformSalt(i),
-        this.completed ? "idle" : "live",
-      );
-      const wobbleVec = growthModulateVector3(
-        this.idleWobbleVector[index],
-        this.idleWobbleVector[index + 1],
-        this.idleWobbleVector[index + 2],
-        nx,
-        ny,
-        nz,
-        this.vertexDeformSalt(i, 1.7),
-        "idle",
-      );
-      positions[index] += nx * liveScalar + wobbleVec.x;
-      positions[index + 1] += ny * liveScalar + wobbleVec.y;
-      positions[index + 2] += nz * liveScalar + wobbleVec.z;
+    // 完成後も最終ライブ／フローを描画して形を維持（値は更新しない）
+    {
+      for (let i = 0; i < this.accumulated.length; i += 1) {
+        const index = i * 3;
+        const x = this.basePositions[index];
+        const y = this.basePositions[index + 1];
+        const z = this.basePositions[index + 2];
+        const radius = Math.hypot(x, y, z) || 1;
+        const nx = x / radius;
+        const ny = y / radius;
+        const nz = z / radius;
+        const live =
+          this.liveOffset[i] * (1 - this.detachmentCarve[i] * 0.88) + this.idleWobbleField[i];
+        if (
+          Math.abs(live) < 1e-6 &&
+          Math.abs(this.idleWobbleVector[index]) < 1e-6 &&
+          Math.abs(this.idleWobbleVector[index + 1]) < 1e-6 &&
+          Math.abs(this.idleWobbleVector[index + 2]) < 1e-6
+        ) {
+          continue;
+        }
+        const liveScalar = growthModulateScalar(
+          live,
+          nx,
+          ny,
+          nz,
+          this.vertexDeformSalt(i),
+          "live",
+        );
+        const wobbleVec = growthModulateVector3(
+          this.idleWobbleVector[index],
+          this.idleWobbleVector[index + 1],
+          this.idleWobbleVector[index + 2],
+          nx,
+          ny,
+          nz,
+          this.vertexDeformSalt(i, 1.7),
+          "idle",
+        );
+        positions[index] += nx * liveScalar + wobbleVec.x;
+        positions[index + 1] += ny * liveScalar + wobbleVec.y;
+        positions[index + 2] += nz * liveScalar + wobbleVec.z;
+      }
     }
 
     applyClickRepulsionToPositions(this.clickRepulsion, this.basePositions, positions as Float32Array);
@@ -4635,6 +4665,10 @@ class SoundSculpture {
    * ※ 膜接着の前に呼ぶこと — ここで aPierce も更新する。
    */
   private updateMembraneContactPressure(deltaTime: number) {
+    // 完成／ホールド中は膜圧・pierce を減衰させず形を固定
+    if (this.completed || this.shapeHold) {
+      return;
+    }
     const decay = Math.exp(-4 * deltaTime);
     const impulseDecay = Math.exp(-5.2 * deltaTime);
     const pierceDecay = Math.exp(-3.8 * deltaTime);
@@ -4764,7 +4798,7 @@ class SoundSculpture {
    * 粘土が膨らめば膜も一緒に外へ、近づけば膜が内側へ吸い付く。
    */
   private applyMembranePressureBulge(positions: Float32Array | ArrayLike<number>) {
-    if (!this.style.membrane.vita || this.completed) {
+    if (!this.style.membrane.vita) {
       return;
     }
     const pos = positions as Float32Array;
@@ -4827,7 +4861,7 @@ class SoundSculpture {
    * 膜に引っ張られた反作用として、粘土コアを接触点で内側へへこませる。
    */
   private applyClayContactCompress() {
-    if (!this.style.membrane.vita || this.completed) {
+    if (!this.style.membrane.vita) {
       return;
     }
     const corePositions = this.geometry.attributes.position.array as Float32Array;
@@ -4897,11 +4931,14 @@ class SoundSculpture {
     const colors = colorAttr ? (colorAttr.array as Float32Array) : null;
     let geomChanged = false;
     let colorChanged = false;
+    const allowUpdate = !this.completed && !this.shapeHold;
 
     for (let i = 0; i < count; i += 1) {
-      this.clayAssimilation[i] *= decay;
-      if (this.clayAssimilation[i] < 1e-5) {
-        this.clayAssimilation[i] = 0;
+      if (allowUpdate) {
+        this.clayAssimilation[i] *= decay;
+        if (this.clayAssimilation[i] < 1e-5) {
+          this.clayAssimilation[i] = 0;
+        }
       }
 
       const index = i * 3;
@@ -4920,7 +4957,7 @@ class SoundSculpture {
       const gap = surfaceRadius - coreRadius;
       const pierce = this.pierceAmount[i];
 
-      if (!this.completed && (gap < softGap || this.membranePressure[i] > 0.02)) {
+      if (allowUpdate && (gap < softGap || this.membranePressure[i] > 0.02)) {
         const nx = cx / coreRadius;
         const ny = cy / coreRadius;
         const nz = cz / coreRadius;
@@ -4954,12 +4991,7 @@ class SoundSculpture {
 
       // 突き抜けを消さないよう、引き戻しは弱め
       const membraneInner = Math.max(0.15, surfaceRadius - 0.025);
-      if (
-        !this.completed &&
-        assimil > 1e-4 &&
-        pierce < 0.35 &&
-        coreRadius > membraneInner
-      ) {
+      if (assimil > 1e-4 && pierce < 0.35 && coreRadius > membraneInner) {
         const pull = Math.min(
           0.35,
           growthModulateScalar(assimil * 0.28, nx, ny, nz, this.vertexDeformSalt(i, 29.1), "live"),
@@ -5007,7 +5039,7 @@ class SoundSculpture {
    * 突き抜けは許容し、極端な飛び出しだけ抑える。
    */
   private enforceVitaMembraneClearance() {
-    if (!this.style.membrane.vita || this.completed) {
+    if (!this.style.membrane.vita) {
       return;
     }
 
@@ -5073,14 +5105,17 @@ class SoundSculpture {
       const ripple = growthPattern(nx, ny, nz, this.formingTime * 3.6 + this.carvingPhase * 0.7);
       const surfacePattern = flow * 0.22 + ripple * 0.09;
       const targetSurfaceLive = midDrive * surfacePattern;
-      if (!this.completed) {
+      if (!this.completed && !this.shapeHold) {
         this.surfaceLiveOffset[i] +=
           (targetSurfaceLive - this.surfaceLiveOffset[i]) * Math.min(1, deltaTime * 9);
       }
       const remembered = this.getPermanentScalarDisplacement(i);
       const deformSalt = this.vertexDeformSalt(i, 9.2);
+      // ホールド／完成後は midDrive 由来の瞬時オフセットも足さない（形固定）
+      const liveSurfaceNudge =
+        this.completed || this.shapeHold ? 0 : flow * midDrive * 0.05;
       const scalarDisp = growthModulateScalar(
-        remembered * 0.98 + flow * midDrive * 0.05,
+        remembered * 0.98 + liveSurfaceNudge,
         nx,
         ny,
         nz,
@@ -5119,38 +5154,49 @@ class SoundSculpture {
 
     this.constrainEnvelope(positions as Float32Array, this.targetSurfaceMeanRadius, 1.32);
 
-    // 完成後も凍結した surfaceLive / idle を描画
-    for (let i = 0; i < this.accumulated.length; i += 1) {
-      const index = i * 3;
-      const x = this.baseSurfacePositions[index];
-      const y = this.baseSurfacePositions[index + 1];
-      const z = this.baseSurfacePositions[index + 2];
-      const radius = Math.hypot(x, y, z) || 1;
-      const nx = x / radius;
-      const ny = y / radius;
-      const nz = z / radius;
-      const live = this.surfaceLiveOffset[i] + this.idleWobbleField[i] * 1.18;
-      const liveScalar = growthModulateScalar(
-        live,
-        nx,
-        ny,
-        nz,
-        this.vertexDeformSalt(i, 11.5),
-        this.completed ? "idle" : "surface",
-      );
-      const wobbleVec = growthModulateVector3(
-        this.idleWobbleVector[index] * 1.05,
-        this.idleWobbleVector[index + 1] * 1.05,
-        this.idleWobbleVector[index + 2] * 1.05,
-        nx,
-        ny,
-        nz,
-        this.vertexDeformSalt(i, 13.1),
-        "idle",
-      );
-      positions[index] += nx * liveScalar + wobbleVec.x;
-      positions[index + 1] += ny * liveScalar + wobbleVec.y;
-      positions[index + 2] += nz * liveScalar + wobbleVec.z;
+    // 完成後も最終 surfaceLive を描画して形を維持
+    {
+      for (let i = 0; i < this.accumulated.length; i += 1) {
+        const index = i * 3;
+        const x = this.baseSurfacePositions[index];
+        const y = this.baseSurfacePositions[index + 1];
+        const z = this.baseSurfacePositions[index + 2];
+        const radius = Math.hypot(x, y, z) || 1;
+        const nx = x / radius;
+        const ny = y / radius;
+        const nz = z / radius;
+        // 膜はコアより僅かに大きくホヨホヨさせて「柔らかい外皮」を演出
+        const live = this.surfaceLiveOffset[i] + this.idleWobbleField[i] * 1.18;
+        if (
+          Math.abs(live) < 1e-6 &&
+          Math.abs(this.idleWobbleVector[index]) < 1e-6 &&
+          Math.abs(this.idleWobbleVector[index + 1]) < 1e-6 &&
+          Math.abs(this.idleWobbleVector[index + 2]) < 1e-6
+        ) {
+          continue;
+        }
+        const liveScalar = growthModulateScalar(
+          live,
+          nx,
+          ny,
+          nz,
+          this.vertexDeformSalt(i, 11.5),
+          "surface",
+        );
+        const wobbleVec = growthModulateVector3(
+          this.idleWobbleVector[index] * 1.05,
+          this.idleWobbleVector[index + 1] * 1.05,
+          this.idleWobbleVector[index + 2] * 1.05,
+          nx,
+          ny,
+          nz,
+          this.vertexDeformSalt(i, 13.1),
+          "idle",
+        );
+        positions[index] += nx * liveScalar + wobbleVec.x;
+        positions[index + 1] += ny * liveScalar + wobbleVec.y;
+        positions[index + 2] += nz * liveScalar + wobbleVec.z;
+      }
     }
 
     applyClickRepulsionToPositions(
@@ -5600,18 +5646,12 @@ const startDevAudioButton = document.querySelector<HTMLButtonElement>("#start-de
 const resetSculptureButton = document.querySelector<HTMLButtonElement>("#reset-sculpture");
 const completeButton = document.querySelector<HTMLButtonElement>("#complete-sculpture");
 const exportButton = document.querySelector<HTMLButtonElement>("#export-gltf");
-const viewerControlFields = document.querySelector<HTMLFieldSetElement>("#viewer-control-fields");
-const lightAzimuthInput = document.querySelector<HTMLInputElement>("#light-azimuth");
-const lightElevationInput = document.querySelector<HTMLInputElement>("#light-elevation");
-const lightIntensityInput = document.querySelector<HTMLInputElement>("#light-intensity");
-const resetViewButton = document.querySelector<HTMLButtonElement>("#reset-view");
 const statusElement = document.querySelector<HTMLParagraphElement>("#status");
 const audioInputSelect = document.querySelector<HTMLSelectElement>("#audio-input-device");
 const refreshAudioDevicesButton = document.querySelector<HTMLButtonElement>("#refresh-audio-devices");
 const audioScopeCanvas = document.querySelector<HTMLCanvasElement>("#audio-scope");
 const controlPanelShell = document.querySelector<HTMLElement>("#control-panel-shell");
-const controlPanelHandle = document.querySelector<HTMLElement>("#control-panel-handle");
-const toggleControlPanelButton = document.querySelector<HTMLButtonElement>("#toggle-control-panel");
+const toggleControlPanelButton = document.querySelector<HTMLButtonElement>("#hud-panel-toggle");
 const tuningSlidersRoot = document.querySelector<HTMLElement>("#tuning-sliders");
 const tuningExportText = document.querySelector<HTMLTextAreaElement>("#tuning-export-text");
 const copyTuningButton = document.querySelector<HTMLButtonElement>("#copy-tuning");
@@ -5631,17 +5671,11 @@ if (
   !resetSculptureButton ||
   !completeButton ||
   !exportButton ||
-  !viewerControlFields ||
-  !lightAzimuthInput ||
-  !lightElevationInput ||
-  !lightIntensityInput ||
-  !resetViewButton ||
   !statusElement ||
   !audioInputSelect ||
   !refreshAudioDevicesButton ||
   !audioScopeCanvas ||
   !controlPanelShell ||
-  !controlPanelHandle ||
   !toggleControlPanelButton ||
   !tuningSlidersRoot ||
   !tuningExportText ||
@@ -5695,6 +5729,14 @@ if (import.meta.env.DEV && bandTestPanel) {
   bandTestPanel.hidden = false;
 }
 
+if (import.meta.env.DEV) {
+  document
+    .querySelectorAll<HTMLElement>(".sculpture-mode, .audio-scope, .tuning-export")
+    .forEach((element) => {
+      element.hidden = false;
+    });
+}
+
 const parseBandSoloMode = (): BandSoloMode => {
   const value = bandSoloSelect?.value;
   if (value === "low" || value === "mid" || value === "high") {
@@ -5717,13 +5759,21 @@ const applyExperienceUi = (id: ExperienceId) => {
   appElement.classList.toggle("style-monolith", entry.visualStyleId === "monolith");
   appElement.classList.toggle("theme-dark", styleEnvActive && visualStyle.themeDark);
 
-  const introTitle = document.querySelector<HTMLElement>("#intro-title");
-  const introDescription = document.querySelector<HTMLElement>("#intro-description");
-  if (introTitle) {
-    introTitle.textContent = entry.introTitle;
-  }
-  if (introDescription) {
-    introDescription.textContent = entry.introDescription;
+  // 既定の VITA のコピーは index.html を正とし、SEO向けの初期HTMLを保持する。
+  // URLで別スタイルを開いた場合のみ、そのスタイル固有のコピーへ差し替える。
+  if (entry.id !== "vita") {
+    const introTitle = document.querySelector<HTMLElement>("#intro-title");
+    const introDescription = document.querySelector<HTMLElement>("#intro-description");
+    const introDescriptionJa = document.querySelector<HTMLElement>("#intro-description-ja");
+    if (introTitle) {
+      introTitle.textContent = entry.introTitle;
+    }
+    if (introDescription) {
+      introDescription.textContent = entry.introDescriptionEn ?? "";
+    }
+    if (introDescriptionJa) {
+      introDescriptionJa.textContent = entry.introDescription.replaceAll("。", "。\n").trim();
+    }
   }
 
   if (entry.sculptureMode === "carve") {
@@ -5771,35 +5821,15 @@ experienceStyleSelect.addEventListener("change", () => {
   window.location.href = url.toString();
 });
 
-toggleControlPanelButton.addEventListener("click", () => {
-  const collapsed = controlPanelShell.classList.toggle("is-collapsed");
-  toggleControlPanelButton.setAttribute("aria-expanded", String(!collapsed));
-});
+// ドラッグ直後の click ではパネルを開閉しない（アイコンは移動ハンドルを兼ねる）。
+let suppressPanelToggleClick = false;
+
+// ユーザーがドラッグで動かした後は、リサイズ時も自動で中央/ドックへ戻さない。
+let controlPanelDragged = false;
 
 type ControlPanelPosition = { left: number; top: number };
-const CONTROL_PANEL_POSITION_STORAGE_KEY = "sound-sculpture:controlPanelPosition";
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-
-const readStoredControlPanelPosition = (): ControlPanelPosition | null => {
-  try {
-    const raw = window.localStorage.getItem(CONTROL_PANEL_POSITION_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<ControlPanelPosition>;
-    if (typeof parsed.left !== "number" || typeof parsed.top !== "number") return null;
-    return { left: parsed.left, top: parsed.top };
-  } catch {
-    return null;
-  }
-};
-
-const writeStoredControlPanelPosition = (position: ControlPanelPosition) => {
-  try {
-    window.localStorage.setItem(CONTROL_PANEL_POSITION_STORAGE_KEY, JSON.stringify(position));
-  } catch {
-    // ignore
-  }
-};
 
 const applyControlPanelPosition = (position: ControlPanelPosition) => {
   // Keep within viewport with a small margin.
@@ -5816,16 +5846,59 @@ const applyControlPanelPosition = (position: ControlPanelPosition) => {
   controlPanelShell.style.bottom = "auto";
 };
 
-const restoreControlPanelPosition = () => {
-  const stored = readStoredControlPanelPosition();
-  if (!stored) return;
-  // Defer until layout settles.
-  requestAnimationFrame(() => {
-    applyControlPanelPosition(stored);
+// 閉じているときのドック位置（CSS の top: calc(50% - 1rem), right: clamp(2rem, 6vw, 4.5rem) と同じ）。
+const getControlPanelDockPosition = (): ControlPanelPosition => {
+  const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  const rightOffset = clamp(window.innerWidth * 0.06, 2 * rem, 4.5 * rem);
+  const iconSize = 2 * rem;
+  return {
+    left: window.innerWidth - rightOffset - iconSize,
+    top: window.innerHeight * 0.5 - iconSize * 0.5,
+  };
+};
+
+const centerControlPanelShell = () => {
+  const rect = controlPanelShell.getBoundingClientRect();
+  applyControlPanelPosition({
+    left: (window.innerWidth - rect.width) * 0.5,
+    top: (window.innerHeight - rect.height) * 0.5,
   });
 };
 
-restoreControlPanelPosition();
+const openControlPanel = () => {
+  controlPanelDragged = false;
+  controlPanelShell.classList.remove("is-collapsed");
+  centerControlPanelShell();
+  toggleControlPanelButton.setAttribute("aria-expanded", "true");
+};
+
+const closeControlPanel = () => {
+  controlPanelDragged = false;
+  controlPanelShell.classList.add("is-collapsed");
+  applyControlPanelPosition(getControlPanelDockPosition());
+  toggleControlPanelButton.setAttribute("aria-expanded", "false");
+};
+
+toggleControlPanelButton.addEventListener("click", () => {
+  if (suppressPanelToggleClick) {
+    suppressPanelToggleClick = false;
+    return;
+  }
+  if (controlPanelShell.classList.contains("is-collapsed")) {
+    openControlPanel();
+  } else {
+    closeControlPanel();
+  }
+});
+
+// 初期表示の右センターアンカーを left/top ベースへ変換しておく（位置トランジションを効かせるため）。
+{
+  controlPanelShell.style.transition = "none";
+  const rect = controlPanelShell.getBoundingClientRect();
+  applyControlPanelPosition({ left: rect.left, top: rect.top });
+  void controlPanelShell.offsetWidth;
+  controlPanelShell.style.transition = "";
+}
 
 // Drag the panel by the toggle button (acts as a handle).
 {
@@ -5843,7 +5916,7 @@ restoreControlPanelPosition();
     pointerId = event.pointerId;
     dragging = true;
     didMove = false;
-    controlPanelHandle.setPointerCapture(pointerId);
+    toggleControlPanelButton.setPointerCapture(pointerId);
 
     const rect = controlPanelShell.getBoundingClientRect();
     startX = event.clientX;
@@ -5868,22 +5941,27 @@ restoreControlPanelPosition();
     if (!dragging || pointerId !== event.pointerId) return;
     dragging = false;
     controlPanelShell.classList.remove("is-dragging");
-    if (didMove) {
-      const rect = controlPanelShell.getBoundingClientRect();
-      writeStoredControlPanelPosition({ left: rect.left, top: rect.top });
-    }
     pointerId = null;
+    suppressPanelToggleClick = didMove;
+    if (didMove) controlPanelDragged = true;
     didMove = false;
   };
 
-  controlPanelHandle.addEventListener("pointerdown", startDrag);
-  controlPanelHandle.addEventListener("pointermove", moveDrag);
-  controlPanelHandle.addEventListener("pointerup", endDrag);
-  controlPanelHandle.addEventListener("pointercancel", endDrag);
+  toggleControlPanelButton.addEventListener("pointerdown", startDrag);
+  toggleControlPanelButton.addEventListener("pointermove", moveDrag);
+  toggleControlPanelButton.addEventListener("pointerup", endDrag);
+  toggleControlPanelButton.addEventListener("pointercancel", endDrag);
 
   window.addEventListener("resize", () => {
-    const rect = controlPanelShell.getBoundingClientRect();
-    applyControlPanelPosition({ left: rect.left, top: rect.top });
+    if (controlPanelDragged) {
+      // 画面内に収まるようにだけ調整する。
+      const rect = controlPanelShell.getBoundingClientRect();
+      applyControlPanelPosition({ left: rect.left, top: rect.top });
+    } else if (controlPanelShell.classList.contains("is-collapsed")) {
+      applyControlPanelPosition(getControlPanelDockPosition());
+    } else {
+      centerControlPanelShell();
+    }
   });
 }
 
@@ -5922,7 +6000,8 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = sceneEnv.exposure;
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+// 影のエッジをぼかして柔らかい光に
+renderer.shadowMap.type = THREE.VSMShadowMap;
 
 // monolith スタイル: 環境マップで石・金属の質感を出す
 if (sceneEnv.environmentMap) {
@@ -5933,7 +6012,8 @@ if (sceneEnv.environmentMap) {
 
 const viewControls = new TrackballControls(camera, renderer.domElement);
 viewControls.enabled = true;
-viewControls.noRotate = false;
+// カメラは固定。ホイールズームだけ TrackballControls に任せる
+viewControls.noRotate = true;
 viewControls.noPan = true;
 viewControls.staticMoving = false;
 viewControls.dynamicDampingFactor = 0.08;
@@ -5941,8 +6021,18 @@ viewControls.rotateSpeed = 1.4;
 viewControls.minDistance = 3.4;
 viewControls.maxDistance = 9;
 viewControls.target.set(0, 0, 0);
+camera.lookAt(viewControls.target);
 
 let isViewInteracting = false;
+const sculptureDrag = {
+  active: false,
+  moved: false,
+  startX: 0,
+  startY: 0,
+  lastX: 0,
+  lastY: 0,
+  id: null as number | null,
+};
 viewControls.addEventListener("start", () => {
   isViewInteracting = true;
 });
@@ -5950,52 +6040,95 @@ viewControls.addEventListener("end", () => {
   isViewInteracting = false;
 });
 
-/** 再生中だけカメラに載せる、音連動のごく弱い浮遊揺らぎ */
+/** 再生中だけカメラに載せる、ランダムな方向へスーッと流れるカメラワーク */
 const cameraSwayRight = new THREE.Vector3();
 const cameraSwayUp = new THREE.Vector3();
 const cameraSwayFwd = new THREE.Vector3();
+const cameraSwayOffset = new THREE.Vector3();
+const cameraSwayPrevOffset = new THREE.Vector3();
+/** カメラローカル: x=右, y=上, z=dolly(前が負) */
+const cameraSwayCurrent = new THREE.Vector3();
+const cameraSwaySmoothed = new THREE.Vector3();
+const cameraSwayTarget = new THREE.Vector3();
 let cameraSwayAmp = 0;
-let cameraSwayPhase = 0;
+let cameraSwayLegTimer = 0;
+let cameraSwayLegDuration = 0;
+const CAMERA_DRIFT_RADIUS = 0.22;
+/** 追従の時定数（小さいほどゆっくり滑る） */
+const CAMERA_DRIFT_SMOOTHING = 0.09;
+
+const pickCameraDriftTarget = () => {
+  // 右下 / 左 / 右上 / 左…のような大まかな方角をランダムに選ぶ
+  const quadrant = Math.floor(Math.random() * 4);
+  const angle =
+    quadrant === 0
+      ? -Math.PI * 0.28 + (Math.random() - 0.5) * 0.35 // 右下
+      : quadrant === 1
+        ? Math.PI * 0.92 + (Math.random() - 0.5) * 0.4 // 左
+        : quadrant === 2
+          ? Math.PI * 0.28 + (Math.random() - 0.5) * 0.35 // 右上
+          : -Math.PI * 0.92 + (Math.random() - 0.5) * 0.4; // 左寄り下〜上
+  const radius = CAMERA_DRIFT_RADIUS * (0.55 + Math.random() * 0.45);
+  cameraSwayTarget.set(
+    Math.cos(angle) * radius,
+    Math.sin(angle) * radius * 0.85,
+    (Math.random() - 0.5) * CAMERA_DRIFT_RADIUS * 0.2,
+  );
+  cameraSwayLegTimer = 0;
+  cameraSwayLegDuration = 14 + Math.random() * 10;
+};
+
+/** TrackballControls がオフセット込みの位置を基準にしないよう、先に外す */
+const clearAudioCameraSway = () => {
+  if (cameraSwayPrevOffset.lengthSq() === 0) {
+    return;
+  }
+  camera.position.sub(cameraSwayPrevOffset);
+  cameraSwayPrevOffset.set(0, 0, 0);
+};
 
 const updateAudioCameraSway = (
   deltaTime: number,
-  bands: AudioBands,
-  rhythm: RhythmEvents,
+  _bands: AudioBands,
+  _rhythm: RhythmEvents,
   active: boolean,
 ) => {
-  // 音量に合わせて振幅。酔わないようごく弱く
-  const energy = active
-    ? Math.min(1, smoothstep(0.04, 0.32, bands.overall) * (0.45 + bands.sub * 0.25 + bands.mid * 0.15))
-    : 0;
+  // 音量には反応させない（脈打つと酔うので、再生中は一定振幅でゆったり漂うだけ）
   const interactDamp = isViewInteracting ? 0.08 : 1;
-  const targetAmp = energy * interactDamp;
-  cameraSwayAmp += (targetAmp - cameraSwayAmp) * Math.min(1, deltaTime * 1.2);
+  const targetAmp = (active ? 1 : 0) * interactDamp;
+  cameraSwayAmp += (targetAmp - cameraSwayAmp) * Math.min(1, deltaTime * 0.4);
 
-  if (cameraSwayAmp < 0.002) {
+  if (cameraSwayAmp < 0.002 && cameraSwayCurrent.lengthSq() < 1e-8) {
     return;
   }
 
-  const pulse = rhythm.pulseEnvelope * (0.2 + rhythm.pulseConfidence * 0.6);
-  cameraSwayPhase += deltaTime * (0.28 + cameraSwayAmp * 0.18 + pulse * 0.12);
+  if (cameraSwayAmp >= 0.002) {
+    cameraSwayLegTimer += deltaTime;
+    if (cameraSwayLegTimer >= cameraSwayLegDuration) {
+      pickCameraDriftTarget();
+    }
+  } else {
+    cameraSwayTarget.set(0, 0, 0);
+  }
 
-  const t = cameraSwayPhase;
+  // 二重スムージング: 目標→中間→現在と2段階でならすことで、
+  // 目標が切り替わっても速度が途切れず、常になめらかに滑り続ける
+  const k = Math.min(1, deltaTime * CAMERA_DRIFT_SMOOTHING * 2);
+  cameraSwaySmoothed.lerp(cameraSwayTarget, k);
+  cameraSwayCurrent.lerp(cameraSwaySmoothed, k);
+
   const a = cameraSwayAmp;
-  // カメラローカルの平行移動のみ（回転は触らない＝酔いづらい）
-  const yaw = Math.sin(t * 0.55) * 0.012 + Math.sin(t * 1.05) * 0.004;
-  const pitch = Math.cos(t * 0.42) * 0.008 + Math.sin(t * 0.91) * 0.003;
-  const dolly =
-    Math.sin(t * 0.31 + 0.9) * 0.01 +
-    pulse * 0.004 +
-    Math.max(rhythm.kick, 0) * 0.003;
-
-  const strength = a * 0.18;
   cameraSwayRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
   cameraSwayUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
   camera.getWorldDirection(cameraSwayFwd);
 
-  camera.position.addScaledVector(cameraSwayRight, yaw * strength);
-  camera.position.addScaledVector(cameraSwayUp, pitch * strength);
-  camera.position.addScaledVector(cameraSwayFwd, -dolly * strength);
+  cameraSwayOffset
+    .set(0, 0, 0)
+    .addScaledVector(cameraSwayRight, cameraSwayCurrent.x * a)
+    .addScaledVector(cameraSwayUp, cameraSwayCurrent.y * a)
+    .addScaledVector(cameraSwayFwd, -cameraSwayCurrent.z * a);
+  camera.position.add(cameraSwayOffset);
+  cameraSwayPrevOffset.copy(cameraSwayOffset);
 };
 
 const sculpture: SculptureExperience =
@@ -6008,10 +6141,127 @@ const sculpture: SculptureExperience =
       : new SoundSculpture();
 scene.add(sculpture.group);
 
-// ドラッグ: TrackballControls が target (0,0,0) を軸に全方向へ回す。クリックのみ表面反発
+// ドラッグ: オブジェクト自体を回す。背景とライトは回転量の3%だけ追従
 const viewRaycaster = new THREE.Raycaster();
 const viewPointerNdc = new THREE.Vector2();
 const sculptureHitLocal = new THREE.Vector3();
+const sculptureRotateAxis = new THREE.Vector3();
+const sculptureRotateDelta = new THREE.Quaternion();
+const SCULPTURE_ROTATE_SPEED = 0.0058;
+const BACKGROUND_ROTATE_RATIO = 0.03;
+const sculptureStickEl = document.querySelector<HTMLElement>("#sculpture-stick");
+const sculptureStick = {
+  active: false,
+  id: null as number | null,
+  x: 0,
+  y: 0,
+};
+const SCULPTURE_STICK_MAX_SPEED = 0.72;
+
+// イージング用: ドラッグ量は保留分に貯め、毎フレーム滑らかに消化する（離した後は慣性でゆっくり止まる）
+let pendingYaw = 0;
+let pendingPitch = 0;
+
+const queueSculptureRotation = (dx: number, dy: number) => {
+  pendingYaw += dx * SCULPTURE_ROTATE_SPEED;
+  pendingPitch += dy * SCULPTURE_ROTATE_SPEED;
+};
+
+const applySculptureRotation = (yaw: number, pitch: number) => {
+  sculptureRotateAxis.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  sculptureRotateDelta.setFromAxisAngle(sculptureRotateAxis, yaw);
+  sculpture.group.quaternion.premultiply(sculptureRotateDelta);
+  sceneBackground.rotateView(sculptureRotateAxis, yaw * BACKGROUND_ROTATE_RATIO);
+  sculptureRotateDelta.setFromAxisAngle(sculptureRotateAxis, yaw * BACKGROUND_ROTATE_RATIO);
+  lightRig.quaternion.premultiply(sculptureRotateDelta);
+
+  sculptureRotateAxis.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  sculptureRotateDelta.setFromAxisAngle(sculptureRotateAxis, pitch);
+  sculpture.group.quaternion.premultiply(sculptureRotateDelta);
+  sceneBackground.rotateView(sculptureRotateAxis, pitch * BACKGROUND_ROTATE_RATIO);
+  sculptureRotateDelta.setFromAxisAngle(sculptureRotateAxis, pitch * BACKGROUND_ROTATE_RATIO);
+  lightRig.quaternion.premultiply(sculptureRotateDelta);
+};
+
+const updateSculptureRotationEasing = (deltaTime: number) => {
+  if (sculptureStick.active) {
+    pendingYaw += sculptureStick.x * SCULPTURE_STICK_MAX_SPEED * deltaTime;
+    pendingPitch += sculptureStick.y * SCULPTURE_STICK_MAX_SPEED * deltaTime;
+  }
+
+  if (Math.abs(pendingYaw) < 1e-5 && Math.abs(pendingPitch) < 1e-5) {
+    pendingYaw = 0;
+    pendingPitch = 0;
+    return;
+  }
+  // ドラッグ中はやや速く追従、離した後は残りが指数的に減ってスッと止まる
+  const follow = Math.min(
+    1,
+    deltaTime * (sculptureDrag.active || sculptureStick.active ? 9 : 4.2),
+  );
+  const yaw = pendingYaw * follow;
+  const pitch = pendingPitch * follow;
+  pendingYaw -= yaw;
+  pendingPitch -= pitch;
+  applySculptureRotation(yaw, pitch);
+};
+
+const setSculptureStickFromPointer = (clientX: number, clientY: number) => {
+  if (!sculptureStickEl) return;
+  const rect = sculptureStickEl.getBoundingClientRect();
+  const maxTravel = rect.width * 0.27;
+  let x = clientX - (rect.left + rect.width * 0.5);
+  let y = clientY - (rect.top + rect.height * 0.5);
+  const length = Math.hypot(x, y);
+  if (length > maxTravel) {
+    const scale = maxTravel / length;
+    x *= scale;
+    y *= scale;
+  }
+  sculptureStick.x = x / maxTravel;
+  sculptureStick.y = y / maxTravel;
+  sculptureStickEl.style.setProperty("--stick-x", `${x.toFixed(2)}px`);
+  sculptureStickEl.style.setProperty("--stick-y", `${y.toFixed(2)}px`);
+};
+
+const releaseSculptureStick = () => {
+  if (!sculptureStickEl) return;
+  sculptureStick.active = false;
+  sculptureStick.id = null;
+  sculptureStick.x = 0;
+  sculptureStick.y = 0;
+  sculptureStickEl.classList.remove("is-active");
+  sculptureStickEl.style.setProperty("--stick-x", "0px");
+  sculptureStickEl.style.setProperty("--stick-y", "0px");
+  if (!sculptureDrag.active) {
+    isViewInteracting = false;
+  }
+};
+
+sculptureStickEl?.addEventListener("pointerdown", (event: PointerEvent) => {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  sculptureStick.active = true;
+  sculptureStick.id = event.pointerId;
+  sculptureStickEl.setPointerCapture(event.pointerId);
+  sculptureStickEl.classList.add("is-active");
+  isViewInteracting = true;
+  setSculptureStickFromPointer(event.clientX, event.clientY);
+});
+
+sculptureStickEl?.addEventListener("pointermove", (event: PointerEvent) => {
+  if (!sculptureStick.active || sculptureStick.id !== event.pointerId) return;
+  event.preventDefault();
+  setSculptureStickFromPointer(event.clientX, event.clientY);
+});
+
+sculptureStickEl?.addEventListener("pointerup", (event: PointerEvent) => {
+  if (sculptureStick.id !== event.pointerId) return;
+  releaseSculptureStick();
+});
+
+sculptureStickEl?.addEventListener("pointercancel", releaseSculptureStick);
+sculptureStickEl?.addEventListener("lostpointercapture", releaseSculptureStick);
 
 const pokeSculptureAtClient = (clientX: number, clientY: number) => {
   const targets = sculpture.getPointerTargets?.();
@@ -6034,7 +6284,6 @@ const pokeSculptureAtClient = (clientX: number, clientY: number) => {
   sculpture.pokeIdle?.();
 };
 
-const viewPointerState = { x: 0, y: 0, id: null as number | null };
 const starPointerNdc = new THREE.Vector2();
 let starPointerActive = false;
 
@@ -6053,61 +6302,102 @@ const syncStarPointerFromClient = (clientX: number, clientY: number) => {
 
 renderer.domElement.addEventListener("pointermove", (event: PointerEvent) => {
   syncStarPointerFromClient(event.clientX, event.clientY);
+  if (!sculptureDrag.active || sculptureDrag.id !== event.pointerId) {
+    return;
+  }
+  const dx = event.clientX - sculptureDrag.lastX;
+  const dy = event.clientY - sculptureDrag.lastY;
+  sculptureDrag.lastX = event.clientX;
+  sculptureDrag.lastY = event.clientY;
+  if (!sculptureDrag.moved) {
+    const total = Math.hypot(
+      event.clientX - sculptureDrag.startX,
+      event.clientY - sculptureDrag.startY,
+    );
+    if (total < 4) {
+      return;
+    }
+    sculptureDrag.moved = true;
+    isViewInteracting = true;
+  }
+  queueSculptureRotation(dx, dy);
 });
 renderer.domElement.addEventListener("pointerleave", () => {
   starPointerActive = false;
 });
 renderer.domElement.addEventListener("pointerdown", (event: PointerEvent) => {
   if (event.button !== 0) return;
-  viewPointerState.x = event.clientX;
-  viewPointerState.y = event.clientY;
-  viewPointerState.id = event.pointerId;
+  sculptureDrag.active = true;
+  sculptureDrag.moved = false;
+  sculptureDrag.startX = event.clientX;
+  sculptureDrag.startY = event.clientY;
+  sculptureDrag.lastX = event.clientX;
+  sculptureDrag.lastY = event.clientY;
+  sculptureDrag.id = event.pointerId;
+  renderer.domElement.setPointerCapture(event.pointerId);
   syncStarPointerFromClient(event.clientX, event.clientY);
 });
 renderer.domElement.addEventListener("pointerup", (event: PointerEvent) => {
-  if (event.button !== 0 || viewPointerState.id !== event.pointerId) return;
-  const moved = Math.hypot(event.clientX - viewPointerState.x, event.clientY - viewPointerState.y);
-  viewPointerState.id = null;
-  if (moved < 4) {
+  if (event.button !== 0 || sculptureDrag.id !== event.pointerId) return;
+  const moved = sculptureDrag.moved;
+  sculptureDrag.active = false;
+  sculptureDrag.id = null;
+  renderer.domElement.releasePointerCapture(event.pointerId);
+  if (!moved) {
     pokeSculptureAtClient(event.clientX, event.clientY);
   }
+  isViewInteracting = false;
 });
 renderer.domElement.addEventListener("pointercancel", () => {
-  viewPointerState.id = null;
+  sculptureDrag.active = false;
+  sculptureDrag.id = null;
+  isViewInteracting = false;
   starPointerActive = false;
 });
 
+// ライト一式はリグにまとめ、オブジェクト回転の3%だけゆっくり追従する
+const lightRig = new THREE.Group();
+scene.add(lightRig);
+
 const keyLight = new THREE.DirectionalLight(0xffffff, sceneEnv.key);
-keyLight.position.set(3, 4, 5);
+keyLight.position.set(1.6, 6.4, 2.4);
 keyLight.castShadow = true;
 keyLight.shadow.mapSize.set(1024, 1024);
 keyLight.shadow.camera.near = 1;
-keyLight.shadow.camera.far = 18;
-keyLight.shadow.camera.left = -6;
-keyLight.shadow.camera.right = 6;
-keyLight.shadow.camera.top = 6;
-keyLight.shadow.camera.bottom = -6;
-scene.add(keyLight);
-scene.add(keyLight.target);
+keyLight.shadow.camera.far = 22;
+keyLight.shadow.camera.left = -9;
+keyLight.shadow.camera.right = 9;
+keyLight.shadow.camera.top = 9;
+keyLight.shadow.camera.bottom = -9;
+keyLight.shadow.radius = 9;
+keyLight.shadow.blurSamples = 16;
+keyLight.shadow.bias = -0.0004;
+lightRig.add(keyLight);
+lightRig.add(keyLight.target);
 
 const fillLight = new THREE.DirectionalLight(sceneEnv.fillColor ?? 0xe8f0ff, sceneEnv.fill);
-fillLight.position.set(-4, 2, 2);
-scene.add(fillLight);
+fillLight.position.set(-3.2, 4.8, 2.6);
+lightRig.add(fillLight);
+
+// 反対側からの弱いフィルで陰影を広げ、全体に広がりを出す
+const softFillLight = new THREE.DirectionalLight(sceneEnv.fillColor ?? 0xe8f0ff, sceneEnv.fill * 0.55);
+softFillLight.position.set(2.4, 3.8, -3.6);
+lightRig.add(softFillLight);
 
 const ambientLight = new THREE.HemisphereLight(
   0xffffff,
   sceneEnv.hemisphereGround ?? 0xd6d0c6,
   sceneEnv.ambient,
 );
-scene.add(ambientLight);
+lightRig.add(ambientLight);
 
 if (sceneEnv.rimLightIntensity) {
   const rimLight = new THREE.DirectionalLight(
     sceneEnv.rimLightColor ?? 0x6ec8ff,
     sceneEnv.rimLightIntensity,
   );
-  rimLight.position.set(0, 1.5, -5);
-  scene.add(rimLight);
+  rimLight.position.set(-1.2, 2.8, -5.5);
+  lightRig.add(rimLight);
 }
 
 // monolith スタイル: ギャラリーの台座
@@ -6127,9 +6417,12 @@ if (sceneEnv.pedestal) {
 let spotLight: THREE.SpotLight | null = null;
 if (sceneEnv.spotlight) {
   spotLight = new THREE.SpotLight(0xfff2df, 0, 0, 0.44, 0.55, 0);
-  spotLight.position.set(2.6, 5.6, 3.2);
+  spotLight.position.set(0.5, 7.2, 0.8);
   spotLight.castShadow = true;
   spotLight.shadow.mapSize.set(1024, 1024);
+  spotLight.shadow.radius = 7;
+  spotLight.shadow.blurSamples = 12;
+  spotLight.shadow.bias = -0.0004;
   spotLight.target.position.set(0, -0.3, 0);
   scene.add(spotLight, spotLight.target);
 }
@@ -6170,6 +6463,164 @@ let silenceSeconds = 0;
 /** しきい値超えが連続した秒数。一瞬のノイズでは無音カウントを落とさない */
 let loudBurstSeconds = 0;
 const audioScopeContext = audioScopeCanvas.getContext("2d");
+
+// --- HUD（計測風オーバーレイ） ---
+const hudLowEl = document.querySelector<HTMLElement>("#hud-low");
+const hudMidEl = document.querySelector<HTMLElement>("#hud-mid");
+const hudHighEl = document.querySelector<HTMLElement>("#hud-high");
+const hudSignalEl = document.querySelector<HTMLElement>("#hud-signal");
+const hudStatusEl = document.querySelector<HTMLElement>("#hud-status");
+const hudTimecodeEl = document.querySelector<HTMLElement>("#hud-timecode");
+const hudBpmEl = document.querySelector<HTMLElement>("#hud-bpm");
+const hudAlgoEl = document.querySelector<HTMLElement>("#hud-algo");
+const hudScopeEl = document.querySelector<HTMLElement>("#hud-scope");
+const hudTicksEl = document.querySelector<HTMLElement>("#hud-ticks");
+const hudTicksXEl = document.querySelector<HTMLElement>("#hud-ticks-x");
+
+/** オブジェクトの向きを連続座標で示す照準 */
+const HUD_TICK_COUNT = 13;
+const hudTickForward = new THREE.Vector3();
+const hudTickCamUp = new THREE.Vector3();
+let hudTickPitchDisplay = 0.5;
+let hudTickYawDisplay = 0.5;
+let hudTickPreviousYaw = 0;
+let hudTickYawUnwrapped = 0;
+
+const createHudTickMarks = (element: HTMLElement | null) => {
+  if (!element) return [] as HTMLElement[];
+  const marks: HTMLElement[] = [];
+  for (let i = 0; i < HUD_TICK_COUNT; i += 1) {
+    const mark = document.createElement("span");
+    mark.className = "hud-tick-mark";
+    element.append(mark);
+    marks.push(mark);
+  }
+  return marks;
+};
+
+const hudTickMarks = createHudTickMarks(hudTicksEl);
+const hudTickXMarks = createHudTickMarks(hudTicksXEl);
+
+const updateHudTickLengths = (marks: HTMLElement[], position: number, cyclic = false) => {
+  for (let i = 0; i < marks.length; i += 1) {
+    let distance = Math.abs(i - position);
+    if (cyclic) {
+      distance = Math.min(distance, HUD_TICK_COUNT - distance);
+    }
+    const proximity = THREE.MathUtils.clamp(1 - distance, 0, 1);
+    // 端で速度が急変しないよう smoothstep で伸縮させる
+    const grow = proximity * proximity * (3 - 2 * proximity);
+    marks[i].style.setProperty("--tick-grow", grow.toFixed(4));
+  }
+};
+
+const updateHudTicks = (deltaTime: number) => {
+  // オブジェクト前方をカメラ上方向で測る（ドラッグ回転と同じ軸。ワールドYだと横回転でも縦が動く）
+  hudTickForward.set(0, 0, 1).applyQuaternion(sculpture.group.quaternion);
+  hudTickCamUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  const follow = 1 - Math.exp(-deltaTime * 5);
+
+  if (hudTicksEl) {
+    // カメラ上方向への傾き。横ドラッグ（カメラ上まわり）では不変
+    const pitch = Math.asin(
+      THREE.MathUtils.clamp(hudTickForward.dot(hudTickCamUp), -1, 1),
+    );
+    // ±約50°で端まで届く（πだと90°近くまで回さないと端に届かない）
+    const target = THREE.MathUtils.clamp(0.5 - pitch / (Math.PI * 0.55), 0, 1);
+    hudTickPitchDisplay += (target - hudTickPitchDisplay) * follow;
+    updateHudTickLengths(hudTickMarks, hudTickPitchDisplay * (HUD_TICK_COUNT - 1));
+  }
+
+  if (hudTicksXEl) {
+    // ヨー（左右）はワールド水平面。縦とは独立して一周する
+    const yaw = Math.atan2(hudTickForward.x, hudTickForward.z);
+    let yawDelta = yaw - hudTickPreviousYaw;
+    if (yawDelta > Math.PI) yawDelta -= Math.PI * 2;
+    if (yawDelta < -Math.PI) yawDelta += Math.PI * 2;
+    hudTickYawUnwrapped += yawDelta;
+    hudTickPreviousYaw = yaw;
+    const target = hudTickYawUnwrapped / (Math.PI * 2) + 0.5;
+    hudTickYawDisplay += (target - hudTickYawDisplay) * follow;
+    const wrapped = ((hudTickYawDisplay % 1) + 1) % 1;
+    updateHudTickLengths(hudTickXMarks, wrapped * HUD_TICK_COUNT, true);
+  }
+};
+
+let hudSignalLabel = "---";
+let hudFormingSeconds = 0;
+let hudTextTimer = 1;
+let hudLastBpm = 0;
+
+const formatHudTimecode = (seconds: number) => {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  const c = Math.floor((seconds % 1) * 100);
+  const pad = (v: number) => String(v).padStart(2, "0");
+  return `${pad(m)}.${pad(s)}.${pad(c)}`;
+};
+
+/** 左下: エンベロープ小 → // / 大 → //////////////////// （初期は100%） */
+const HUD_SLASH_MIN = 2;
+const HUD_SLASH_MAX = 20;
+let hudSlashLevel = 1;
+
+const updateHudScope = (bands: AudioBands, rhythmEvents: RhythmEvents, deltaTime: number) => {
+  if (!hudScopeEl) {
+    return;
+  }
+  if (!isAudioReady || isComplete) {
+    hudSlashLevel = 1;
+    hudScopeEl.textContent = "/".repeat(HUD_SLASH_MAX);
+    return;
+  }
+  const envelope = Math.min(
+    1,
+    rhythmEvents.pulseEnvelope * 0.7 +
+      rhythmEvents.waveEnergy * 0.55 +
+      bands.overall * 0.45,
+  );
+  const follow = Math.min(1, deltaTime * (envelope > hudSlashLevel ? 18 : 8));
+  hudSlashLevel += (envelope - hudSlashLevel) * follow;
+  const count = Math.max(
+    HUD_SLASH_MIN,
+    Math.round(HUD_SLASH_MIN + hudSlashLevel * (HUD_SLASH_MAX - HUD_SLASH_MIN)),
+  );
+  hudScopeEl.textContent = "/".repeat(count);
+};
+
+const updateHud = (
+  bands: AudioBands,
+  rhythmEvents: RhythmEvents,
+  deltaTime: number,
+) => {
+  if (isAudioReady && !isComplete) {
+    hudFormingSeconds += deltaTime;
+  }
+  updateHudScope(bands, rhythmEvents, deltaTime);
+  updateHudTicks(deltaTime);
+
+  hudTextTimer += deltaTime;
+  if (hudTextTimer < 0.12) {
+    return;
+  }
+  hudTextTimer = 0;
+
+  if (hudLowEl) hudLowEl.textContent = bands.low.toFixed(2);
+  if (hudMidEl) hudMidEl.textContent = bands.mid.toFixed(2);
+  if (hudHighEl) hudHighEl.textContent = bands.high.toFixed(2);
+  if (hudTimecodeEl) hudTimecodeEl.textContent = formatHudTimecode(hudFormingSeconds);
+  if (hudSignalEl) hudSignalEl.textContent = hudSignalLabel;
+  if (hudStatusEl) {
+    hudStatusEl.textContent = isComplete ? "COMPLETE" : isAudioReady ? "FORMING" : "STANDBY";
+  }
+  if (hudBpmEl) {
+    if (rhythmEvents.bpm > 0 && rhythmEvents.pulseConfidence >= 0.35) {
+      hudLastBpm = rhythmEvents.bpm;
+    }
+    hudBpmEl.textContent = hudLastBpm > 0 ? hudLastBpm.toFixed(0) : "---";
+  }
+  if (hudAlgoEl) hudAlgoEl.textContent = growthAlgorithmId.toUpperCase();
+};
 
 const drawAudioScope = (
   waveform: Uint8Array | null,
@@ -6386,7 +6837,6 @@ populateAudioDevices().catch((error) => {
 
 // --- 完成時の環境クロスフェード（背景・ライト・スポットライト） ---
 let envMix = 0;
-let lightSliderTouched = false;
 const envBackgroundForming = new THREE.Color(sceneEnv.background);
 const envBackgroundComplete = new THREE.Color(sceneEnv.backgroundComplete);
 const envLerp = (from: number, to: number) => from + (to - from) * envMix;
@@ -6402,23 +6852,25 @@ const updateEnvironmentCrossfade = (deltaTime: number) => {
   renderer.setClearColor(scene.background as THREE.Color);
   sceneBackground.setFromBackground(scene.background as THREE.Color, themeDarkActive, envMix);
   syncSceneFog();
-  if (!lightSliderTouched) {
-    keyLight.intensity = envLerp(sceneEnv.key, sceneEnv.keyComplete);
-  }
+  keyLight.intensity = envLerp(sceneEnv.key, sceneEnv.keyComplete);
   fillLight.intensity = envLerp(sceneEnv.fill, sceneEnv.fillComplete);
+  softFillLight.intensity = envLerp(sceneEnv.fill, sceneEnv.fillComplete) * 0.55;
   ambientLight.intensity = envLerp(sceneEnv.ambient, sceneEnv.ambientComplete);
   if (spotLight) {
     spotLight.intensity = sceneEnv.spotlightIntensity * envMix;
   }
 };
 
+/** 上からやや広げて当てる（俯瞰＋広がり） */
 const updateKeyLight = () => {
-  const azimuth = THREE.MathUtils.degToRad(Number(lightAzimuthInput.value));
-  const elevation = THREE.MathUtils.degToRad(Number(lightElevationInput.value));
-  const radius = 6;
-
-  keyLight.position.set(Math.cos(elevation) * Math.sin(azimuth) * radius, Math.sin(elevation) * radius, Math.cos(elevation) * Math.cos(azimuth) * radius);
-  keyLight.intensity = Number(lightIntensityInput.value);
+  const azimuth = THREE.MathUtils.degToRad(32);
+  const elevation = THREE.MathUtils.degToRad(72);
+  const radius = 7.6;
+  keyLight.position.set(
+    Math.cos(elevation) * Math.sin(azimuth) * radius,
+    Math.sin(elevation) * radius,
+    Math.cos(elevation) * Math.cos(azimuth) * radius,
+  );
 };
 
 const setStartButtonsEnabled = (enabled: boolean) => {
@@ -6445,11 +6897,8 @@ const completeSculpture = () => {
   audioInput.stopPlayback();
   audioInput.resetAnalysisState();
   sculpture.complete();
-  lightSliderTouched = false;
-  lightIntensityInput.value = String(Math.max(1, sceneEnv.keyComplete));
   appElement.classList.add("is-complete");
   viewControls.enabled = true;
-  viewerControlFields.disabled = false;
   completeButton.disabled = true;
   resetSculptureButton.disabled = false;
   exportButton.disabled = false;
@@ -6474,6 +6923,9 @@ const resetSculptureSession = () => {
   hasHeardSound = false;
   silenceSeconds = 0;
   loudBurstSeconds = 0;
+  hudFormingSeconds = 0;
+  hudSlashLevel = 1;
+  hudLastBpm = 0;
   latestRhythm = {
     kick: 0,
     snare: 0,
@@ -6497,9 +6949,6 @@ const resetSculptureSession = () => {
   };
   appElement.classList.remove("is-complete");
   viewControls.enabled = true;
-  viewerControlFields.disabled = true;
-  lightSliderTouched = false;
-  lightIntensityInput.value = String(Math.max(1, sceneEnv.key));
   completeButton.disabled = !isAudioReady;
   exportButton.disabled = true;
   if (!isAudioReady) {
@@ -6562,6 +7011,9 @@ const startAudioInput = async (
   try {
     await start();
     isAudioReady = true;
+    hudFormingSeconds = 0;
+    hudSlashLevel = 1;
+    hudLastBpm = 0;
     const seed = audioInput.getMorphologySeed() ?? undefined;
     sculpture.reset(seed);
     rhythm.reset();
@@ -6593,6 +7045,7 @@ const startAudioInput = async (
 };
 
 startButton.addEventListener("click", async () => {
+  hudSignalLabel = "MIC";
   await startAudioInput(startButton, async () => {
     await audioInput.startMicrophone(audioInputSelect.value);
     // 権限取得後に label が読めるようになる事があるため、再取得して表示名を更新。
@@ -6601,11 +7054,13 @@ startButton.addEventListener("click", async () => {
 });
 
 startSystemAudioButton.addEventListener("click", async () => {
+  hudSignalLabel = "SYSTEM";
   await startAudioInput(startSystemAudioButton, () => audioInput.startDisplayAudio());
 });
 
 if (import.meta.env.DEV && startDevAudioButton) {
   startDevAudioButton.addEventListener("click", async () => {
+    hudSignalLabel = "BUFFER";
     const { DEV_AUDIO_URL } = await import("./dev-audio");
     await startAudioInput(startDevAudioButton, () => audioInput.startDevAudio(DEV_AUDIO_URL));
   });
@@ -6614,16 +7069,6 @@ if (import.meta.env.DEV && startDevAudioButton) {
 completeButton.addEventListener("click", completeSculpture);
 resetSculptureButton.addEventListener("click", resetSculptureSession);
 exportButton.addEventListener("click", exportSculpture);
-const onLightSliderInput = () => {
-  lightSliderTouched = true;
-  updateKeyLight();
-};
-lightAzimuthInput.addEventListener("input", onLightSliderInput);
-lightElevationInput.addEventListener("input", onLightSliderInput);
-lightIntensityInput.addEventListener("input", onLightSliderInput);
-resetViewButton.addEventListener("click", () => {
-  viewControls.reset();
-});
 
 const resize = () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -6720,10 +7165,10 @@ const trackSilenceForCompletion = (
     silenceSeconds += deltaTime;
   }
 
-  const silenceTarget = playbackEnded
-    ? PLAYBACK_ENDED_SECONDS_TO_COMPLETE
+  const completeAfter = playbackEnded
+    ? PLAYBACK_END_SECONDS_TO_COMPLETE
     : SILENCE_SECONDS_TO_COMPLETE;
-  if (silenceSeconds >= silenceTarget) {
+  if (silenceSeconds >= completeAfter) {
     completeSculpture();
   }
 };
@@ -6737,6 +7182,28 @@ const advanceSculptureSimulation = (
   latestRhythm = rhythmEvents;
 
   const bands = applyWaveGate(rawBands, waveformMetrics);
+  const playbackEnded = audioInput.hasPlaybackEnded();
+
+  // バッファ曲が終わったら形を止め、短く待って完成
+  if (playbackEnded && !isComplete) {
+    sculpture.holdShapeForCompletion?.();
+    trackSilenceForCompletion(bands, deltaTime, waveformMetrics);
+    const heldBands = lastDisplayBands.overall > 0 ? lastDisplayBands : emptyBands();
+    sculpture.update(
+      heldBands,
+      deltaTime,
+      isViewInteracting,
+      latestRhythm,
+      latestStructure,
+      speciesProfiler.getProfile(),
+    );
+    return {
+      bands: heldBands,
+      rhythmEvents,
+      speciesProfile: speciesProfiler.getProfile(),
+    };
+  }
+
   trackSilenceForCompletion(bands, deltaTime, waveformMetrics);
 
   if (!isComplete && isAudioReady) {
@@ -6864,8 +7331,11 @@ const render = () => {
     isAudioReady && !isComplete,
   );
   drawAudioScope(waveform, rhythmEvents, bandMeters, bandSoloMode, latestStructure, speciesProfile);
+  updateHud(displayBands, rhythmEvents, deltaTime);
   updateEnvironmentCrossfade(deltaTime);
+  clearAudioCameraSway();
   viewControls.update();
+  updateSculptureRotationEasing(deltaTime);
   updateAudioCameraSway(
     deltaTime,
     displayBands,
@@ -6997,6 +7467,5 @@ const initTuningPanel = () => {
 };
 
 initTuningPanel();
-lightIntensityInput.value = String(Math.max(1, sceneEnv.key));
 updateKeyLight();
 render();
