@@ -305,30 +305,64 @@ const curlNoiseAlgo: GrowthAlgorithm = {
     clamp01(Math.abs(Math.sin(x * 4.2 + y * 3.1 - z * 2.8 + salt)) * 0.75 + 0.12),
 };
 
+/** Space Colonization 用: salt が同じあいだアトラクタ座標を使い回す */
+const scPatternAttractors = {
+  salt: Number.NaN,
+  pts: new Float32Array(6),
+};
+const scFlowAttractors = {
+  salt: Number.NaN,
+  pts: new Float32Array(6),
+};
+
+const fillScAttractors = (
+  cache: { salt: number; pts: Float32Array },
+  salt: number,
+  scale: number,
+  saltMul: number,
+) => {
+  if (cache.salt === salt) {
+    return cache.pts;
+  }
+  cache.salt = salt;
+  const pts = cache.pts;
+  for (let a = 0; a < 2; a += 1) {
+    const i = a * 3;
+    const phase = a * 2.1 + salt * saltMul;
+    pts[i] = Math.sin(phase) * scale;
+    pts[i + 1] = Math.cos(a * 1.7 + salt * saltMul * 1.46) * scale;
+    pts[i + 2] = Math.sin(a * 2.9 - salt * saltMul * 0.85) * scale;
+  }
+  return pts;
+};
+
 const spaceColonizationAlgo: GrowthAlgorithm = {
   id: "space-colonization",
   pattern: (x, y, z, salt) => {
-    // 6点フル評価は重いので 3 点 + ハッシュで近似
+    // hypot/exp を避け、2 アトラクタ + 距離二乗フォールオフで軽量化
+    const pts = fillScAttractors(scPatternAttractors, salt, 0.75, 0.13);
     let attract = 0;
-    for (let a = 0; a < 3; a += 1) {
-      const ax = Math.sin(a * 2.1 + salt * 0.13) * 0.75;
-      const ay = Math.cos(a * 1.7 + salt * 0.19) * 0.75;
-      const az = Math.sin(a * 2.9 - salt * 0.11) * 0.75;
-      const d = Math.hypot(x - ax, y - ay, z - az);
-      attract += Math.exp(-d * 4.5);
+    for (let a = 0; a < 2; a += 1) {
+      const i = a * 3;
+      const dx = x - pts[i];
+      const dy = y - pts[i + 1];
+      const dz = z - pts[i + 2];
+      attract += 1 / (1 + (dx * dx + dy * dy + dz * dz) * 9);
     }
     attract += hash3(x, y, z, salt) * 0.35;
-    return attract * 1.6 - 0.55;
+    return attract * 1.55 - 0.5;
   },
   flow: (x, y, z, salt, out) => {
+    const pts = fillScAttractors(scFlowAttractors, salt, 0.8, 1);
     let ax = 0;
     let ay = 0;
     let az = 0;
-    for (let a = 0; a < 3; a += 1) {
-      const tx = Math.sin(a * 2.1 + salt) * 0.8 - x;
-      const ty = Math.cos(a * 1.7 + salt) * 0.8 - y;
-      const tz = Math.sin(a * 2.9 - salt) * 0.8 - z;
-      const w = 1 / (Math.hypot(tx, ty, tz) + 0.2);
+    for (let a = 0; a < 2; a += 1) {
+      const i = a * 3;
+      const tx = pts[i] - x;
+      const ty = pts[i + 1] - y;
+      const tz = pts[i + 2] - z;
+      const w = 1 / (tx * tx + ty * ty + tz * tz + 0.04);
       ax += tx * w;
       ay += ty * w;
       az += tz * w;
@@ -420,6 +454,17 @@ export const getGrowthAlgorithmId = () => activeGrowthAlgorithmId;
 /** flow() が重いアルゴリズム（毎頂点フル評価すると落ちやすい） */
 export const isHeavyGrowthFlowAlgorithm = (id: GrowthAlgorithmId = activeGrowthAlgorithmId) =>
   id === "curl-noise" || id === "differential-growth" || id === "voronoi" || id === "space-colonization";
+
+/** 重い flow の頂点ストライド（大きいほど軽い） */
+export const getHeavyGrowthFlowStride = (id: GrowthAlgorithmId = activeGrowthAlgorithmId) => {
+  if (id === "space-colonization") return 3;
+  if (isHeavyGrowthFlowAlgorithm(id)) return 2;
+  return 1;
+};
+
+/** pattern() も重いアルゴリズム */
+export const isHeavyGrowthPatternAlgorithm = (id: GrowthAlgorithmId = activeGrowthAlgorithmId) =>
+  id === "space-colonization" || id === "voronoi" || id === "curl-noise" || id === "erosion";
 
 export const getGrowthAlgorithm = (id: GrowthAlgorithmId = activeGrowthAlgorithmId) => ALGORITHMS[id];
 

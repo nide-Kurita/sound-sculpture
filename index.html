@@ -35,6 +35,15 @@
           role="application"
           aria-label="オブジェクト回転スティック"
         >
+          <span
+            class="hud-reticle__handle"
+            role="button"
+            tabindex="0"
+            aria-label="レティクルをドラッグして移動"
+          >
+            <span class="hud-reticle__bar" aria-hidden="true"></span>
+            <span class="hud-reticle__bar" aria-hidden="true"></span>
+          </span>
           <span class="hud-reticle__plus" aria-hidden="true">+</span>
         </div>
         <div class="hud-left-bottom">
@@ -58,6 +67,14 @@
           <p id="hud-scope" class="hud-scope">////////////////////</p>
         </div>
         <div class="hud-right-bottom">
+          <div class="hud-field" id="hud-local-time-field" hidden>
+            <p class="hud-field__label">LOCAL_TIME</p>
+            <p id="hud-local-time" class="hud-field__value">--:-- --</p>
+          </div>
+          <div class="hud-field" id="hud-weather-field" hidden>
+            <p class="hud-field__label">WEATHER</p>
+            <p id="hud-weather" class="hud-field__value">---</p>
+          </div>
           <div class="hud-field">
             <p class="hud-field__label">SIGNAL_TYPE</p>
             <p id="hud-signal" class="hud-field__value">---</p>
@@ -78,16 +95,6 @@
       </div>
 
       <aside class="control-panel-shell is-collapsed" id="control-panel-shell">
-        <button
-          id="hud-panel-toggle"
-          class="hud-panel-toggle"
-          type="button"
-          aria-controls="control-panel"
-          aria-expanded="false"
-          aria-label="操作パネルを開閉（ドラッグで移動）"
-        >
-          <span class="hud-panel-toggle__dots" aria-hidden="true"></span>
-        </button>
         <section class="control-panel" id="control-panel" aria-label="設定と操作">
         <details class="control-group" open>
           <summary class="control-group__summary">入力・操作</summary>
@@ -119,6 +126,87 @@
               >
                 デバイス一覧を更新
               </button>
+            </div>
+            <label class="daytime-bg-option">
+              <input id="daytime-background" type="checkbox" />
+              <span class="daytime-bg-option__text">
+                <span class="daytime-bg-option__title">背景を現地の時間帯に合わせる</span>
+                <span class="daytime-bg-option__hint">朝・昼・夕・夜で色が変わり、文字色も反転します</span>
+              </span>
+            </label>
+            <label class="daytime-bg-option">
+              <input id="live-weather" type="checkbox" />
+              <span class="daytime-bg-option__text">
+                <span class="daytime-bg-option__title">背景を現地の天気に合わせる</span>
+                <span class="daytime-bg-option__hint">位置情報と天気APIで晴れ・曇り・雨・風を反映します</span>
+              </span>
+            </label>
+            <p id="live-weather-status" class="live-weather-status" hidden></p>
+            <div class="daytime-preview" id="weather-preview" hidden>
+              <p class="daytime-preview__label">
+                天気プレビュー（DEV）
+                <span id="weather-preview-value">LIVE</span>
+              </p>
+              <label class="weather-preview__field">
+                <span class="weather-preview__field-label">条件</span>
+                <select id="weather-preview-preset" class="weather-preview__select">
+                  <option value="live">LIVE（実天気）</option>
+                  <option value="clear">晴れ</option>
+                  <option value="cloudy">曇り</option>
+                  <option value="overcast">どんより</option>
+                  <option value="fog">霧</option>
+                  <option value="rain">雨</option>
+                  <option value="rain-heavy">強い雨</option>
+                  <option value="snow">雪</option>
+                  <option value="windy">強風</option>
+                  <option value="storm">嵐（雨＋風）</option>
+                </select>
+              </label>
+              <label class="weather-preview__field">
+                <span class="weather-preview__field-label">雨量 <span id="weather-preview-rain-value">1.0</span></span>
+                <input
+                  id="weather-preview-rain"
+                  class="daytime-preview__slider"
+                  type="range"
+                  min="0"
+                  max="1.4"
+                  step="0.05"
+                  value="1"
+                />
+              </label>
+              <label class="weather-preview__field">
+                <span class="weather-preview__field-label">風速 <span id="weather-preview-wind-value">1.0</span></span>
+                <input
+                  id="weather-preview-wind"
+                  class="daytime-preview__slider"
+                  type="range"
+                  min="0"
+                  max="1.6"
+                  step="0.05"
+                  value="1"
+                />
+              </label>
+              <div class="daytime-preview__actions">
+                <button id="weather-preview-live" type="button">実天気に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview" id="daytime-preview" hidden>
+              <p class="daytime-preview__label">
+                時刻プレビュー（DEV）
+                <span id="daytime-preview-value">LIVE</span>
+              </p>
+              <input
+                id="daytime-preview-hour"
+                class="daytime-preview__slider"
+                type="range"
+                min="0"
+                max="24"
+                step="0.05"
+                value="12"
+              />
+              <div class="daytime-preview__actions">
+                <button id="daytime-preview-live" type="button">実時刻に戻す</button>
+              </div>
             </div>
             <section class="audio-scope" aria-label="Audio scope" hidden>
               <canvas id="audio-scope" width="420" height="120"></canvas>
@@ -202,7 +290,7 @@
           </div>
         </details>
 
-        <details class="control-group control-group--dev">
+        <details class="control-group control-group--dev" open>
           <summary class="control-group__summary">開発チューニング</summary>
           <div class="control-group__body">
             <p class="tuning-hint">
@@ -230,6 +318,17 @@
         </details>
         </section>
       </aside>
+
+      <button
+        id="hud-panel-toggle"
+        class="hud-panel-toggle"
+        type="button"
+        aria-controls="control-panel"
+        aria-expanded="false"
+        aria-label="操作パネルを開閉（ドラッグで移動）"
+      >
+        <span class="hud-panel-toggle__dots" aria-hidden="true"></span>
+      </button>
 
       <canvas id="scene" aria-label="Sound reactive 3D sculpture"></canvas>
     </main>

@@ -48,6 +48,8 @@ import {
   growthPlaceOnSphere,
   growthSpikeMask,
   isHeavyGrowthFlowAlgorithm,
+  getHeavyGrowthFlowStride,
+  isHeavyGrowthPatternAlgorithm,
   parseGrowthAlgorithmId,
   setGrowthAlgorithmId,
   type GrowthAlgorithmId,
@@ -85,6 +87,24 @@ import {
   type VisualStyleId,
 } from "./visual-style";
 import { SceneBackground } from "./scene-background";
+import {
+  formatAmPmFromHour,
+  formatLocalAmPm,
+  getLocalHourFraction,
+  readDaytimeBackgroundEnabled,
+  sampleDaytimeAtmosphere,
+  sampleDaytimeAtmosphereFromHour,
+  writeDaytimeBackgroundEnabled,
+} from "./daytime-atmosphere";
+import {
+  applyCloudCoverToSky,
+  createWeatherPreviewSnapshot,
+  fetchLiveWeatherForUser,
+  writeLiveWeatherEnabled,
+  type LiveWeatherSnapshot,
+  type WeatherPreviewPresetId,
+} from "./live-weather";
+import type { SceneWeatherState } from "./scene-background";
 import {
   clamp01,
   seededUnit,
@@ -1684,9 +1704,10 @@ class SoundSculpture {
     this.innerCore = new THREE.Mesh(this.geometry, this.innerCoreMaterial);
     this.surface = new THREE.Mesh(this.surfaceGeometry, this.surfaceMaterial);
     this.core.castShadow = true;
-    this.core.receiveShadow = true;
+    // 自己影を受けない（回転で影が張り付いて急に暗くなるのを防ぐ）
+    this.core.receiveShadow = false;
     this.innerCore.castShadow = true;
-    this.innerCore.receiveShadow = true;
+    this.innerCore.receiveShadow = false;
     // 内側は一回り小さくし、外側コアの突き抜け先端が前面に出るようにする
     this.innerCore.scale.setScalar(this.style.membrane.vita ? 0.9 : 1);
     this.surface.castShadow = false;
@@ -2490,9 +2511,12 @@ class SoundSculpture {
     const fast = this.idleTime * 0.58 + 13.7;
     const flowSalt = this.morphologySeed + slow * 0.55;
     const heavyFlow = isHeavyGrowthFlowAlgorithm();
-    // 重い flow は頂点を交互更新（見た目はほぼ同じで負荷半減）
-    const flowStride = heavyFlow ? 2 : 1;
-    const flowPhase = heavyFlow ? (Math.floor(this.idleTime * 30) & 1) : 0;
+    const heavyPattern = isHeavyGrowthPatternAlgorithm();
+    // 重い flow/pattern は頂点を間引き更新（見た目はほぼ同じで負荷低減）
+    const flowStride = getHeavyGrowthFlowStride();
+    const flowPhase = heavyFlow ? (Math.floor(this.idleTime * 30) % flowStride) : 0;
+    const patternStride = heavyPattern ? 2 : 1;
+    const patternPhase = heavyPattern ? (Math.floor(this.idleTime * 22) & 1) : 0;
     for (let i = 0; i < this.idleWobbleField.length; i += 1) {
       const index = i * 3;
       const x = this.basePositions[index];
@@ -2502,11 +2526,13 @@ class SoundSculpture {
       const nx = x / r;
       const ny = y / r;
       const nz = z / r;
-      // 低周波中心。第3オクターブは負荷の割に効きが薄いので省略
-      const wave =
-        growthPattern(nx * 0.75, ny * 0.75, nz * 0.75, slow) * 0.78 +
-        growthPattern(nx * 1.35, ny * 1.35, nz * 1.35, fast) * 0.22;
-      this.idleWobbleField[i] = wave * this.idleWobbleAmp;
+      if ((i + patternPhase) % patternStride === 0) {
+        // 低周波中心。第3オクターブは負荷の割に効きが薄いので省略
+        const wave =
+          growthPattern(nx * 0.75, ny * 0.75, nz * 0.75, slow) * 0.78 +
+          growthPattern(nx * 1.35, ny * 1.35, nz * 1.35, fast) * 0.22;
+        this.idleWobbleField[i] = wave * this.idleWobbleAmp;
+      }
       if ((i + flowPhase) % flowStride !== 0) {
         continue;
       }
@@ -2616,15 +2642,21 @@ class SoundSculpture {
     ) {
       const amount = shake * deltaTime * 0.1;
       const salt = this.formingTime * 3.2 + this.morphologySeed;
+      const flowStride = getHeavyGrowthFlowStride();
+      const flowPhase = Math.floor(this.formingTime * 20) % flowStride;
       for (let i = 0; i < this.accumulated.length; i += 1) {
+        if ((i + flowPhase) % flowStride !== 0) {
+          continue;
+        }
         const idx = i * 3;
         const bx = this.basePositions[idx];
         const by = this.basePositions[idx + 1];
         const bz = this.basePositions[idx + 2];
         growthFlow(bx * 2.8, by * 2.8, bz * 2.8, salt, this._curlOut);
-        this.flowField[idx] += this._curlOut.x * amount;
-        this.flowField[idx + 1] += this._curlOut.y * amount;
-        this.flowField[idx + 2] += this._curlOut.z * amount;
+        const boost = flowStride;
+        this.flowField[idx] += this._curlOut.x * amount * boost;
+        this.flowField[idx + 1] += this._curlOut.y * amount * boost;
+        this.flowField[idx + 2] += this._curlOut.z * amount * boost;
       }
     }
   }
@@ -3718,6 +3750,11 @@ class SoundSculpture {
     const my = this.morphAxis.y;
     const mz = this.morphAxis.z;
     const w = this.morphWeights;
+    const heavyPattern = isHeavyGrowthPatternAlgorithm();
+    const cheapGrain = (x: number, y: number, z: number, salt: number) => {
+      const v = Math.sin(x * 127.1 + y * 311.7 + z * 74.7 + salt * 19.3) * 43758.5453;
+      return v - Math.floor(v);
+    };
 
     for (let i = 0; i < this.accumulated.length; i += 1) {
       const index = i * 3;
@@ -3747,9 +3784,16 @@ class SoundSculpture {
         smoothstep(0.56, 0.18, along);
       const audioSalt = this.spectralPhase * 1.7 + this.carvingPhase * 0.9 + bands.centroid * 11.0 + bands.contrast * 7.0;
       const largeForm = growthPattern(nx, ny, nz, audioSalt);
-      const surfaceGrain = growthPattern(nx, ny, nz, audioSalt + 6.3);
-      const chiselNoise = growthPattern(nx, ny, nz, audioSalt + 13.7);
-      const spikeNoise = growthPattern(nx, ny, nz, audioSalt + 28.9);
+      // 重い pattern は追加オクターブをハッシュ近似にして呼び出し回数を抑える
+      const surfaceGrain = heavyPattern
+        ? largeForm * 0.55 + (cheapGrain(nx, ny, nz, audioSalt + 6.3) * 2 - 1) * 0.45
+        : growthPattern(nx, ny, nz, audioSalt + 6.3);
+      const chiselNoise = heavyPattern
+        ? largeForm * 0.4 + (cheapGrain(nx, ny, nz, audioSalt + 13.7) * 2 - 1) * 0.6
+        : growthPattern(nx, ny, nz, audioSalt + 13.7);
+      const spikeNoise = heavyPattern
+        ? chiselNoise * 0.65 + (cheapGrain(nx, ny, nz, audioSalt + 28.9) * 2 - 1) * 0.35
+        : growthPattern(nx, ny, nz, audioSalt + 28.9);
       const torusRing =
         (1 - smoothstep(0, 0.44, Math.abs(along))) * perp * (0.82 + bands.overall * 0.55);
       const monolithCap = smoothstep(0.18, 0.88, along) * axisFocusA * (0.95 + bands.overall * 0.5);
@@ -4194,8 +4238,8 @@ class SoundSculpture {
     const salt = this.spectralPhase * 0.7 + bands.centroid * 4.0;
     const skipLive = liveAmount < 0.0001;
     const heavyFlow = isHeavyGrowthFlowAlgorithm();
-    const flowStride = heavyFlow ? 2 : 1;
-    const flowPhase = heavyFlow ? (Math.floor(this.formingTime * 28) & 1) : 0;
+    const flowStride = getHeavyGrowthFlowStride();
+    const flowPhase = heavyFlow ? (Math.floor(this.formingTime * 28) % flowStride) : 0;
 
     for (let i = 0; i < this.accumulated.length; i += 1) {
       const idx = i * 3;
@@ -5651,6 +5695,7 @@ const audioInputSelect = document.querySelector<HTMLSelectElement>("#audio-input
 const refreshAudioDevicesButton = document.querySelector<HTMLButtonElement>("#refresh-audio-devices");
 const audioScopeCanvas = document.querySelector<HTMLCanvasElement>("#audio-scope");
 const controlPanelShell = document.querySelector<HTMLElement>("#control-panel-shell");
+const controlPanel = document.querySelector<HTMLElement>("#control-panel");
 const toggleControlPanelButton = document.querySelector<HTMLButtonElement>("#hud-panel-toggle");
 const tuningSlidersRoot = document.querySelector<HTMLElement>("#tuning-sliders");
 const tuningExportText = document.querySelector<HTMLTextAreaElement>("#tuning-export-text");
@@ -5676,6 +5721,7 @@ if (
   !refreshAudioDevicesButton ||
   !audioScopeCanvas ||
   !controlPanelShell ||
+  !controlPanel ||
   !toggleControlPanelButton ||
   !tuningSlidersRoot ||
   !tuningExportText ||
@@ -5697,6 +5743,46 @@ const visualStyle = getActiveVisualStyle();
 // classic エンジンの作品スタイルだけ環境を差し替える
 const styleEnvActive = sculptureMode === "classic";
 const sceneEnv = styleEnvActive ? visualStyle.env : NEUTRAL_ENVIRONMENT;
+const daytimeBackgroundInput = document.querySelector<HTMLInputElement>("#daytime-background");
+const liveWeatherInput = document.querySelector<HTMLInputElement>("#live-weather");
+const liveWeatherStatusEl = document.querySelector<HTMLElement>("#live-weather-status");
+const weatherPreviewRoot = document.querySelector<HTMLElement>("#weather-preview");
+const weatherPreviewPresetSelect =
+  document.querySelector<HTMLSelectElement>("#weather-preview-preset");
+const weatherPreviewValueEl = document.querySelector<HTMLElement>("#weather-preview-value");
+const weatherPreviewRainInput = document.querySelector<HTMLInputElement>("#weather-preview-rain");
+const weatherPreviewWindInput = document.querySelector<HTMLInputElement>("#weather-preview-wind");
+const weatherPreviewRainValueEl = document.querySelector<HTMLElement>("#weather-preview-rain-value");
+const weatherPreviewWindValueEl = document.querySelector<HTMLElement>("#weather-preview-wind-value");
+const weatherPreviewLiveButton = document.querySelector<HTMLButtonElement>("#weather-preview-live");
+const daytimePreviewRoot = document.querySelector<HTMLElement>("#daytime-preview");
+const daytimePreviewHourInput = document.querySelector<HTMLInputElement>("#daytime-preview-hour");
+const daytimePreviewValueEl = document.querySelector<HTMLElement>("#daytime-preview-value");
+const daytimePreviewLiveButton = document.querySelector<HTMLButtonElement>("#daytime-preview-live");
+let daytimeBackgroundEnabled = readDaytimeBackgroundEnabled();
+/** 天気リンクはオプトイン。起動時は常にオフ */
+let liveWeatherEnabled = false;
+/** DEV: null なら実時刻、数値なら 0..24 のプレビュー時刻 */
+let daytimePreviewHour: number | null = null;
+/** DEV: live なら API / 実天気、それ以外は合成天気 */
+let weatherPreviewPreset: WeatherPreviewPresetId = "live";
+let weatherPreviewRainScale = 1;
+let weatherPreviewWindScale = 1;
+let liveWeatherSnapshot: LiveWeatherSnapshot | null = null;
+let liveWeatherRefreshTimer: number | null = null;
+let liveWeatherFetchSeq = 0;
+if (daytimeBackgroundInput) {
+  daytimeBackgroundInput.checked = daytimeBackgroundEnabled;
+}
+if (liveWeatherInput) {
+  liveWeatherInput.checked = false;
+}
+if (import.meta.env.DEV && daytimePreviewRoot) {
+  daytimePreviewRoot.hidden = false;
+}
+if (import.meta.env.DEV && weatherPreviewRoot) {
+  weatherPreviewRoot.hidden = false;
+}
 let growthAlgorithmId: GrowthAlgorithmId =
   sculptureMode === "carve" ? "flow-field" : parseGrowthAlgorithmId();
 setGrowthAlgorithmId(growthAlgorithmId);
@@ -5757,7 +5843,9 @@ const applyExperienceUi = (id: ExperienceId) => {
   appElement.classList.toggle("style-metamorphosis", entry.visualStyleId === "metamorphosis");
   appElement.classList.toggle("style-vita", entry.visualStyleId === "vita");
   appElement.classList.toggle("style-monolith", entry.visualStyleId === "monolith");
-  appElement.classList.toggle("theme-dark", styleEnvActive && visualStyle.themeDark);
+  if (!daytimeBackgroundEnabled) {
+    appElement.classList.toggle("theme-dark", styleEnvActive && visualStyle.themeDark);
+  }
 
   // 既定の VITA のコピーは index.html を正とし、SEO向けの初期HTMLを保持する。
   // URLで別スタイルを開いた場合のみ、そのスタイル固有のコピーへ差し替える。
@@ -5846,61 +5934,202 @@ const applyControlPanelPosition = (position: ControlPanelPosition) => {
   controlPanelShell.style.bottom = "auto";
 };
 
-// 閉じているときのドック位置（CSS の top: calc(50% - 1rem), right: clamp(2rem, 6vw, 4.5rem) と同じ）。
-const getControlPanelDockPosition = (): ControlPanelPosition => {
-  const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
-  const rightOffset = clamp(window.innerWidth * 0.06, 2 * rem, 4.5 * rem);
-  const iconSize = 2 * rem;
+const getHudRemPx = () => Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+
+const getHudPanelGap = () => getHudRemPx() * 0.55;
+
+const getToggleIconSize = () => getHudRemPx() * 2;
+
+const getToggleDockPosition = (): ControlPanelPosition => {
+  const rem = getHudRemPx();
+  const iconSize = getToggleIconSize();
+  const bottomOffset = clamp(window.innerHeight * 0.045, 1.5 * rem, 3.2 * rem);
   return {
-    left: window.innerWidth - rightOffset - iconSize,
-    top: window.innerHeight * 0.5 - iconSize * 0.5,
+    left: (window.innerWidth - iconSize) * 0.5,
+    top: window.innerHeight - bottomOffset - iconSize,
   };
 };
 
-const centerControlPanelShell = () => {
-  const rect = controlPanelShell.getBoundingClientRect();
+const applyTogglePosition = (position: ControlPanelPosition, options?: { animate?: boolean }) => {
+  const iconSize = getToggleIconSize();
+  const margin = 12;
+  const left = clamp(position.left, margin, window.innerWidth - iconSize - margin);
+  const top = clamp(position.top, margin, window.innerHeight - iconSize - margin);
+
+  if (options?.animate === false) {
+    toggleControlPanelButton.style.transition = "none";
+  }
+
+  toggleControlPanelButton.style.left = `${left}px`;
+  toggleControlPanelButton.style.top = `${top}px`;
+  toggleControlPanelButton.style.right = "auto";
+  toggleControlPanelButton.style.bottom = "auto";
+
+  if (options?.animate === false) {
+    void toggleControlPanelButton.offsetWidth;
+    toggleControlPanelButton.style.transition = "";
+  }
+};
+
+const positionPanelShellAtCenter = () => {
+  const shellWidth = controlPanelShell.offsetWidth;
+  const shellHeight = controlPanelShell.offsetHeight;
   applyControlPanelPosition({
-    left: (window.innerWidth - rect.width) * 0.5,
-    top: (window.innerHeight - rect.height) * 0.5,
+    left: (window.innerWidth - shellWidth) * 0.5,
+    top: (window.innerHeight - shellHeight) * 0.5,
   });
 };
+
+// トグルをパネル下中央に保つ位置関係で、パネルをトグル基準に置く。
+const positionPanelRelativeToToggle = () => {
+  const toggleRect = toggleControlPanelButton.getBoundingClientRect();
+  const iconSize = getToggleIconSize();
+  const gap = getHudPanelGap();
+  const panelWidth = controlPanel.offsetWidth;
+  const panelHeight = controlPanel.offsetHeight;
+  applyControlPanelPosition({
+    left: toggleRect.left - (panelWidth - iconSize) * 0.5,
+    top: toggleRect.top - gap - panelHeight,
+  });
+};
+
+const getToggleOpenPosition = (): ControlPanelPosition => {
+  const shellLeft = parseFloat(controlPanelShell.style.left) || 0;
+  const shellTop = parseFloat(controlPanelShell.style.top) || 0;
+  const panelWidth = controlPanel.offsetWidth;
+  const panelHeight = controlPanel.offsetHeight;
+  const iconSize = getToggleIconSize();
+  return {
+    left: shellLeft + (panelWidth - iconSize) * 0.5,
+    top: shellTop + panelHeight + getHudPanelGap(),
+  };
+};
+
+const syncToggleToPanel = (animate = false) => {
+  applyTogglePosition(getToggleOpenPosition(), { animate });
+};
+
+const playControlPanelOpenAnimation = () => {
+  controlPanel.classList.remove("is-closing", "is-opening", "is-open");
+  void controlPanel.offsetWidth;
+  controlPanel.classList.add("is-opening");
+
+  window.setTimeout(() => {
+    controlPanel.classList.add("is-open");
+  }, 200);
+
+  const onAnimationEnd = (event: AnimationEvent) => {
+    if (event.target !== controlPanel || event.animationName !== "control-panel-expand") return;
+    controlPanel.removeEventListener("animationend", onAnimationEnd);
+    controlPanel.classList.remove("is-opening");
+    controlPanel.style.clipPath = "none";
+  };
+
+  controlPanel.addEventListener("animationend", onAnimationEnd);
+};
+
+const playControlPanelCloseAnimation = (): Promise<void> =>
+  new Promise((resolve) => {
+    controlPanel.classList.remove("is-opening", "is-open");
+    controlPanel.classList.add("is-closing");
+
+    const onAnimationEnd = (event: AnimationEvent) => {
+      if (event.target !== controlPanel || event.animationName !== "control-panel-collapse") return;
+      controlPanel.removeEventListener("animationend", onAnimationEnd);
+      controlPanel.classList.remove("is-closing");
+      resolve();
+    };
+
+    controlPanel.addEventListener("animationend", onAnimationEnd);
+  });
+
+let controlPanelHasOpenedOnce = false;
 
 const openControlPanel = () => {
   controlPanelDragged = false;
   controlPanelShell.classList.remove("is-collapsed");
-  centerControlPanelShell();
+
+  const placePanel = () => {
+    if (controlPanelHasOpenedOnce) {
+      // 閉じた場所（トグル位置）を基準に開く。
+      positionPanelRelativeToToggle();
+    } else {
+      positionPanelShellAtCenter();
+    }
+  };
+
+  placePanel();
+  playControlPanelOpenAnimation();
+
+  requestAnimationFrame(() => {
+    placePanel();
+    // パネルと重なる／上に乗る場合も含め、下中央へすーっと寄せる。
+    syncToggleToPanel(true);
+    controlPanelHasOpenedOnce = true;
+  });
+
   toggleControlPanelButton.setAttribute("aria-expanded", "true");
 };
 
-const closeControlPanel = () => {
-  controlPanelDragged = false;
+const closeControlPanel = async () => {
+  // 閉じてもトグルはその場に留める。
+  await playControlPanelCloseAnimation();
   controlPanelShell.classList.add("is-collapsed");
-  applyControlPanelPosition(getControlPanelDockPosition());
   toggleControlPanelButton.setAttribute("aria-expanded", "false");
 };
+
+let panelToggleClickTimer: number | null = null;
 
 toggleControlPanelButton.addEventListener("click", () => {
   if (suppressPanelToggleClick) {
     suppressPanelToggleClick = false;
     return;
   }
-  if (controlPanelShell.classList.contains("is-collapsed")) {
-    openControlPanel();
-  } else {
-    closeControlPanel();
+  // ダブルクリックと単クリックを切り分ける。
+  if (panelToggleClickTimer !== null) {
+    window.clearTimeout(panelToggleClickTimer);
+    panelToggleClickTimer = null;
+    return;
+  }
+  panelToggleClickTimer = window.setTimeout(() => {
+    panelToggleClickTimer = null;
+    if (controlPanelShell.classList.contains("is-collapsed")) {
+      openControlPanel();
+    } else {
+      closeControlPanel();
+    }
+  }, 260);
+});
+
+toggleControlPanelButton.addEventListener("dblclick", (event) => {
+  event.preventDefault();
+  if (panelToggleClickTimer !== null) {
+    window.clearTimeout(panelToggleClickTimer);
+    panelToggleClickTimer = null;
+  }
+  suppressPanelToggleClick = true;
+
+  const dock = getToggleDockPosition();
+  applyTogglePosition(dock, { animate: true });
+
+  // パネルが開いていれば、同じ位置関係のまま初期位置へ寄せる。
+  if (!controlPanelShell.classList.contains("is-collapsed")) {
+    const iconSize = getToggleIconSize();
+    const gap = getHudPanelGap();
+    applyControlPanelPosition({
+      left: dock.left - (controlPanel.offsetWidth - iconSize) * 0.5,
+      top: dock.top - gap - controlPanel.offsetHeight,
+    });
+    controlPanelDragged = false;
   }
 });
 
-// 初期表示の右センターアンカーを left/top ベースへ変換しておく（位置トランジションを効かせるため）。
+// 初期表示: トグルを画面の真ん中下にドック。
 {
-  controlPanelShell.style.transition = "none";
-  const rect = controlPanelShell.getBoundingClientRect();
-  applyControlPanelPosition({ left: rect.left, top: rect.top });
-  void controlPanelShell.offsetWidth;
-  controlPanelShell.style.transition = "";
+  applyTogglePosition(getToggleDockPosition(), { animate: false });
 }
 
-// Drag the panel by the toggle button (acts as a handle).
+// トグルをドラッグして移動（閉じているときはトグルのみ、開いているときはパネルごと）。
 {
   let dragging = false;
   let didMove = false;
@@ -5909,6 +6138,7 @@ toggleControlPanelButton.addEventListener("click", () => {
   let startY = 0;
   let originLeft = 0;
   let originTop = 0;
+  let dragMode: "toggle" | "panel" = "toggle";
 
   const startDrag = (event: PointerEvent) => {
     // Only left click / primary pointer.
@@ -5917,13 +6147,22 @@ toggleControlPanelButton.addEventListener("click", () => {
     dragging = true;
     didMove = false;
     toggleControlPanelButton.setPointerCapture(pointerId);
-
-    const rect = controlPanelShell.getBoundingClientRect();
     startX = event.clientX;
     startY = event.clientY;
-    originLeft = rect.left;
-    originTop = rect.top;
-    controlPanelShell.classList.add("is-dragging");
+
+    if (controlPanelShell.classList.contains("is-collapsed")) {
+      dragMode = "toggle";
+      const rect = toggleControlPanelButton.getBoundingClientRect();
+      originLeft = rect.left;
+      originTop = rect.top;
+    } else {
+      dragMode = "panel";
+      const rect = controlPanelShell.getBoundingClientRect();
+      originLeft = rect.left;
+      originTop = rect.top;
+      controlPanelShell.classList.add("is-dragging");
+    }
+    toggleControlPanelButton.classList.add("is-dragging");
   };
 
   const moveDrag = (event: PointerEvent) => {
@@ -5934,16 +6173,26 @@ toggleControlPanelButton.addEventListener("click", () => {
       didMove = true;
     }
     if (!didMove) return;
-    applyControlPanelPosition({ left: originLeft + dx, top: originTop + dy });
+
+    if (dragMode === "toggle") {
+      applyTogglePosition(
+        { left: originLeft + dx, top: originTop + dy },
+        { animate: false },
+      );
+    } else {
+      applyControlPanelPosition({ left: originLeft + dx, top: originTop + dy });
+      syncToggleToPanel(false);
+    }
   };
 
   const endDrag = (event: PointerEvent) => {
     if (!dragging || pointerId !== event.pointerId) return;
     dragging = false;
     controlPanelShell.classList.remove("is-dragging");
+    toggleControlPanelButton.classList.remove("is-dragging");
     pointerId = null;
     suppressPanelToggleClick = didMove;
-    if (didMove) controlPanelDragged = true;
+    if (didMove && dragMode === "panel") controlPanelDragged = true;
     didMove = false;
   };
 
@@ -5953,14 +6202,17 @@ toggleControlPanelButton.addEventListener("click", () => {
   toggleControlPanelButton.addEventListener("pointercancel", endDrag);
 
   window.addEventListener("resize", () => {
-    if (controlPanelDragged) {
-      // 画面内に収まるようにだけ調整する。
+    if (controlPanelShell.classList.contains("is-collapsed")) {
+      // ユーザー位置を保ちつつ画面内に収める。
+      const rect = toggleControlPanelButton.getBoundingClientRect();
+      applyTogglePosition({ left: rect.left, top: rect.top }, { animate: false });
+    } else if (controlPanelDragged) {
       const rect = controlPanelShell.getBoundingClientRect();
       applyControlPanelPosition({ left: rect.left, top: rect.top });
-    } else if (controlPanelShell.classList.contains("is-collapsed")) {
-      applyControlPanelPosition(getControlPanelDockPosition());
+      syncToggleToPanel(false);
     } else {
-      centerControlPanelShell();
+      // 開いているときはトグル基準の位置関係を保つ。
+      positionPanelRelativeToToggle();
     }
   });
 }
@@ -5968,7 +6220,15 @@ toggleControlPanelButton.addEventListener("click", () => {
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(sceneEnv.background);
 
-const themeDarkActive = styleEnvActive && visualStyle.themeDark;
+let themeDarkActive = styleEnvActive && visualStyle.themeDark;
+if (daytimeBackgroundEnabled) {
+  themeDarkActive = (
+    daytimePreviewHour === null
+      ? sampleDaytimeAtmosphere()
+      : sampleDaytimeAtmosphereFromHour(daytimePreviewHour)
+  ).dark;
+  appElement.classList.toggle("theme-dark", themeDarkActive);
+}
 
 const sceneBackground = new SceneBackground(sceneEnv, themeDarkActive);
 sceneBackground.setFromBackground(scene.background as THREE.Color, themeDarkActive, 0);
@@ -6000,8 +6260,8 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = sceneEnv.exposure;
 renderer.shadowMap.enabled = true;
-// 影のエッジをぼかして柔らかい光に
-renderer.shadowMap.type = THREE.VSMShadowMap;
+// VSM は回転時に自己影が飛んで急に暗くなることがあるため、PCF Soft を使う
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 // monolith スタイル: 環境マップで石・金属の質感を出す
 if (sceneEnv.environmentMap) {
@@ -6148,13 +6408,21 @@ const sculptureHitLocal = new THREE.Vector3();
 const sculptureRotateAxis = new THREE.Vector3();
 const sculptureRotateDelta = new THREE.Quaternion();
 const SCULPTURE_ROTATE_SPEED = 0.0058;
-const BACKGROUND_ROTATE_RATIO = 0.03;
 const sculptureStickEl = document.querySelector<HTMLElement>("#sculpture-stick");
+const sculptureStickHandleEl = document.querySelector<HTMLElement>(".hud-reticle__handle");
 const sculptureStick = {
   active: false,
   id: null as number | null,
   x: 0,
   y: 0,
+};
+const sculptureStickMove = {
+  active: false,
+  id: null as number | null,
+  startX: 0,
+  startY: 0,
+  originLeft: 0,
+  originTop: 0,
 };
 const SCULPTURE_STICK_MAX_SPEED = 0.72;
 
@@ -6171,19 +6439,57 @@ const applySculptureRotation = (yaw: number, pitch: number) => {
   sculptureRotateAxis.set(0, 1, 0).applyQuaternion(camera.quaternion);
   sculptureRotateDelta.setFromAxisAngle(sculptureRotateAxis, yaw);
   sculpture.group.quaternion.premultiply(sculptureRotateDelta);
-  sceneBackground.rotateView(sculptureRotateAxis, yaw * BACKGROUND_ROTATE_RATIO);
-  sculptureRotateDelta.setFromAxisAngle(sculptureRotateAxis, yaw * BACKGROUND_ROTATE_RATIO);
-  lightRig.quaternion.premultiply(sculptureRotateDelta);
 
   sculptureRotateAxis.set(1, 0, 0).applyQuaternion(camera.quaternion);
   sculptureRotateDelta.setFromAxisAngle(sculptureRotateAxis, pitch);
   sculpture.group.quaternion.premultiply(sculptureRotateDelta);
-  sceneBackground.rotateView(sculptureRotateAxis, pitch * BACKGROUND_ROTATE_RATIO);
-  sculptureRotateDelta.setFromAxisAngle(sculptureRotateAxis, pitch * BACKGROUND_ROTATE_RATIO);
-  lightRig.quaternion.premultiply(sculptureRotateDelta);
+};
+
+/** オブジェクトを初期向きへすっと戻す。ライト・背景はワールド固定のまま。 */
+const sculptureOrientIdentity = new THREE.Quaternion();
+const sculptureOrientReset = {
+  active: false,
+  elapsed: 0,
+  duration: 0.85,
+  fromSculpture: new THREE.Quaternion(),
+};
+
+const resetSculptureViewOrientation = () => {
+  pendingYaw = 0;
+  pendingPitch = 0;
+  sculptureOrientReset.fromSculpture.copy(sculpture.group.quaternion);
+  sculptureOrientReset.elapsed = 0;
+  sculptureOrientReset.active = true;
+};
+
+const updateSculptureOrientationReset = (deltaTime: number) => {
+  if (!sculptureOrientReset.active) return;
+  if (sculptureStick.active || sculptureDrag.active) {
+    sculptureOrientReset.active = false;
+    return;
+  }
+
+  sculptureOrientReset.elapsed += deltaTime;
+  const t = Math.min(1, sculptureOrientReset.elapsed / sculptureOrientReset.duration);
+  // easeOutCubic: 速く動き始めてゆっくり止まる
+  const eased = 1 - (1 - t) ** 3;
+
+  sculpture.group.quaternion
+    .copy(sculptureOrientReset.fromSculpture)
+    .slerp(sculptureOrientIdentity, eased);
+
+  if (t >= 1) {
+    sculptureOrientReset.active = false;
+    sculpture.group.quaternion.identity();
+    hudTickPitchDisplay = 0.5;
+    hudTickYawDisplay = 0.5;
+    hudTickPreviousYaw = 0;
+    hudTickYawUnwrapped = 0;
+  }
 };
 
 const updateSculptureRotationEasing = (deltaTime: number) => {
+  if (sculptureOrientReset.active) return;
   if (sculptureStick.active) {
     pendingYaw += sculptureStick.x * SCULPTURE_STICK_MAX_SPEED * deltaTime;
     pendingPitch += sculptureStick.y * SCULPTURE_STICK_MAX_SPEED * deltaTime;
@@ -6238,8 +6544,111 @@ const releaseSculptureStick = () => {
   }
 };
 
+const applySculptureStickPosition = (left: number, top: number) => {
+  if (!sculptureStickEl) return;
+  const margin = 12;
+  const width = sculptureStickEl.offsetWidth;
+  const height = sculptureStickEl.offsetHeight;
+  const handleWidth = sculptureStickHandleEl?.offsetWidth ?? 0;
+  // ハンドルは右側に出るので、右端だけ余裕を見る
+  const clampedLeft = clamp(left, margin, window.innerWidth - width - handleWidth - margin);
+  const clampedTop = clamp(top, margin, window.innerHeight - height - margin);
+  sculptureStickEl.style.left = `${clampedLeft}px`;
+  sculptureStickEl.style.top = `${clampedTop}px`;
+  sculptureStickEl.style.right = "auto";
+  sculptureStickEl.style.bottom = "auto";
+  sculptureStickEl.style.transform = "none";
+};
+
+let sculptureStickUserMoved = false;
+
+const getSculptureStickDockPosition = (): { left: number; top: number } => {
+  if (!sculptureStickEl) return { left: 0, top: 0 };
+  const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  // intro / hud-left-bottom と同じ左インセットに揃える
+  const introEl = document.querySelector<HTMLElement>(".intro");
+  const leftBottomEl = document.querySelector<HTMLElement>(".hud-left-bottom");
+  const alignedLeft =
+    introEl?.getBoundingClientRect().left ??
+    leftBottomEl?.getBoundingClientRect().left ??
+    clamp(window.innerWidth * 0.045, 1.5 * rem, 3.2 * rem);
+  const height = sculptureStickEl.offsetHeight;
+  const introBottom = introEl?.getBoundingClientRect().bottom ?? 0;
+  const metersTop = leftBottomEl?.getBoundingClientRect().top ?? window.innerHeight;
+  const centerY = (introBottom + metersTop) * 0.5;
+  return {
+    left: alignedLeft,
+    top: centerY - height * 0.5,
+  };
+};
+
+const dockSculptureStick = (options: { force?: boolean; animate?: boolean } = {}) => {
+  if (!sculptureStickEl) return;
+  if (!options.force && sculptureStickUserMoved) return;
+  const dock = getSculptureStickDockPosition();
+  if (options.animate) {
+    sculptureStickEl.classList.add("is-docking");
+    const clearDocking = (event: TransitionEvent) => {
+      if (event.propertyName !== "left" && event.propertyName !== "top") return;
+      sculptureStickEl.classList.remove("is-docking");
+      sculptureStickEl.removeEventListener("transitionend", clearDocking);
+    };
+    sculptureStickEl.addEventListener("transitionend", clearDocking);
+    window.setTimeout(() => {
+      sculptureStickEl.classList.remove("is-docking");
+      sculptureStickEl.removeEventListener("transitionend", clearDocking);
+    }, 520);
+  }
+  applySculptureStickPosition(dock.left, dock.top);
+};
+
+requestAnimationFrame(() => {
+  dockSculptureStick();
+});
+window.addEventListener("resize", () => dockSculptureStick());
+
+if (sculptureStickHandleEl && sculptureStickEl) {
+  sculptureStickHandleEl.addEventListener("pointerdown", (event: PointerEvent) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    releaseSculptureStick();
+    sculptureStickMove.active = true;
+    sculptureStickMove.id = event.pointerId;
+    sculptureStickMove.startX = event.clientX;
+    sculptureStickMove.startY = event.clientY;
+    const rect = sculptureStickEl.getBoundingClientRect();
+    sculptureStickMove.originLeft = rect.left;
+    sculptureStickMove.originTop = rect.top;
+    sculptureStickHandleEl.setPointerCapture(event.pointerId);
+    sculptureStickEl.classList.add("is-moving");
+    sculptureStickUserMoved = true;
+  });
+
+  sculptureStickHandleEl.addEventListener("pointermove", (event: PointerEvent) => {
+    if (!sculptureStickMove.active || sculptureStickMove.id !== event.pointerId) return;
+    event.preventDefault();
+    applySculptureStickPosition(
+      sculptureStickMove.originLeft + (event.clientX - sculptureStickMove.startX),
+      sculptureStickMove.originTop + (event.clientY - sculptureStickMove.startY),
+    );
+  });
+
+  const endSculptureStickMove = (event: PointerEvent) => {
+    if (sculptureStickMove.id !== event.pointerId) return;
+    sculptureStickMove.active = false;
+    sculptureStickMove.id = null;
+    sculptureStickEl.classList.remove("is-moving");
+  };
+
+  sculptureStickHandleEl.addEventListener("pointerup", endSculptureStickMove);
+  sculptureStickHandleEl.addEventListener("pointercancel", endSculptureStickMove);
+}
+
 sculptureStickEl?.addEventListener("pointerdown", (event: PointerEvent) => {
   if (event.button !== 0) return;
+  if (sculptureStickMove.active) return;
+  if (event.target instanceof Element && event.target.closest(".hud-reticle__handle")) return;
   event.preventDefault();
   sculptureStick.active = true;
   sculptureStick.id = event.pointerId;
@@ -6262,6 +6671,20 @@ sculptureStickEl?.addEventListener("pointerup", (event: PointerEvent) => {
 
 sculptureStickEl?.addEventListener("pointercancel", releaseSculptureStick);
 sculptureStickEl?.addEventListener("lostpointercapture", releaseSculptureStick);
+
+sculptureStickEl?.addEventListener("dblclick", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  releaseSculptureStick();
+  if (sculptureStickMove.active) {
+    sculptureStickMove.active = false;
+    sculptureStickMove.id = null;
+    sculptureStickEl.classList.remove("is-moving");
+  }
+  sculptureStickUserMoved = false;
+  dockSculptureStick({ force: true, animate: true });
+  resetSculptureViewOrientation();
+});
 
 const pokeSculptureAtClient = (clientX: number, clientY: number) => {
   const targets = sculpture.getPointerTargets?.();
@@ -6355,7 +6778,7 @@ renderer.domElement.addEventListener("pointercancel", () => {
   starPointerActive = false;
 });
 
-// ライト一式はリグにまとめ、オブジェクト回転の3%だけゆっくり追従する
+// ライト一式はワールド上方に固定（回しても光源方向は変わらない）
 const lightRig = new THREE.Group();
 scene.add(lightRig);
 
@@ -6369,9 +6792,10 @@ keyLight.shadow.camera.left = -9;
 keyLight.shadow.camera.right = 9;
 keyLight.shadow.camera.top = 9;
 keyLight.shadow.camera.bottom = -9;
-keyLight.shadow.radius = 9;
-keyLight.shadow.blurSamples = 16;
-keyLight.shadow.bias = -0.0004;
+keyLight.shadow.radius = 4;
+keyLight.shadow.blurSamples = 8;
+keyLight.shadow.bias = -0.0002;
+keyLight.shadow.normalBias = 0.035;
 lightRig.add(keyLight);
 lightRig.add(keyLight.target);
 
@@ -6470,6 +6894,10 @@ const hudMidEl = document.querySelector<HTMLElement>("#hud-mid");
 const hudHighEl = document.querySelector<HTMLElement>("#hud-high");
 const hudSignalEl = document.querySelector<HTMLElement>("#hud-signal");
 const hudStatusEl = document.querySelector<HTMLElement>("#hud-status");
+const hudLocalTimeEl = document.querySelector<HTMLElement>("#hud-local-time");
+const hudLocalTimeFieldEl = document.querySelector<HTMLElement>("#hud-local-time-field");
+const hudWeatherEl = document.querySelector<HTMLElement>("#hud-weather");
+const hudWeatherFieldEl = document.querySelector<HTMLElement>("#hud-weather-field");
 const hudTimecodeEl = document.querySelector<HTMLElement>("#hud-timecode");
 const hudBpmEl = document.querySelector<HTMLElement>("#hud-bpm");
 const hudAlgoEl = document.querySelector<HTMLElement>("#hud-algo");
@@ -6515,6 +6943,7 @@ const updateHudTickLengths = (marks: HTMLElement[], position: number, cyclic = f
 };
 
 const updateHudTicks = (deltaTime: number) => {
+  if (sculptureOrientReset.active) return;
   // オブジェクト前方をカメラ上方向で測る（ドラッグ回転と同じ軸。ワールドYだと横回転でも縦が動く）
   hudTickForward.set(0, 0, 1).applyQuaternion(sculpture.group.quaternion);
   hudTickCamUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
@@ -6840,8 +7269,382 @@ let envMix = 0;
 const envBackgroundForming = new THREE.Color(sceneEnv.background);
 const envBackgroundComplete = new THREE.Color(sceneEnv.backgroundComplete);
 const envLerp = (from: number, to: number) => from + (to - from) * envMix;
+let lastLocalTimeLabel = "";
+const daytimeZenithColor = new THREE.Color();
+const daytimeHorizonColor = new THREE.Color();
+let daytimeSkyActive = false;
+
+const getActiveDaytimeHour = () =>
+  daytimePreviewHour === null ? getLocalHourFraction() : daytimePreviewHour;
+
+const syncDaytimePreviewLabel = () => {
+  if (!daytimePreviewValueEl) {
+    return;
+  }
+  daytimePreviewValueEl.textContent =
+    daytimePreviewHour === null ? "LIVE" : formatAmPmFromHour(daytimePreviewHour);
+};
+
+const LIVE_WEATHER_REFRESH_MS = 10 * 60 * 1000;
+
+const clearLiveWeatherRefreshTimer = () => {
+  if (liveWeatherRefreshTimer !== null) {
+    window.clearInterval(liveWeatherRefreshTimer);
+    liveWeatherRefreshTimer = null;
+  }
+};
+
+const setLiveWeatherStatus = (message: string, visible = true) => {
+  if (!liveWeatherStatusEl) {
+    return;
+  }
+  liveWeatherStatusEl.hidden = !visible || !message;
+  liveWeatherStatusEl.textContent = message;
+};
+
+const updateWeatherHud = () => {
+  if (hudWeatherFieldEl) {
+    hudWeatherFieldEl.hidden = !liveWeatherEnabled;
+  }
+  if (!hudWeatherEl) {
+    return;
+  }
+  if (!liveWeatherEnabled) {
+    hudWeatherEl.textContent = "---";
+    return;
+  }
+  const active = getActiveWeatherSnapshot();
+  const prefix =
+    import.meta.env.DEV && weatherPreviewPreset !== "live" ? "DEV/" : "";
+  hudWeatherEl.textContent = active ? `${prefix}${active.label}` : "...";
+};
+
+const getActiveWeatherSnapshot = (): LiveWeatherSnapshot | null => {
+  if (import.meta.env.DEV && weatherPreviewPreset !== "live") {
+    return createWeatherPreviewSnapshot(
+      weatherPreviewPreset,
+      weatherPreviewRainScale,
+      weatherPreviewWindScale,
+    );
+  }
+  if (!liveWeatherEnabled) {
+    return null;
+  }
+  return liveWeatherSnapshot;
+};
+
+const isWeatherFxActive = () =>
+  (import.meta.env.DEV && weatherPreviewPreset !== "live") || liveWeatherEnabled;
+
+const snapshotToSceneWeather = (snapshot: LiveWeatherSnapshot | null): SceneWeatherState => {
+  if (!snapshot || !isWeatherFxActive()) {
+    return {
+      enabled: false,
+      cloudCover: 0,
+      rainIntensity: 0,
+      windStrength: 0,
+      windX: 0,
+      windZ: 0,
+      snow: false,
+      fogBoost: 1,
+    };
+  }
+  const fogBoost =
+    1 +
+    snapshot.cloudCover * 0.35 +
+    snapshot.rainIntensity * 0.55 +
+    (snapshot.condition === "fog" ? 0.7 : 0);
+  return {
+    enabled: true,
+    cloudCover: snapshot.cloudCover,
+    rainIntensity: snapshot.rainIntensity,
+    windStrength: snapshot.windStrength,
+    windX: snapshot.windX,
+    windZ: snapshot.windZ,
+    snow: snapshot.condition === "snow",
+    fogBoost,
+  };
+};
+
+const applyLiveWeatherToScene = () => {
+  sceneBackground.setWeather(snapshotToSceneWeather(getActiveWeatherSnapshot()));
+  updateWeatherHud();
+};
+
+const tintHexWithClouds = (hex: number, cloudCover: number) => {
+  const active = getActiveWeatherSnapshot();
+  if (!isWeatherFxActive() || !active || cloudCover < 0.05) {
+    return hex;
+  }
+  return applyCloudCoverToSky(hex, hex, cloudCover).zenith;
+};
+
+const syncDaytimeEnvironmentTargets = () => {
+  const activeWeather = getActiveWeatherSnapshot();
+  const cloudCover =
+    isWeatherFxActive() && activeWeather ? activeWeather.cloudCover : 0;
+
+  if (daytimeBackgroundEnabled) {
+    const atmosphere = sampleDaytimeAtmosphereFromHour(getActiveDaytimeHour());
+    const sky = applyCloudCoverToSky(atmosphere.zenith, atmosphere.horizon, cloudCover);
+    const forming = tintHexWithClouds(atmosphere.forming, cloudCover);
+    const complete = tintHexWithClouds(atmosphere.complete, cloudCover);
+    envBackgroundForming.setHex(forming);
+    envBackgroundComplete.setHex(complete);
+    daytimeZenithColor.setHex(sky.zenith);
+    daytimeHorizonColor.setHex(sky.horizon);
+    daytimeSkyActive = true;
+    const bgCss = `#${forming.toString(16).padStart(6, "0")}`;
+    appElement.classList.add("daytime-linked");
+    appElement.style.setProperty("--daytime-bg", bgCss);
+    themeDarkActive = atmosphere.dark || cloudCover > 0.72;
+    appElement.classList.toggle("theme-dark", themeDarkActive);
+    return;
+  }
+  daytimeSkyActive = false;
+  appElement.classList.remove("daytime-linked");
+  appElement.style.removeProperty("--daytime-bg");
+  envBackgroundForming.setHex(tintHexWithClouds(sceneEnv.background, cloudCover));
+  envBackgroundComplete.setHex(tintHexWithClouds(sceneEnv.backgroundComplete, cloudCover));
+  const styleDark = styleEnvActive && visualStyle.themeDark;
+  themeDarkActive = styleDark || cloudCover > 0.78;
+  appElement.classList.toggle("theme-dark", themeDarkActive);
+};
+
+const updateLocalClockHud = () => {
+  if (hudLocalTimeFieldEl) {
+    hudLocalTimeFieldEl.hidden = !daytimeBackgroundEnabled;
+  }
+  if (!daytimeBackgroundEnabled) {
+    return;
+  }
+  const label =
+    daytimePreviewHour === null
+      ? formatLocalAmPm()
+      : formatAmPmFromHour(daytimePreviewHour);
+  if (label === lastLocalTimeLabel) {
+    return;
+  }
+  lastLocalTimeLabel = label;
+  if (hudLocalTimeEl) {
+    hudLocalTimeEl.textContent = label;
+  }
+};
+
+const refreshLiveWeather = async () => {
+  if (!liveWeatherEnabled) {
+    return;
+  }
+  const seq = ++liveWeatherFetchSeq;
+  setLiveWeatherStatus("天気を取得しています…");
+  updateWeatherHud();
+  try {
+    const snapshot = await fetchLiveWeatherForUser();
+    if (seq !== liveWeatherFetchSeq || !liveWeatherEnabled) {
+      return;
+    }
+    liveWeatherSnapshot = snapshot;
+    const nearTokyo =
+      Math.abs(snapshot.latitude - 35.6812) < 0.05 &&
+      Math.abs(snapshot.longitude - 139.7671) < 0.05;
+    setLiveWeatherStatus(
+      nearTokyo
+        ? `反映中（位置フォールバック・東京） · ${snapshot.label}`
+        : `反映中 · ${snapshot.label}`,
+    );
+    applyLiveWeatherToScene();
+    syncDaytimeEnvironmentTargets();
+  } catch (error) {
+    if (seq !== liveWeatherFetchSeq || !liveWeatherEnabled) {
+      return;
+    }
+    console.error(error);
+    setLiveWeatherStatus("天気の取得に失敗しました。しばらくして再試行します");
+    updateWeatherHud();
+  }
+};
+
+const stopLiveWeather = () => {
+  liveWeatherFetchSeq += 1;
+  clearLiveWeatherRefreshTimer();
+  liveWeatherSnapshot = null;
+  setLiveWeatherStatus("", false);
+  applyLiveWeatherToScene();
+  syncDaytimeEnvironmentTargets();
+};
+
+const startLiveWeather = () => {
+  clearLiveWeatherRefreshTimer();
+  void refreshLiveWeather();
+  liveWeatherRefreshTimer = window.setInterval(() => {
+    void refreshLiveWeather();
+  }, LIVE_WEATHER_REFRESH_MS);
+};
+
+daytimeBackgroundInput?.addEventListener("change", () => {
+  daytimeBackgroundEnabled = Boolean(daytimeBackgroundInput.checked);
+  writeDaytimeBackgroundEnabled(daytimeBackgroundEnabled);
+  lastLocalTimeLabel = "";
+  updateLocalClockHud();
+  syncDaytimeEnvironmentTargets();
+});
+
+liveWeatherInput?.addEventListener("change", () => {
+  liveWeatherEnabled = Boolean(liveWeatherInput.checked);
+  writeLiveWeatherEnabled(liveWeatherEnabled);
+  if (liveWeatherEnabled) {
+    startLiveWeather();
+  } else {
+    stopLiveWeather();
+  }
+  // DEV プレビュー中はチェックOFFでも効果を維持
+  if (weatherPreviewPreset !== "live") {
+    applyLiveWeatherToScene();
+    syncDaytimeEnvironmentTargets();
+  }
+  updateWeatherHud();
+});
+
+const syncWeatherPreviewLabel = () => {
+  if (!weatherPreviewValueEl) {
+    return;
+  }
+  if (weatherPreviewPreset === "live") {
+    weatherPreviewValueEl.textContent = "LIVE";
+    return;
+  }
+  const snap = createWeatherPreviewSnapshot(
+    weatherPreviewPreset,
+    weatherPreviewRainScale,
+    weatherPreviewWindScale,
+  );
+  weatherPreviewValueEl.textContent = snap.label;
+};
+
+const syncWeatherPreviewScaleLabels = () => {
+  if (weatherPreviewRainValueEl) {
+    weatherPreviewRainValueEl.textContent = weatherPreviewRainScale.toFixed(2);
+  }
+  if (weatherPreviewWindValueEl) {
+    weatherPreviewWindValueEl.textContent = weatherPreviewWindScale.toFixed(2);
+  }
+};
+
+const applyWeatherPreviewSelection = () => {
+  syncWeatherPreviewLabel();
+  syncWeatherPreviewScaleLabels();
+  if (weatherPreviewPreset !== "live") {
+    setLiveWeatherStatus(`DEV プレビュー · ${weatherPreviewValueEl?.textContent ?? ""}`);
+    applyLiveWeatherToScene();
+    syncDaytimeEnvironmentTargets();
+    return;
+  }
+  if (liveWeatherEnabled) {
+    if (liveWeatherSnapshot) {
+      setLiveWeatherStatus(`反映中 · ${liveWeatherSnapshot.label}`);
+    } else {
+      setLiveWeatherStatus("天気を取得しています…");
+      void refreshLiveWeather();
+    }
+  } else {
+    setLiveWeatherStatus("", false);
+  }
+  applyLiveWeatherToScene();
+  syncDaytimeEnvironmentTargets();
+};
+
+const parseWeatherPreviewPreset = (value: string): WeatherPreviewPresetId => {
+  switch (value) {
+    case "clear":
+    case "cloudy":
+    case "overcast":
+    case "fog":
+    case "rain":
+    case "rain-heavy":
+    case "snow":
+    case "windy":
+    case "storm":
+      return value;
+    default:
+      return "live";
+  }
+};
+
+weatherPreviewPresetSelect?.addEventListener("change", () => {
+  weatherPreviewPreset = parseWeatherPreviewPreset(weatherPreviewPresetSelect.value);
+  applyWeatherPreviewSelection();
+});
+
+weatherPreviewRainInput?.addEventListener("input", () => {
+  weatherPreviewRainScale = Number(weatherPreviewRainInput.value);
+  applyWeatherPreviewSelection();
+});
+
+weatherPreviewWindInput?.addEventListener("input", () => {
+  weatherPreviewWindScale = Number(weatherPreviewWindInput.value);
+  applyWeatherPreviewSelection();
+});
+
+weatherPreviewLiveButton?.addEventListener("click", () => {
+  weatherPreviewPreset = "live";
+  weatherPreviewRainScale = 1;
+  weatherPreviewWindScale = 1;
+  if (weatherPreviewPresetSelect) {
+    weatherPreviewPresetSelect.value = "live";
+  }
+  if (weatherPreviewRainInput) {
+    weatherPreviewRainInput.value = "1";
+  }
+  if (weatherPreviewWindInput) {
+    weatherPreviewWindInput.value = "1";
+  }
+  applyWeatherPreviewSelection();
+});
+
+if (import.meta.env.DEV) {
+  syncWeatherPreviewLabel();
+  syncWeatherPreviewScaleLabels();
+}
+
+daytimePreviewHourInput?.addEventListener("input", () => {
+  daytimePreviewHour = Number(daytimePreviewHourInput.value);
+  syncDaytimePreviewLabel();
+  lastLocalTimeLabel = "";
+  updateLocalClockHud();
+  syncDaytimeEnvironmentTargets();
+});
+
+daytimePreviewLiveButton?.addEventListener("click", () => {
+  daytimePreviewHour = null;
+  if (daytimePreviewHourInput) {
+    daytimePreviewHourInput.value = String(getLocalHourFraction());
+  }
+  syncDaytimePreviewLabel();
+  lastLocalTimeLabel = "";
+  updateLocalClockHud();
+  syncDaytimeEnvironmentTargets();
+});
+
+if (daytimePreviewHourInput) {
+  daytimePreviewHourInput.value = String(getLocalHourFraction());
+}
+syncDaytimePreviewLabel();
+
+syncDaytimeEnvironmentTargets();
+updateLocalClockHud();
+updateWeatherHud();
+(scene.background as THREE.Color).copy(envBackgroundForming);
+renderer.setClearColor(scene.background as THREE.Color);
+if (daytimeSkyActive) {
+  sceneBackground.setDaytimeSky(daytimeZenithColor, daytimeHorizonColor, themeDarkActive, 0);
+} else {
+  sceneBackground.setFromBackground(scene.background as THREE.Color, themeDarkActive, 0);
+}
+syncSceneFog();
+applyLiveWeatherToScene();
 
 const updateEnvironmentCrossfade = (deltaTime: number) => {
+  syncDaytimeEnvironmentTargets();
   const target = isComplete ? 1 : 0;
   const seconds = styleEnvActive ? Math.max(1, visualStyle.completion.seconds * 0.7) : 1;
   const rate = isComplete ? 1 / seconds : 2.4;
@@ -6850,7 +7653,16 @@ const updateEnvironmentCrossfade = (deltaTime: number) => {
     .copy(envBackgroundForming)
     .lerp(envBackgroundComplete, envMix);
   renderer.setClearColor(scene.background as THREE.Color);
-  sceneBackground.setFromBackground(scene.background as THREE.Color, themeDarkActive, envMix);
+  if (daytimeSkyActive) {
+    sceneBackground.setDaytimeSky(
+      daytimeZenithColor,
+      daytimeHorizonColor,
+      themeDarkActive,
+      envMix,
+    );
+  } else {
+    sceneBackground.setFromBackground(scene.background as THREE.Color, themeDarkActive, envMix);
+  }
   syncSceneFog();
   keyLight.intensity = envLerp(sceneEnv.key, sceneEnv.keyComplete);
   fillLight.intensity = envLerp(sceneEnv.fill, sceneEnv.fillComplete);
@@ -7332,9 +8144,11 @@ const render = () => {
   );
   drawAudioScope(waveform, rhythmEvents, bandMeters, bandSoloMode, latestStructure, speciesProfile);
   updateHud(displayBands, rhythmEvents, deltaTime);
+  updateLocalClockHud();
   updateEnvironmentCrossfade(deltaTime);
   clearAudioCameraSway();
   viewControls.update();
+  updateSculptureOrientationReset(deltaTime);
   updateSculptureRotationEasing(deltaTime);
   updateAudioCameraSway(
     deltaTime,

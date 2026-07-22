@@ -302,6 +302,18 @@ class BackgroundDome {
     this.material.uniforms.uHaloStrength.value = this.baseHaloStrength;
   }
 
+  /** 時間帯スカイ: 天頂・地平を直接指定（朝日・夕暮れのグラデーション用） */
+  setSkyGradient(zenith: THREE.Color, horizon: THREE.Color, dark: boolean) {
+    const top = this.material.uniforms.uTop.value as THREE.Color;
+    const bottom = this.material.uniforms.uBottom.value as THREE.Color;
+    const halo = this.material.uniforms.uHalo.value as THREE.Color;
+    top.copy(zenith);
+    bottom.copy(horizon);
+    halo.copy(zenith).lerp(horizon, dark ? 0.45 : 0.55);
+    this.baseHaloStrength = dark ? 0.55 : 0.82;
+    this.material.uniforms.uHaloStrength.value = this.baseHaloStrength;
+  }
+
   update(time: number, audio: number, camera?: THREE.Vector3) {
     this.material.uniforms.uTime.value = time;
     this.material.uniforms.uAudio.value = audio;
@@ -1246,6 +1258,232 @@ class StudioFloor {
   }
 }
 
+/** 実天気の雨・雪ストリーク */
+class WeatherPrecipField {
+  readonly points: THREE.Points;
+  private readonly positions: Float32Array;
+  private readonly speeds: Float32Array;
+  private readonly geometry: THREE.BufferGeometry;
+  private readonly material: THREE.PointsMaterial;
+  private intensity = 0;
+  private windX = 0;
+  private windZ = 0;
+  private snowMode = false;
+
+  constructor(count = 1400) {
+    this.positions = new Float32Array(count * 3);
+    this.speeds = new Float32Array(count);
+    for (let i = 0; i < count; i += 1) {
+      this.resetDrop(i, true);
+    }
+    this.geometry = new THREE.BufferGeometry();
+    this.geometry.setAttribute("position", new THREE.BufferAttribute(this.positions, 3));
+    this.material = new THREE.PointsMaterial({
+      size: 0.045,
+      sizeAttenuation: true,
+      color: 0xb8c4d4,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      map: getPointCircleMap(),
+      toneMapped: false,
+    });
+    this.points = new THREE.Points(this.geometry, this.material);
+    this.points.frustumCulled = false;
+    this.points.renderOrder = -3;
+    this.points.visible = false;
+  }
+
+  private resetDrop(index: number, scatterY: boolean) {
+    const idx = index * 3;
+    this.positions[idx] = (Math.random() - 0.5) * 28;
+    this.positions[idx + 1] = scatterY ? Math.random() * 16 - 2 : 10 + Math.random() * 8;
+    this.positions[idx + 2] = (Math.random() - 0.5) * 28;
+    this.speeds[index] = 6.5 + Math.random() * 7.5;
+  }
+
+  setWeather(intensity: number, windX: number, windZ: number, snow: boolean) {
+    this.intensity = Math.min(1, Math.max(0, intensity));
+    this.windX = windX;
+    this.windZ = windZ;
+    this.snowMode = snow;
+    this.points.visible = this.intensity > 0.02;
+    this.material.color.setHex(snow ? 0xd8e0ea : 0x9aacc0);
+    this.material.size = snow ? 0.055 : 0.038;
+  }
+
+  update(deltaTime: number) {
+    if (this.intensity < 0.02) {
+      this.material.opacity = 0;
+      return;
+    }
+    const count = this.speeds.length;
+    const fallMul = this.snowMode ? 0.35 : 1;
+    // 風が強いほど雨筋が横に流れる（見た目の傾き）
+    const windMag = Math.hypot(this.windX, this.windZ);
+    const windMul = (this.snowMode ? 2.2 : 4.8) * (0.35 + windMag * 2.4);
+    for (let i = 0; i < count; i += 1) {
+      // 弱い雨のときは一部の粒だけ動かす
+      if (i / count > 0.25 + this.intensity * 0.75) {
+        continue;
+      }
+      const idx = i * 3;
+      this.positions[idx] += this.windX * deltaTime * windMul;
+      this.positions[idx + 1] -= this.speeds[i] * deltaTime * fallMul * (0.7 + this.intensity);
+      this.positions[idx + 2] += this.windZ * deltaTime * windMul;
+      if (this.positions[idx + 1] < -3.5) {
+        this.resetDrop(i, false);
+      }
+    }
+    this.geometry.attributes.position.needsUpdate = true;
+    this.material.opacity = 0.15 + this.intensity * 0.55;
+  }
+}
+
+/**
+ * 風そのものを見せる流線・飛沫。
+ * 雨がなくても風速で横方向のストリークが流れる。
+ */
+class WeatherWindField {
+  readonly lines: THREE.LineSegments;
+  private readonly positions: Float32Array;
+  private readonly speeds: Float32Array;
+  private readonly lengths: Float32Array;
+  private readonly geometry: THREE.BufferGeometry;
+  private readonly material: THREE.LineBasicMaterial;
+  private strength = 0;
+  private windX = 0;
+  private windZ = 0;
+  private readonly count: number;
+
+  constructor(count = 220) {
+    this.count = count;
+    // 各ストリークは 2 頂点（始点・終点）
+    this.positions = new Float32Array(count * 6);
+    this.speeds = new Float32Array(count);
+    this.lengths = new Float32Array(count);
+    for (let i = 0; i < count; i += 1) {
+      this.resetStreak(i, true);
+    }
+    this.geometry = new THREE.BufferGeometry();
+    this.geometry.setAttribute("position", new THREE.BufferAttribute(this.positions, 3));
+    this.material = new THREE.LineBasicMaterial({
+      color: 0xc5d0dc,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    });
+    this.lines = new THREE.LineSegments(this.geometry, this.material);
+    this.lines.frustumCulled = false;
+    this.lines.renderOrder = -2;
+    this.lines.visible = false;
+  }
+
+  private resetStreak(index: number, scatter: boolean) {
+    const head = index * 6;
+    const x = (Math.random() - 0.5) * 30;
+    const y = scatter ? Math.random() * 10 - 1.2 : -1 + Math.random() * 9;
+    const z = (Math.random() - 0.5) * 30;
+    this.positions[head] = x;
+    this.positions[head + 1] = y;
+    this.positions[head + 2] = z;
+    this.positions[head + 3] = x;
+    this.positions[head + 4] = y;
+    this.positions[head + 5] = z;
+    this.speeds[index] = 4.5 + Math.random() * 7.5;
+    this.lengths[index] = 0.35 + Math.random() * 1.1;
+  }
+
+  setWeather(strength: number, windX: number, windZ: number) {
+    this.strength = Math.min(1, Math.max(0, strength));
+    this.windX = windX;
+    this.windZ = windZ;
+    this.lines.visible = this.strength > 0.08;
+    // 強風ほど少し明るく・寒色寄り
+    const cold = this.strength > 0.55 ? 0xb8c8dc : 0xc8d2de;
+    this.material.color.setHex(cold);
+  }
+
+  update(deltaTime: number) {
+    if (this.strength < 0.08) {
+      this.material.opacity = 0;
+      return;
+    }
+    let wx = this.windX;
+    let wz = this.windZ;
+    const mag = Math.hypot(wx, wz);
+    if (mag < 0.001) {
+      // 向きが無い場合はデフォルト方向
+      wx = this.strength;
+      wz = 0;
+    } else {
+      wx /= mag;
+      wz /= mag;
+    }
+    const speedBase = 3.2 + this.strength * 14;
+    const streakLenBase = 0.55 + this.strength * 2.4;
+    for (let i = 0; i < this.count; i += 1) {
+      // 弱い風では一部だけ表示
+      if (i / this.count > 0.2 + this.strength * 0.8) {
+        const head = i * 6;
+        this.positions[head + 1] = -99;
+        this.positions[head + 4] = -99;
+        continue;
+      }
+      const head = i * 6;
+      const move = this.speeds[i] * deltaTime * speedBase * (0.55 + this.strength);
+      this.positions[head] += wx * move;
+      this.positions[head + 2] += wz * move;
+      // わずかな上下の揺らぎ
+      this.positions[head + 1] += Math.sin(this.positions[head] * 0.35 + i) * deltaTime * 0.35;
+      const len = this.lengths[i] * streakLenBase;
+      this.positions[head + 3] = this.positions[head] - wx * len;
+      this.positions[head + 4] = this.positions[head + 1] + len * 0.04;
+      this.positions[head + 5] = this.positions[head + 2] - wz * len;
+
+      // 視野外へ出たら風上側に戻す
+      if (
+        Math.abs(this.positions[head]) > 16 ||
+        Math.abs(this.positions[head + 2]) > 16 ||
+        this.positions[head + 1] < -2.2 ||
+        this.positions[head + 1] > 11
+      ) {
+        this.resetStreak(i, false);
+        // 風上側に寄せて再配置
+        this.positions[i * 6] = -wx * (10 + Math.random() * 8) + (Math.random() - 0.5) * 8;
+        this.positions[i * 6 + 2] = -wz * (10 + Math.random() * 8) + (Math.random() - 0.5) * 8;
+      }
+    }
+    this.geometry.attributes.position.needsUpdate = true;
+    this.material.opacity = 0.12 + this.strength * 0.55;
+  }
+}
+
+export type SceneWeatherState = {
+  enabled: boolean;
+  cloudCover: number;
+  rainIntensity: number;
+  windStrength: number;
+  windX: number;
+  windZ: number;
+  snow: boolean;
+  fogBoost: number;
+};
+
+const DEFAULT_WEATHER_STATE: SceneWeatherState = {
+  enabled: false,
+  cloudCover: 0,
+  rainIntensity: 0,
+  windStrength: 0,
+  windX: 0,
+  windZ: 0,
+  snow: false,
+  fogBoost: 1,
+};
+
 export class SceneBackground {
   private readonly parallaxRoot = new THREE.Group();
   private readonly viewDelta = new THREE.Quaternion();
@@ -1257,6 +1495,8 @@ export class SceneBackground {
   private readonly dust: DustMoteField | null;
   private readonly biolume: BiolumeMoteField | null;
   private readonly biolumeFar: BiolumeMoteField | null;
+  private readonly weatherPrecip: WeatherPrecipField;
+  private readonly weatherWind: WeatherWindField;
   private readonly cyclorama: StudioCyclorama | null;
   private readonly studioFloor: StudioFloor | null;
   readonly floor: THREE.Mesh;
@@ -1268,6 +1508,7 @@ export class SceneBackground {
   private envMix = 0;
   private formingColor = new THREE.Color();
   private completeColor = new THREE.Color();
+  private weather: SceneWeatherState = { ...DEFAULT_WEATHER_STATE };
 
   constructor(sceneEnv: VisualStyleEnv, themeDark: boolean) {
     this.profile = sceneEnv.backgroundProfile;
@@ -1354,6 +1595,8 @@ export class SceneBackground {
           intensityScale: 0.8,
         })
       : null;
+    this.weatherPrecip = new WeatherPrecipField();
+    this.weatherWind = new WeatherWindField();
     this.cyclorama = this.profile?.studioSpace ? new StudioCyclorama() : null;
     this.studioFloor = this.profile?.studioSpace ? new StudioFloor() : null;
 
@@ -1424,6 +1667,8 @@ export class SceneBackground {
     if (this.biolumeFar) {
       this.parallaxRoot.add(this.biolumeFar.points);
     }
+    this.parallaxRoot.add(this.weatherPrecip.points);
+    this.parallaxRoot.add(this.weatherWind.lines);
     if (this.cyclorama) {
       scene.add(this.cyclorama.mesh);
     }
@@ -1438,6 +1683,23 @@ export class SceneBackground {
   rotateView(axis: THREE.Vector3, angle: number) {
     this.viewDelta.setFromAxisAngle(axis, angle);
     this.parallaxRoot.quaternion.premultiply(this.viewDelta);
+    this.parallaxRoot.updateMatrixWorld();
+  }
+
+  /** 視差ルートの向きを取得する。 */
+  getViewOrientation(target = new THREE.Quaternion()) {
+    return target.copy(this.parallaxRoot.quaternion);
+  }
+
+  /** 視差ルートの向きを設定する。 */
+  setViewOrientation(orientation: THREE.Quaternion) {
+    this.parallaxRoot.quaternion.copy(orientation);
+    this.parallaxRoot.updateMatrixWorld();
+  }
+
+  /** 視差ルートを初期向きへ戻す。 */
+  resetViewOrientation() {
+    this.parallaxRoot.quaternion.identity();
     this.parallaxRoot.updateMatrixWorld();
   }
 
@@ -1459,14 +1721,43 @@ export class SceneBackground {
     this.studioFloor?.setFromBackground(color, envMix);
   }
 
+  /** 時間帯リンク用: 天頂〜地平の空グラデーションを直接当てる */
+  setDaytimeSky(zenith: THREE.Color, horizon: THREE.Color, dark: boolean, envMix = 0) {
+    this.envMix = envMix;
+    this.dome.setSkyGradient(zenith, horizon, dark);
+    this.innerDome?.setSkyGradient(zenith, horizon, dark);
+    // 床・サイクラマは地平色寄り
+    this.cyclorama?.setFromBackground(horizon, envMix);
+    this.studioFloor?.setFromBackground(horizon, envMix);
+  }
+
+  setWeather(state: SceneWeatherState) {
+    this.weather = { ...state };
+    this.weatherPrecip.setWeather(
+      state.enabled ? state.rainIntensity : 0,
+      state.windX,
+      state.windZ,
+      state.snow,
+    );
+    this.weatherWind.setWeather(
+      state.enabled ? state.windStrength : 0,
+      state.windX,
+      state.windZ,
+    );
+  }
+
+  getWeather() {
+    return this.weather;
+  }
+
   getFogDensity(dark: boolean) {
     if (this.profile?.fogDensity !== undefined) {
-      return this.profile.fogDensity;
+      return this.profile.fogDensity * this.weather.fogBoost;
     }
     if (this.profile?.studioSpace) {
-      return dark ? 0.0078 : 0.0048;
+      return (dark ? 0.0078 : 0.0048) * this.weather.fogBoost;
     }
-    return dark ? 0.0078 : 0.0058;
+    return (dark ? 0.0078 : 0.0058) * this.weather.fogBoost;
   }
 
   syncFog(scene: THREE.Scene, color: THREE.Color, dark: boolean) {
@@ -1549,6 +1840,29 @@ export class SceneBackground {
     this.dust?.update(bands, deltaTime, camera.position);
     this.biolume?.update(bands, deltaTime, camera.position);
     this.biolumeFar?.update(bands, deltaTime, camera.position);
+    this.weatherPrecip.update(deltaTime);
+    this.weatherWind.update(deltaTime);
+
+    // 風で浮遊粒子を流す（はっきり分かる速度）
+    if (this.weather.enabled && this.weather.windStrength > 0.05) {
+      const gust = 2.8 + this.weather.windStrength * 9.5;
+      const wx = this.weather.windX * deltaTime * gust;
+      const wz = this.weather.windZ * deltaTime * gust;
+      const pushDust = (field: DustMoteField | BiolumeMoteField | null, scale: number) => {
+        if (!field) return;
+        const pos = field.points.geometry.attributes.position as THREE.BufferAttribute;
+        const arr = pos.array as Float32Array;
+        for (let i = 0; i < arr.length; i += 3) {
+          arr[i] += wx * scale;
+          arr[i + 1] += Math.sin(arr[i] * 0.4 + arr[i + 2] * 0.25) * deltaTime * 0.15 * scale;
+          arr[i + 2] += wz * scale;
+        }
+        pos.needsUpdate = true;
+      };
+      pushDust(this.dust, 1);
+      pushDust(this.biolume, 0.75);
+      pushDust(this.biolumeFar, 0.45);
+    }
 
     if (this.cyclorama) {
       this.cyclorama.applyEnvMix(this.envMix);

@@ -338,9 +338,9 @@ export class CarveSculpture implements SculptureExperience {
     this.innerCore = new THREE.Mesh(this.geometry, this.innerCoreMaterial);
     this.surface = new THREE.Mesh(this.surfaceGeometry, this.surfaceMaterial);
     this.core.castShadow = true;
-    this.core.receiveShadow = true;
+    this.core.receiveShadow = false;
     this.innerCore.castShadow = true;
-    this.innerCore.receiveShadow = true;
+    this.innerCore.receiveShadow = false;
     this.innerCore.scale.setScalar(0.12);
     this.surface.castShadow = false;
     this.surface.receiveShadow = false;
