@@ -33,13 +33,13 @@
           id="sculpture-stick"
           class="hud-reticle"
           role="application"
-          aria-label="オブジェクト回転スティック"
+          aria-label="Sculpture rotate stick"
         >
           <span
             class="hud-reticle__handle"
             role="button"
             tabindex="0"
-            aria-label="レティクルをドラッグして移動"
+            aria-label="Drag reticle to move"
           >
             <span class="hud-reticle__bar" aria-hidden="true"></span>
             <span class="hud-reticle__bar" aria-hidden="true"></span>
@@ -98,49 +98,151 @@
       </div>
 
       <aside class="control-panel-shell is-collapsed" id="control-panel-shell">
-        <section class="control-panel" id="control-panel" aria-label="設定と操作">
+        <section class="control-panel" id="control-panel" aria-label="Controls">
         <details class="control-group" open>
-          <summary class="control-group__summary">入力・操作</summary>
+          <summary class="control-group__summary">Recording</summary>
           <div class="control-group__body">
-            <label class="sculpture-mode" id="experience-style-field" hidden>
-              作品スタイル
+            <div class="actions">
+              <div class="actions__row actions__row--input">
+                <button
+                  id="start-audio"
+                  type="button"
+                  class="actions__use"
+                  aria-pressed="false"
+                  data-status-armed="Input device ready — press Start Recording"
+                >
+                  Use Input Device
+                </button>
+                <button
+                  id="start-system-audio"
+                  type="button"
+                  class="actions__use"
+                  aria-pressed="false"
+                  data-status-armed="System audio ready — press Start Recording"
+                >
+                  Use System Audio
+                </button>
+                <button
+                  id="start-dev-audio"
+                  type="button"
+                  class="actions__use"
+                  hidden
+                  aria-pressed="false"
+                  data-status-armed="Dev audio ready — press Start Recording"
+                >
+                  Dev Audio (s04)
+                </button>
+              </div>
+              <div class="actions__row actions__row--record">
+                <button
+                  id="begin-recording"
+                  type="button"
+                  class="input-device__start"
+                  disabled
+                  data-status-preparing="Preparing audio input…"
+                  data-status-ready="Forming — drag to rotate"
+                >
+                  Start Recording
+                </button>
+              </div>
+              <div class="actions__row actions__row--sculpture">
+                <button
+                  id="reset-sculpture"
+                  type="button"
+                  disabled
+                  data-status-reset="Reset — ready to form again"
+                >
+                  Reset
+                </button>
+                <button
+                  id="complete-sculpture"
+                  type="button"
+                  disabled
+                  data-status-done="Complete — orbit and adjust lights"
+                >
+                  Complete
+                </button>
+                <button
+                  id="export-gltf"
+                  type="button"
+                  disabled
+                  data-status-exporting="Exporting GLTF…"
+                  data-status-success="Complete — GLTF exported"
+                  data-status-error="GLTF export failed"
+                >
+                  Export GLTF
+                </button>
+              </div>
+            </div>
+            <div class="input-device-panel" id="input-device-panel" aria-disabled="true">
+              <label class="input-device-mode" for="audio-input-device">Input Device</label>
+              <div class="input-device-panel__row">
+                <select
+                  id="audio-input-device"
+                  class="sculpture-mode__select input-device__select"
+                  disabled
+                >
+                  <option value="default">既定の入力</option>
+                </select>
+                <button
+                  id="refresh-audio-devices"
+                  type="button"
+                  class="input-device__refresh"
+                  disabled
+                  data-status-success="Device list updated"
+                  data-status-error="Failed to refresh device list"
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+            <p id="status" class="status" data-status-idle="Standby">Standby</p>
+          </div>
+        </details>
+
+        <details class="control-group">
+          <summary class="control-group__summary">Settings</summary>
+          <div class="control-group__body">
+            <label class="sculpture-mode" id="experience-style-field">
+              Style
               <select id="experience-style" class="sculpture-mode__select">
               </select>
             </label>
-            <label class="sculpture-mode" hidden>
-              成長アルゴリズム
+            <label class="sculpture-mode" id="growth-algorithm-field">
+              Growth Algorithm
               <select id="growth-algorithm" class="sculpture-mode__select growth-algorithm__select">
               </select>
             </label>
             <p id="growth-algorithm-hint" class="growth-algorithm-hint"></p>
-            <div class="input-device-panel">
-              <label class="input-device-mode">
-                入力デバイス
-                <select id="audio-input-device" class="sculpture-mode__select input-device__select">
-                  <option value="default">既定の入力</option>
-                </select>
-              </label>
-              <button
-                id="refresh-audio-devices"
-                type="button"
-                class="input-device__refresh"
-                data-status-success="入力デバイス一覧を更新しました"
-                data-status-error="入力デバイス一覧の更新に失敗しました"
-              >
-                デバイス一覧を更新
-              </button>
-            </div>
+            <details class="band-test-panel" id="band-test-panel" hidden>
+              <summary class="band-test-panel__summary">Band Test</summary>
+              <div class="band-test-panel__body">
+                <p class="band-test-hint">
+                  Check meters, then solo a band to see what LIVE drives. Test tone: 80Hz → 1kHz → 7kHz.
+                </p>
+                <label class="band-test-solo">
+                  Solo (LIVE band)
+                  <select id="band-solo-mode" class="band-test-solo__select">
+                    <option value="off">All bands</option>
+                    <option value="low">Low → body</option>
+                    <option value="mid">Mid → surface</option>
+                    <option value="high">High → membrane</option>
+                  </select>
+                </label>
+                <button id="band-tone-test" type="button" disabled>Play test tones (L→M→H)</button>
+              </div>
+            </details>
             <label class="daytime-bg-option">
               <input id="daytime-background" type="checkbox" />
               <span class="daytime-bg-option__text">
-                <span class="daytime-bg-option__title">背景を現地の時間帯に合わせる</span>
+                <span class="daytime-bg-option__title">Match local time of day</span>
                 <span class="daytime-bg-option__hint">朝・昼・夕・夜で色が変わり、文字色も反転します</span>
               </span>
             </label>
             <label class="daytime-bg-option">
               <input id="live-weather" type="checkbox" />
               <span class="daytime-bg-option__text">
-                <span class="daytime-bg-option__title">背景を現地の天気に合わせる</span>
+                <span class="daytime-bg-option__title">Match local weather</span>
                 <span class="daytime-bg-option__hint">位置情報と天気APIで晴れ・曇り・雨・風を反映します</span>
               </span>
             </label>
@@ -214,86 +316,10 @@
             <section class="audio-scope" aria-label="Audio scope" hidden>
               <canvas id="audio-scope" width="420" height="120"></canvas>
             </section>
-            <div class="actions">
-              <div class="actions__row actions__row--input">
-                <button
-                  id="start-audio"
-                  type="button"
-                  data-status-preparing="マイク入力を準備中"
-                  data-status-ready="形成中 - ドラッグでオブジェクトを回せます"
-                >
-                  マイク入力を開始
-                </button>
-                <button
-                  id="start-system-audio"
-                  type="button"
-                  data-status-preparing="PC/タブ音声を準備中"
-                  data-status-ready="形成中 - ドラッグでオブジェクトを回せます"
-                >
-                  PC/タブ音声を開始
-                </button>
-                <button
-                  id="start-dev-audio"
-                  type="button"
-                  hidden
-                  data-status-preparing="開発用音源を準備中"
-                  data-status-ready="形成中 (s04) - ドラッグでオブジェクトを回せます"
-                >
-                  開発用音源 (s04)
-                </button>
-              </div>
-              <div class="actions__row actions__row--sculpture">
-                <button
-                  id="reset-sculpture"
-                  type="button"
-                  disabled
-                  data-status-reset="リセットしました - 形成を再開できます"
-                >
-                  リセット
-                </button>
-                <button
-                  id="complete-sculpture"
-                  type="button"
-                  disabled
-                  data-status-done="完成 - マウス操作とライト調整ができます"
-                >
-                  完了
-                </button>
-                <button
-                  id="export-gltf"
-                  type="button"
-                  disabled
-                  data-status-exporting="GLTF を書き出し中"
-                  data-status-success="完成 - GLTF を出力しました"
-                  data-status-error="GLTF 出力に失敗しました"
-                >
-                  GLTF 出力
-                </button>
-              </div>
-            </div>
-            <details class="band-test-panel" id="band-test-panel" hidden>
-              <summary class="band-test-panel__summary">音域テスト</summary>
-              <div class="band-test-panel__body">
-                <p class="band-test-hint">
-                  メーターで解析結果を確認し、ソロで LIVE がどの帯域だけ効いているか切り分けます。テスト音は 80Hz → 1kHz → 7kHz を順に再生します。
-                </p>
-                <label class="band-test-solo">
-                  ソロ（LIVE 帯域の切り分け）
-                  <select id="band-solo-mode" class="band-test-solo__select">
-                    <option value="off">通常（全帯域）</option>
-                    <option value="low">低音のみ → 全体振動</option>
-                    <option value="mid">中音のみ → 表面</option>
-                    <option value="high">高音のみ → 膜</option>
-                  </select>
-                </label>
-                <button id="band-tone-test" type="button" disabled>テスト音を再生（低→中→高）</button>
-              </div>
-            </details>
-            <p id="status" class="status" data-status-idle="待機中">待機中</p>
           </div>
         </details>
 
-        <details class="control-group control-group--dev" open>
+        <details class="control-group control-group--dev" id="dev-tuning-group" hidden open>
           <summary class="control-group__summary">開発チューニング</summary>
           <div class="control-group__body">
             <p class="tuning-hint">
@@ -328,12 +354,13 @@
         type="button"
         aria-controls="control-panel"
         aria-expanded="false"
-        aria-label="操作パネルを開閉（ドラッグで移動）"
+        aria-label="Open or close controls (drag to move)"
       >
         <span class="hud-panel-toggle__dots" aria-hidden="true"></span>
       </button>
 
       <canvas id="scene" aria-label="Sound reactive 3D sculpture"></canvas>
+      <p id="surface-badge" class="surface-badge" hidden aria-live="polite"></p>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

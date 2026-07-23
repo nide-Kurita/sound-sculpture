@@ -1,7 +1,7 @@
 import * as THREE from "three";
 
 /** クリックで巡回するパレット数（0=初期の青） */
-export const DITHER_PALETTE_COUNT = 12;
+export const DITHER_PALETTE_COUNT = 24;
 
 /**
  * 参照（vitekvisuals）寄りのマット陰影。
@@ -122,40 +122,100 @@ vec3 applyPalette(float t, float id) {
   vec3 black = vec3(0.0);
   vec3 white = vec3(1.0);
 
+  // 0 深藍→氷青
   if (id < 0.5) {
     return ramp5(t, black, vec3(0.05, 0.1, 0.28), vec3(0.12, 0.35, 0.78), vec3(0.45, 0.78, 0.98), white);
   }
+  // 1 グレー
   if (id < 1.5) {
     return vec3(t);
   }
+  // 2 ネオン CMY
   if (id < 2.5) {
     return ramp4(t, black, vec3(0.9, 0.05, 0.55), vec3(0.98, 0.88, 0.08), vec3(0.3, 0.98, 0.22));
   }
+  // 3 夕焼け
   if (id < 3.5) {
     return ramp5(t, black, vec3(0.35, 0.02, 0.08), vec3(0.92, 0.22, 0.08), vec3(1.0, 0.62, 0.18), vec3(1.0, 0.86, 0.72));
   }
+  // 4 紫→水色
   if (id < 4.5) {
     return ramp5(t, black, vec3(0.18, 0.02, 0.32), vec3(0.55, 0.12, 0.85), vec3(0.2, 0.75, 0.95), white);
   }
+  // 5 緑→黄→ピンク
   if (id < 5.5) {
     return ramp4(t, black, vec3(0.05, 0.55, 0.12), vec3(0.85, 0.95, 0.1), vec3(1.0, 0.2, 0.65));
   }
+  // 6 ティール→珊瑚
   if (id < 6.5) {
     return ramp5(t, black, vec3(0.02, 0.22, 0.28), vec3(0.05, 0.72, 0.68), vec3(1.0, 0.45, 0.32), vec3(1.0, 0.9, 0.55));
   }
+  // 7 群青→ミント
   if (id < 7.5) {
     return ramp5(t, black, vec3(0.02, 0.08, 0.35), vec3(0.15, 0.4, 0.95), vec3(0.35, 0.95, 0.88), white);
   }
+  // 8 ローズ→ラベンダー
   if (id < 8.5) {
     return ramp5(t, black, vec3(0.28, 0.02, 0.12), vec3(0.85, 0.18, 0.42), vec3(0.72, 0.45, 0.95), white);
   }
+  // 9 アンバー
   if (id < 9.5) {
     return ramp5(t, black, vec3(0.22, 0.08, 0.0), vec3(0.75, 0.35, 0.05), vec3(0.98, 0.78, 0.2), vec3(1.0, 0.95, 0.75));
   }
+  // 10 シアン→マゼンタ→黄
   if (id < 10.5) {
     return ramp4(t, black, vec3(0.0, 0.95, 0.95), vec3(0.95, 0.05, 0.9), vec3(1.0, 0.95, 0.15));
   }
-  return ramp5(t, black, vec3(0.9, 0.1, 0.2), vec3(0.15, 0.85, 0.25), vec3(0.15, 0.35, 0.95), vec3(0.95, 0.85, 0.2));
+  // 11 RGB スプラッシュ
+  if (id < 11.5) {
+    return ramp5(t, black, vec3(0.9, 0.1, 0.2), vec3(0.15, 0.85, 0.25), vec3(0.15, 0.35, 0.95), vec3(0.95, 0.85, 0.2));
+  }
+  // 12 モノクローム反転寄り（明るい紙）
+  if (id < 12.5) {
+    return ramp4(t, vec3(0.92), vec3(0.62), vec3(0.28), black);
+  }
+  // 13 セピア
+  if (id < 13.5) {
+    return ramp5(t, vec3(0.08, 0.05, 0.02), vec3(0.35, 0.22, 0.1), vec3(0.72, 0.52, 0.28), vec3(0.92, 0.82, 0.62), vec3(0.98, 0.94, 0.86));
+  }
+  // 14 森（深緑→苔→黄緑）
+  if (id < 14.5) {
+    return ramp5(t, black, vec3(0.02, 0.12, 0.06), vec3(0.08, 0.42, 0.18), vec3(0.45, 0.78, 0.22), vec3(0.88, 0.95, 0.55));
+  }
+  // 15 氷（ほぼ白青）
+  if (id < 15.5) {
+    return ramp5(t, vec3(0.02, 0.06, 0.12), vec3(0.15, 0.32, 0.48), vec3(0.45, 0.72, 0.88), vec3(0.78, 0.9, 0.98), white);
+  }
+  // 16 ホットピンク→紫
+  if (id < 16.5) {
+    return ramp4(t, black, vec3(0.55, 0.0, 0.35), vec3(1.0, 0.2, 0.65), vec3(0.85, 0.7, 1.0));
+  }
+  // 17 銅・錆
+  if (id < 17.5) {
+    return ramp5(t, black, vec3(0.18, 0.06, 0.04), vec3(0.55, 0.22, 0.08), vec3(0.85, 0.48, 0.22), vec3(0.95, 0.82, 0.55));
+  }
+  // 18 蛍光緑×黒
+  if (id < 18.5) {
+    return ramp4(t, black, vec3(0.02, 0.35, 0.08), vec3(0.35, 0.98, 0.15), vec3(0.85, 1.0, 0.55));
+  }
+  // 19 藍染め
+  if (id < 19.5) {
+    return ramp5(t, vec3(0.02, 0.04, 0.12), vec3(0.05, 0.12, 0.42), vec3(0.15, 0.35, 0.75), vec3(0.55, 0.72, 0.95), white);
+  }
+  // 20 パステル虹
+  if (id < 20.5) {
+    return ramp5(t, vec3(0.55, 0.45, 0.72), vec3(0.95, 0.55, 0.72), vec3(1.0, 0.82, 0.45), vec3(0.55, 0.92, 0.72), vec3(0.55, 0.78, 0.98));
+  }
+  // 21 ブラッドオレンジ
+  if (id < 21.5) {
+    return ramp4(t, black, vec3(0.45, 0.02, 0.05), vec3(0.95, 0.28, 0.05), vec3(1.0, 0.75, 0.35));
+  }
+  // 22 ウルトラマリン×金
+  if (id < 22.5) {
+    return ramp5(t, black, vec3(0.02, 0.05, 0.35), vec3(0.12, 0.28, 0.85), vec3(0.85, 0.65, 0.12), vec3(1.0, 0.92, 0.55));
+  }
+  // 23 薄荷（ミント→ローズ）
+  return ramp5(t, vec3(0.05, 0.12, 0.1), vec3(0.15, 0.55, 0.48), vec3(0.75, 0.92, 0.82), vec3(0.98, 0.72, 0.78), white);
 }
 
 void main() {
@@ -328,7 +388,12 @@ export class OrderedDitherPass {
     renderer.toneMappingExposure = 1;
 
     renderer.setRenderTarget(this.renderTarget);
-    renderer.setClearColor(0x000000, 1);
+    const bg = scene.background;
+    if (bg instanceof THREE.Color) {
+      renderer.setClearColor(bg, 1);
+    } else {
+      renderer.setClearColor(0x000000, 1);
+    }
     renderer.clear();
     renderer.render(scene, camera);
 

@@ -36,6 +36,29 @@ body {
   transition: background 1.1s ease, color 0.85s ease;
 }
 
+.surface-badge {
+  position: fixed;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 40;
+  margin: 0;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid rgb(22 22 22 / 28%);
+  background: rgb(247 246 242 / 88%);
+  color: #161616;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+}
+
+.surface-badge[data-surface="public"] {
+  border-color: rgb(42 92 200 / 35%);
+  color: #1e3a6e;
+}
+
 #app.daytime-linked {
   /* JS が --daytime-bg を流し込む。シーン背景とページ縁を揃える */
   background: var(--daytime-bg, #0b0e15);
@@ -479,6 +502,9 @@ body {
   position: fixed;
   z-index: 3;
   max-width: min(22rem, calc(100vw - 3rem));
+  max-height: calc(100vh - 9rem);
+  display: flex;
+  flex-direction: column;
   pointer-events: none;
 }
 
@@ -499,18 +525,24 @@ body {
 .control-panel {
   width: min(22rem, calc(100vw - 3rem));
   min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
   border: 1px solid rgb(61 58 52 / 30%);
   background: rgb(255 255 255 / 72%);
   backdrop-filter: blur(18px);
   font-family: var(--hud-mono);
+  padding-block: 0.55rem;
 
   /* 画面中央のメニューとして開く */
-  max-height: calc(100vh - 9rem);
-  overflow: auto;
+  max-height: inherit;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
   scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
 }
 
 .control-panel.is-closing {
@@ -567,6 +599,7 @@ body {
 /* HUDフィールドと同じ計測風トーン（パネル本体が背景を持つ） */
 .control-group {
   // border: 1px solid rgb(61 58 52 / 18%);
+  flex: 0 0 auto;
   border-radius: 0;
   background: transparent;
   box-shadow: none;
@@ -589,10 +622,9 @@ body {
   font-size: 0.74rem;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  cursor: default;
+  cursor: pointer;
   list-style: none;
   user-select: none;
-  pointer-events: none;
 }
 
 .control-group__summary::-webkit-details-marker {
@@ -602,7 +634,7 @@ body {
 .control-group__summary::before {
   content: "▸ ";
   display: inline-block;
-  transform: rotate(90deg);
+  transition: transform 160ms ease;
 }
 
 .control-group[open] > .control-group__summary::before {
@@ -624,7 +656,7 @@ body {
   gap: 0.45rem;
   margin: 0 0 1rem;
   color: #77736a;
-  font-size: 0.74rem;
+  font-size: 0.66rem;
   letter-spacing: 0.08em;
 }
 
@@ -648,35 +680,81 @@ body {
 }
 
 .input-device-panel {
-  margin: 0 0 1rem;
+  margin: 0.85rem 0 0;
   display: grid;
   gap: 0.35rem;
+  opacity: 0.42;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+
+.input-device-panel.is-active {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .input-device-mode {
   margin-bottom: 0;
+  font-size: 0.66rem;
+}
+
+.input-device-panel__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.4rem;
+  align-items: stretch;
 }
 
 .input-device__select {
   width: 100%;
+  min-width: 0;
+  font-size: 0.74rem;
+  padding: 0.55rem 0.75rem;
 }
 
 .input-device__refresh {
-  justify-self: end;
   width: auto;
-  padding: 0.35rem 0.75rem;
+  align-self: stretch;
+  padding: 0.25rem 0.55rem;
   border: 1px solid rgb(22 22 22 / 22%);
   border-radius: 0;
   background: transparent;
   box-shadow: none;
   color: #5e594f;
-  font-size: 0.7rem;
-  letter-spacing: 0.08em;
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
 }
 
 .input-device__refresh:hover {
   border-color: rgb(22 22 22 / 45%);
   background: rgb(255 255 255 / 40%);
+  transform: none;
+}
+
+.input-device__start {
+  width: 100%;
+  margin-top: 0.35rem;
+  padding: 0.85rem 1rem;
+  border-radius: 0;
+  border-color: rgb(22 22 22 / 28%);
+  background: rgb(22 22 22 / 82%);
+  color: #fffdf7;
+  font-size: 0.82rem;
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+.input-device__start:hover {
+  background: rgb(22 22 22 / 92%);
+  border-color: rgb(22 22 22 / 28%);
+  transform: none;
+}
+
+.input-device__start:disabled {
+  background: rgb(255 255 255 / 54%);
+  color: #8a857b;
+  border-color: rgb(22 22 22 / 14%);
 }
 
 .daytime-bg-option {
@@ -881,7 +959,7 @@ body {
 .actions {
   display: grid;
   gap: 0.55rem;
-  margin-top: 0.85rem;
+  margin-top: 0;
 }
 
 .actions__row {
@@ -891,6 +969,39 @@ body {
 
 .actions__row--input {
   grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+}
+
+.actions__row--record {
+  grid-template-columns: 1fr;
+}
+
+.actions__row--record .input-device__start {
+  margin-top: 0;
+}
+
+.actions__use {
+  border-radius: 0;
+  border-color: rgb(22 22 22 / 18%);
+  background: rgb(255 255 255 / 52%);
+  color: #5e594f;
+  font-size: 0.74rem;
+}
+
+.actions__use:hover {
+  background: rgb(255 255 255 / 72%);
+  border-color: rgb(22 22 22 / 28%);
+  transform: none;
+}
+
+.actions__use.is-selected {
+  border-color: rgb(22 22 22 / 55%);
+  background: rgb(22 22 22 / 82%);
+  color: #fffdf7;
+}
+
+.actions__use.is-selected:hover {
+  background: rgb(22 22 22 / 90%);
+  border-color: rgb(22 22 22 / 55%);
 }
 
 .actions__row--sculpture {
@@ -904,23 +1015,17 @@ body {
   text-align: center;
 }
 
-#start-audio,
-#start-system-audio,
-#start-dev-audio {
+#begin-recording {
   background: rgb(22 22 22 / 82%);
   color: #fffdf7;
   border-color: rgb(22 22 22 / 28%);
 }
 
-#start-audio:hover,
-#start-system-audio:hover,
-#start-dev-audio:hover {
+#begin-recording:hover {
   background: rgb(22 22 22 / 92%);
 }
 
-#start-audio:disabled,
-#start-system-audio:disabled,
-#start-dev-audio:disabled {
+#begin-recording:disabled {
   background: rgb(255 255 255 / 54%);
   color: #8a857b;
 }
@@ -967,10 +1072,12 @@ button:disabled {
 }
 
 .status {
-  margin: 0.85rem 0 0;
-  color: #8a857b;
-  font-size: 0.8rem;
-  letter-spacing: 0.04em;
+  margin: 0.55rem 0 0;
+  color: #9a958c;
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
+  line-height: 1.4;
+  opacity: 0.85;
 }
 
 fieldset {
@@ -1194,6 +1301,17 @@ input[type="range"] {
   color: #aab2c2;
 }
 
+.theme-dark .surface-badge {
+  border-color: rgb(240 238 231 / 28%);
+  background: rgb(8 12 20 / 78%);
+  color: #d5dbe8;
+}
+
+.theme-dark .surface-badge[data-surface="public"] {
+  border-color: rgb(136 180 255 / 40%);
+  color: #c5d6f5;
+}
+
 .theme-dark .hud-panel-toggle:hover {
   border: none;
   background: transparent;
@@ -1251,6 +1369,43 @@ input[type="range"] {
   background: rgb(42 48 64 / 55%);
 }
 
+.theme-dark .input-device__start,
+.theme-dark #begin-recording {
+  border-color: rgb(255 255 255 / 22%);
+  background: rgb(232 230 223 / 92%);
+  color: #0b0e15;
+}
+
+.theme-dark .input-device__start:hover,
+.theme-dark #begin-recording:hover {
+  background: #fff;
+  border-color: rgb(255 255 255 / 40%);
+}
+
+.theme-dark .input-device__start:disabled,
+.theme-dark #begin-recording:disabled {
+  background: rgb(30 35 48 / 55%);
+  color: #6a7388;
+  border-color: rgb(255 255 255 / 10%);
+}
+
+.theme-dark .actions__use {
+  border-color: rgb(255 255 255 / 16%);
+  background: rgb(30 35 48 / 55%);
+  color: #a0a8b8;
+}
+
+.theme-dark .actions__use:hover {
+  background: rgb(42 48 64 / 72%);
+  border-color: rgb(255 255 255 / 28%);
+}
+
+.theme-dark .actions__use.is-selected {
+  background: rgb(232 230 223 / 92%);
+  color: #0b0e15;
+  border-color: rgb(255 255 255 / 40%);
+}
+
 .theme-dark .daytime-bg-option__hint {
   color: #7e8798;
 }
@@ -1291,24 +1446,18 @@ input[type="range"] {
   color: #d7dde8;
 }
 
-.theme-dark #start-audio,
-.theme-dark #start-system-audio,
-.theme-dark #start-dev-audio,
+.theme-dark #begin-recording,
 .theme-dark #export-gltf {
   background: rgb(226 232 244 / 88%);
   color: #10131c;
   border-color: rgb(255 255 255 / 30%);
 }
 
-.theme-dark #start-audio:hover,
-.theme-dark #start-system-audio:hover,
-.theme-dark #start-dev-audio:hover {
+.theme-dark #begin-recording:hover {
   background: rgb(244 247 252 / 96%);
 }
 
-.theme-dark #start-audio:disabled,
-.theme-dark #start-system-audio:disabled,
-.theme-dark #start-dev-audio:disabled,
+.theme-dark #begin-recording:disabled,
 .theme-dark #export-gltf:disabled {
   background: rgb(30 35 48 / 55%);
   color: #7d8494;
@@ -1393,10 +1542,11 @@ input[type="range"] {
 
   .control-panel-shell {
     max-width: calc(100vw - 2rem);
+    max-height: calc(100vh - 5rem);
   }
 
   .control-panel {
-    max-height: calc(100vh - 5rem);
+    max-height: inherit;
   }
 }
 

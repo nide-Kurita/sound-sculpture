@@ -2,6 +2,9 @@
  * 作品体験（旧・彫刻モード + 作品スタイルを統合）。
  * URL は `?style=` で切替え。デフォルトは vita。
  *
+ * 公開: vita / metamorphosis / monolith
+ * DEV のみ: dither / lumen（`?style=`）
+ *
  * - vita:          生命に振り切る。暗い環境で膜が真珠光沢に輝き、完成後も呼吸を続ける（基本）
  * - metamorphosis: 形成中は生命体、音が止まると石化・結晶化して彫刻として完成する
  * - monolith:      彫刻に振り切る。膜なし・素材感重視、完成でギャラリー照明が灯る
@@ -9,12 +12,20 @@
  * - lumen:         闇の虚空で音が物質を削る。低域＝質量、高域＝輪郭、トランジェント＝剥離
  */
 
+import { isDevSurface } from "./app-surface";
 import type { SculptureMode } from "./sculpture-types";
 
 export type VisualStyleId = "metamorphosis" | "vita" | "monolith" | "dither" | "lumen";
 
 /** 統合された作品モード ID（URL `style` パラメータ） */
 export type ExperienceId = VisualStyleId;
+
+/** 公開で選択可能な作品スタイル */
+export const PUBLIC_EXPERIENCE_IDS = ["vita", "metamorphosis", "monolith"] as const;
+export type PublicExperienceId = (typeof PUBLIC_EXPERIENCE_IDS)[number];
+
+export const isPublicExperienceId = (id: string): id is PublicExperienceId =>
+  (PUBLIC_EXPERIENCE_IDS as readonly string[]).includes(id);
 
 export type BackgroundProfile = {
   studioSpace?: boolean;
@@ -118,7 +129,7 @@ export const SHARED_INTRO = {
 
 const METAMORPHOSIS: VisualStyleConfig = {
   id: "metamorphosis",
-  label: "変容 — 生命が彫刻になる",
+  label: "変容 — Life Becomes Sculpture",
   themeDark: false,
   membrane: {
     visible: true,
@@ -165,7 +176,7 @@ const METAMORPHOSIS: VisualStyleConfig = {
 
 const VITA: VisualStyleConfig = {
   id: "vita",
-  label: "生命 — 神秘の生命体",
+  label: "生命 — Mystical Lifeform",
   themeDark: true,
   membrane: {
     visible: true,
@@ -224,7 +235,7 @@ const VITA: VisualStyleConfig = {
 
 const MONOLITH: VisualStyleConfig = {
   id: "monolith",
-  label: "彫刻 — 石とブロンズ",
+  label: "彫刻 — Stone & Bronze",
   themeDark: false,
   membrane: {
     visible: false,
@@ -327,7 +338,7 @@ const DITHER: VisualStyleConfig = {
 
 const LUMEN: VisualStyleConfig = {
   id: "lumen",
-  label: "発光 — 音が物質を削る",
+  label: "発光 — Sound Carves Matter",
   themeDark: true,
   membrane: {
     visible: false,
@@ -416,38 +427,51 @@ export const EXPERIENCE_CATALOG: readonly ExperienceEntry[] = [
     label: METAMORPHOSIS.label,
     sculptureMode: "classic",
     visualStyleId: "metamorphosis",
-    introTitle: SHARED_INTRO.title,
-    introDescription: SHARED_INTRO.description,
-    introDescriptionEn: SHARED_INTRO.descriptionEn,
+    introTitle: "音の変容",
+    introDescription:
+      "音を糧に、やわらかい生命体が育つ。\n音が止まると、膜は結晶化し、\n形は石のように固まって\n彫刻として残ります。",
+    introDescriptionEn:
+      "Fed by sound, a soft life-form grows. When the sound falls silent, its membrane crystallizes and the form hardens into sculpture.",
   },
   {
     id: "monolith",
     label: MONOLITH.label,
     sculptureMode: "classic",
     visualStyleId: "monolith",
-    introTitle: SHARED_INTRO.title,
-    introDescription: SHARED_INTRO.description,
-    introDescriptionEn: SHARED_INTRO.descriptionEn,
+    introTitle: "音の彫刻",
+    introDescription:
+      "音の圧力が、石とブロンズのような質量を削り出す。\n膜はなく、素材の手触りだけが残り、\n完成するとギャラリーの光が灯ります。",
+    introDescriptionEn:
+      "Sound pressure carves mass like stone and bronze. There is no membrane—only material presence—until gallery light settles on the finished form.",
   },
   {
     id: "dither",
     label: DITHER.label,
     sculptureMode: "classic",
     visualStyleId: "dither",
-    introTitle: SHARED_INTRO.title,
-    introDescription: SHARED_INTRO.description,
-    introDescriptionEn: SHARED_INTRO.descriptionEn,
+    introTitle: "網点の彫刻",
+    introDescription:
+      "音が階調を押し、網点の輪郭を育てる。\n黒地に Ordered Dither が定着し、\n有機的なブロブとして残ります。",
+    introDescriptionEn:
+      "Sound presses tone into ordered dither. On black, an organic blob settles into a fixed grain.",
   },
   {
     id: "lumen",
     label: LUMEN.label,
     sculptureMode: "lumen",
     visualStyleId: "lumen",
-    introTitle: SHARED_INTRO.title,
-    introDescription: SHARED_INTRO.description,
-    introDescriptionEn: SHARED_INTRO.descriptionEn,
+    introTitle: "発光の彫刻",
+    introDescription:
+      "闇の虚空で、音が物質を削る。\n低域は質量、高域は輪郭、\nトランジェントは剥離として刻まれます。",
+    introDescriptionEn:
+      "In a dark void, sound carves matter. Bass is mass, treble is edge, transients flake away the surface.",
   },
 ];
+
+/** 公開 UI・公開 URL で使うカタログ（生命 / 変容 / 彫刻） */
+export const PUBLIC_EXPERIENCE_CATALOG: readonly ExperienceEntry[] = EXPERIENCE_CATALOG.filter(
+  (entry) => isPublicExperienceId(entry.id),
+);
 
 export const getExperience = (id: ExperienceId): ExperienceEntry =>
   EXPERIENCE_CATALOG.find((entry) => entry.id === id) ?? EXPERIENCE_CATALOG[0];
@@ -460,18 +484,22 @@ export const parseVisualStyleId = (): VisualStyleId => parseExperienceId();
 
 /**
  * URL `?style=` を優先。旧 `?mode=` / carve・amoeba は vita へフォールバック。
- * デフォルトは vita。
+ * 公開サーフェスでは dither / lumen も vita へ落とす。デフォルトは vita。
  */
 export const parseExperienceId = (): ExperienceId => {
   const params = new URLSearchParams(window.location.search);
   const style = params.get("style");
-  if (style === "vita") return "vita";
-  if (style === "metamorphosis") return "metamorphosis";
-  if (style === "monolith") return "monolith";
-  if (style === "dither") return "dither";
-  if (style === "lumen") return "lumen";
+  let id: ExperienceId = "vita";
+  if (style === "vita") id = "vita";
+  else if (style === "metamorphosis") id = "metamorphosis";
+  else if (style === "monolith") id = "monolith";
+  else if (style === "dither") id = "dither";
+  else if (style === "lumen") id = "lumen";
 
-  return "vita";
+  if (!isDevSurface() && !isPublicExperienceId(id)) {
+    return "vita";
+  }
+  return id;
 };
 
 let activeStyle: VisualStyleConfig = VITA;

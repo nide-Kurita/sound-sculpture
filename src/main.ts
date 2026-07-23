@@ -77,10 +77,16 @@ import {
   updateClickRepulsion,
 } from "./click-repulsion";
 import {
+  getAppSurface,
+  getSurfaceBadgeLabel,
+  isDevSurface,
+} from "./app-surface";
+import {
   EXPERIENCE_CATALOG,
   getActiveVisualStyle,
   getExperience,
   parseExperienceId,
+  PUBLIC_EXPERIENCE_CATALOG,
   setActiveVisualStyle,
   SHARED_INTRO,
   type ExperienceId,
@@ -830,23 +836,54 @@ class AudioInput {
   private quietProfileDuration = 0;
   private loudProfileDuration = 0;
 
+  private connectStream(stream: MediaStream) {
+    this.devAudioUrl = null;
+    this.devAudioBuffer = null;
+    this.initAnalyser();
+
+    this.stream = stream;
+    this.source = this.context!.createMediaStreamSource(stream);
+    this.source.connect(this.analyser!);
+  }
+
+  private async ensureContextRunning() {
+    if (this.context && this.context.state === "suspended") {
+      await this.context.resume();
+    }
+  }
+
   async startMicrophone(deviceId?: string) {
-    const audioConstraints: MediaTrackConstraints = {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
+    const open = async (audio: boolean | MediaTrackConstraints) => {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio,
+        video: false,
+      });
+      this.connectStream(stream);
+      await this.ensureContextRunning();
     };
 
-    if (deviceId && deviceId !== "default") {
-      audioConstraints.deviceId = { exact: deviceId };
+    const wantsDevice = Boolean(deviceId && deviceId !== "default");
+    try {
+      if (wantsDevice) {
+        // exact だとデバイス消失時に NotFoundError になるため ideal を使う
+        await open({
+          deviceId: { ideal: deviceId },
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        });
+      } else {
+        // 既定入力は最も互換性の高い制約にする
+        await open(true);
+      }
+    } catch (error) {
+      // 指定デバイスが使えない場合は既定入力へフォールバック
+      if (wantsDevice) {
+        await open(true);
+        return;
+      }
+      throw error;
     }
-
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: audioConstraints,
-      video: false,
-    });
-
-    this.connectStream(stream);
   }
 
   async listAudioInputDevices() {
@@ -870,6 +907,7 @@ class AudioInput {
     }
 
     this.connectStream(stream);
+    await this.ensureContextRunning();
   }
 
   async startDevAudio(audioUrl: string) {
@@ -1071,16 +1109,6 @@ class AudioInput {
     this.data = new Uint8Array(this.analyser.frequencyBinCount);
     this.timeData = new Uint8Array(this.analyser.fftSize);
     this.resetProfile();
-  }
-
-  private connectStream(stream: MediaStream) {
-    this.devAudioUrl = null;
-    this.devAudioBuffer = null;
-    this.initAnalyser();
-
-    this.stream = stream;
-    this.source = this.context!.createMediaStreamSource(stream);
-    this.source.connect(this.analyser!);
   }
 
   getWaveformBytes() {
@@ -5715,6 +5743,7 @@ const appElement = document.querySelector<HTMLElement>("#app");
 const startButton = document.querySelector<HTMLButtonElement>("#start-audio");
 const startSystemAudioButton = document.querySelector<HTMLButtonElement>("#start-system-audio");
 const startDevAudioButton = document.querySelector<HTMLButtonElement>("#start-dev-audio");
+const beginRecordingButton = document.querySelector<HTMLButtonElement>("#begin-recording");
 const resetSculptureButton = document.querySelector<HTMLButtonElement>("#reset-sculpture");
 const completeButton = document.querySelector<HTMLButtonElement>("#complete-sculpture");
 const exportButton = document.querySelector<HTMLButtonElement>("#export-gltf");
@@ -5741,6 +5770,7 @@ if (
   !appElement ||
   !startButton ||
   !startSystemAudioButton ||
+  !beginRecordingButton ||
   !resetSculptureButton ||
   !completeButton ||
   !exportButton ||
@@ -5803,10 +5833,33 @@ if (daytimeBackgroundInput) {
 if (liveWeatherInput) {
   liveWeatherInput.checked = false;
 }
-if (import.meta.env.DEV && daytimePreviewRoot) {
+
+const devSurface = isDevSurface();
+const surfaceBadgeEl = document.querySelector<HTMLElement>("#surface-badge");
+const surfaceBadgeLabel = getSurfaceBadgeLabel();
+if (surfaceBadgeEl && surfaceBadgeLabel) {
+  surfaceBadgeEl.hidden = false;
+  surfaceBadgeEl.dataset.surface = getAppSurface();
+  surfaceBadgeEl.textContent =
+    surfaceBadgeLabel === "DEV"
+      ? "DEV — 公開見た目は ?surface=public"
+      : "PUBLIC PREVIEW";
+}
+
+const experienceStyleField = document.querySelector<HTMLElement>("#experience-style-field");
+const growthAlgorithmField = document.querySelector<HTMLElement>("#growth-algorithm-field");
+const devTuningGroup = document.querySelector<HTMLElement>("#dev-tuning-group");
+
+if (experienceStyleField) {
+  experienceStyleField.hidden = false;
+}
+if (growthAlgorithmField) {
+  growthAlgorithmField.hidden = false;
+}
+if (devSurface && daytimePreviewRoot) {
   daytimePreviewRoot.hidden = false;
 }
-if (import.meta.env.DEV && weatherPreviewRoot) {
+if (devSurface && weatherPreviewRoot) {
   weatherPreviewRoot.hidden = false;
 }
 let growthAlgorithmId: GrowthAlgorithmId = parseGrowthAlgorithmId();
@@ -5825,26 +5878,30 @@ const populateGrowthAlgorithmSelect = () => {
 const applyGrowthAlgorithmUi = (id: GrowthAlgorithmId) => {
   growthAlgorithmSelect.value = id;
   const meta = getGrowthAlgorithmMeta(id);
+  growthAlgorithmHint.hidden = false;
   growthAlgorithmHint.textContent = meta.tagline;
 };
 
 populateGrowthAlgorithmSelect();
 applyGrowthAlgorithmUi(growthAlgorithmId);
 
-if (import.meta.env.DEV && startDevAudioButton) {
+if (devSurface && startDevAudioButton) {
   startDevAudioButton.hidden = false;
 }
 
-if (import.meta.env.DEV && bandTestPanel) {
+if (devSurface && bandTestPanel) {
   bandTestPanel.hidden = false;
 }
 
-if (import.meta.env.DEV) {
-  document
-    .querySelectorAll<HTMLElement>(".sculpture-mode, .audio-scope, .tuning-export")
-    .forEach((element) => {
-      element.hidden = false;
-    });
+if (devSurface) {
+  if (devTuningGroup) {
+    devTuningGroup.hidden = false;
+  }
+  document.querySelectorAll<HTMLElement>(".audio-scope, .tuning-export").forEach((element) => {
+    element.hidden = false;
+  });
+} else if (devTuningGroup) {
+  devTuningGroup.hidden = true;
 }
 
 const parseBandSoloMode = (): BandSoloMode => {
@@ -5867,7 +5924,9 @@ const applyExperienceUi = (id: ExperienceId) => {
   appElement.classList.toggle("style-monolith", entry.visualStyleId === "monolith");
   appElement.classList.toggle("style-dither", entry.visualStyleId === "dither");
   appElement.classList.toggle("style-lumen", entry.visualStyleId === "lumen");
-  if (!daytimeBackgroundEnabled) {
+  if (entry.visualStyleId === "dither") {
+    appElement.classList.toggle("theme-dark", false);
+  } else if (!daytimeBackgroundEnabled) {
     appElement.classList.toggle("theme-dark", styleEnvActive && visualStyle.themeDark);
   }
 
@@ -5908,7 +5967,8 @@ const applyExperienceUi = (id: ExperienceId) => {
 
 const populateExperienceSelect = () => {
   experienceStyleSelect.innerHTML = "";
-  for (const entry of EXPERIENCE_CATALOG) {
+  const catalog = devSurface ? EXPERIENCE_CATALOG : PUBLIC_EXPERIENCE_CATALOG;
+  for (const entry of catalog) {
     const option = document.createElement("option");
     option.value = entry.id;
     option.textContent = entry.label;
@@ -5922,7 +5982,8 @@ applyGrowthAlgorithmUi(growthAlgorithmId);
 
 experienceStyleSelect.addEventListener("change", () => {
   const nextId = experienceStyleSelect.value as ExperienceId;
-  if (!EXPERIENCE_CATALOG.some((entry) => entry.id === nextId)) {
+  const catalog = devSurface ? EXPERIENCE_CATALOG : PUBLIC_EXPERIENCE_CATALOG;
+  if (!catalog.some((entry) => entry.id === nextId)) {
     return;
   }
   if (nextId === experienceId) {
@@ -6000,15 +6061,6 @@ const applyTogglePosition = (position: ControlPanelPosition, options?: { animate
   }
 };
 
-const positionPanelShellAtCenter = () => {
-  const shellWidth = controlPanelShell.offsetWidth;
-  const shellHeight = controlPanelShell.offsetHeight;
-  applyControlPanelPosition({
-    left: (window.innerWidth - shellWidth) * 0.5,
-    top: (window.innerHeight - shellHeight) * 0.5,
-  });
-};
-
 // トグルをパネル下中央に保つ位置関係で、パネルをトグル基準に置く。
 const positionPanelRelativeToToggle = () => {
   const toggleRect = toggleControlPanelButton.getBoundingClientRect();
@@ -6051,7 +6103,7 @@ const playControlPanelOpenAnimation = () => {
     if (event.target !== controlPanel || event.animationName !== "control-panel-expand") return;
     controlPanel.removeEventListener("animationend", onAnimationEnd);
     controlPanel.classList.remove("is-opening");
-    controlPanel.style.clipPath = "none";
+    controlPanel.style.removeProperty("clip-path");
   };
 
   controlPanel.addEventListener("animationend", onAnimationEnd);
@@ -6072,19 +6124,41 @@ const playControlPanelCloseAnimation = (): Promise<void> =>
     controlPanel.addEventListener("animationend", onAnimationEnd);
   });
 
-let controlPanelHasOpenedOnce = false;
+/** Settings など details 開閉で高さが変わったとき、画面内に収めつつスクロール可能にする */
+const clampControlPanelAfterLayoutChange = () => {
+  if (controlPanelShell.classList.contains("is-collapsed")) {
+    return;
+  }
+  const rect = controlPanelShell.getBoundingClientRect();
+  applyControlPanelPosition({ left: rect.left, top: rect.top });
+  if (!controlPanelDragged) {
+    syncToggleToPanel(false);
+  }
+};
+
+controlPanel.querySelectorAll<HTMLDetailsElement>("details.control-group").forEach((details) => {
+  details.addEventListener("toggle", () => {
+    requestAnimationFrame(() => {
+      clampControlPanelAfterLayoutChange();
+    });
+  });
+});
+
+controlPanel.addEventListener(
+  "wheel",
+  (event) => {
+    event.stopPropagation();
+  },
+  { passive: true },
+);
 
 const openControlPanel = () => {
   controlPanelDragged = false;
   controlPanelShell.classList.remove("is-collapsed");
 
+  // トグルの現在位置（初期は画面下中央）の直上から開く
   const placePanel = () => {
-    if (controlPanelHasOpenedOnce) {
-      // 閉じた場所（トグル位置）を基準に開く。
-      positionPanelRelativeToToggle();
-    } else {
-      positionPanelShellAtCenter();
-    }
+    positionPanelRelativeToToggle();
   };
 
   placePanel();
@@ -6092,9 +6166,6 @@ const openControlPanel = () => {
 
   requestAnimationFrame(() => {
     placePanel();
-    // パネルと重なる／上に乗る場合も含め、下中央へすーっと寄せる。
-    syncToggleToPanel(true);
-    controlPanelHasOpenedOnce = true;
   });
 
   toggleControlPanelButton.setAttribute("aria-expanded", "true");
@@ -6120,12 +6191,15 @@ toggleControlPanelButton.addEventListener("click", () => {
     panelToggleClickTimer = null;
     return;
   }
+
+  const willOpen = controlPanelShell.classList.contains("is-collapsed");
+
   panelToggleClickTimer = window.setTimeout(() => {
     panelToggleClickTimer = null;
-    if (controlPanelShell.classList.contains("is-collapsed")) {
+    if (willOpen) {
       openControlPanel();
     } else {
-      closeControlPanel();
+      void closeControlPanel();
     }
   }, 260);
 });
@@ -6265,13 +6339,18 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(sceneEnv.background);
 
 let themeDarkActive = styleEnvActive && visualStyle.themeDark;
-if (daytimeBackgroundEnabled) {
+if (daytimeBackgroundEnabled && visualStyleId !== "dither") {
   themeDarkActive = (
     daytimePreviewHour === null
       ? sampleDaytimeAtmosphere()
       : sampleDaytimeAtmosphereFromHour(daytimePreviewHour)
   ).dark;
   appElement.classList.toggle("theme-dark", themeDarkActive);
+}
+if (visualStyleId === "dither") {
+  // 網点は時間帯で UI / 背景を沈めない
+  themeDarkActive = false;
+  appElement.classList.toggle("theme-dark", false);
 }
 
 const sceneBackground = new SceneBackground(sceneEnv, themeDarkActive);
@@ -6949,11 +7028,11 @@ bandToneTestButton?.addEventListener("click", async () => {
   bandToneTestButton.disabled = true;
   try {
     await audioInput.playBandIsolationTest(BAND_TEST_TONES, (label) => {
-      setStatus(`音域テスト: ${label}`);
+      setStatus(`Band test: ${label}`);
     });
-    setStatus("音域テスト完了 — メーターとソロで確認してください");
+    setStatus("Band test done — check meters and solo");
   } catch (error) {
-    const message = error instanceof Error ? error.message : "テスト音の再生に失敗しました";
+    const message = error instanceof Error ? error.message : "Failed to play test tones";
     setStatus(message);
     console.error(error);
   } finally {
@@ -7154,7 +7233,7 @@ const drawAudioScope = (
   const ctx = audioScopeContext;
   const w = audioScopeCanvas.width;
   const h = audioScopeCanvas.height;
-  const debugH = import.meta.env.DEV ? 28 : 0;
+  const debugH = isDevSurface() ? 28 : 0;
   const meterH = 16;
   const scopeH = h - meterH - debugH;
   ctx.clearRect(0, 0, w, h);
@@ -7247,7 +7326,7 @@ const drawAudioScope = (
     ctx.fillRect(w * 0.5 - 8, 0, 16 + rhythmEvents.transient * 60, scopeH);
   }
 
-  if (import.meta.env.DEV) {
+  if (isDevSurface()) {
     const y = scopeH + meterH + 2;
     ctx.fillStyle = "#8a857b";
     ctx.font = "9px ui-monospace, monospace";
@@ -7301,7 +7380,7 @@ growthAlgorithmSelect.addEventListener("change", () => {
   rhythm.reset();
   structureTracker.reset();
   speciesProfiler.reset();
-  setStatus("成長アルゴリズムを変更しました — 形成を再開できます");
+  setStatus("Growth algorithm changed — ready to form again");
 });
 
 // 拡張機能や外部スクリプト由来も含め、実行時エラーを画面に出して原因特定しやすくする
@@ -7317,6 +7396,7 @@ window.addEventListener("unhandledrejection", (event) => {
 });
 
 const populateAudioDevices = async () => {
+  const previousValue = audioInputSelect.value;
   const defaultOption = audioInputSelect
     .querySelector<HTMLOptionElement>('option[value="default"]')
     ?.cloneNode(true) as HTMLOptionElement | null;
@@ -7328,6 +7408,16 @@ const populateAudioDevices = async () => {
   try {
     const devices = await audioInput.listAudioInputDevices();
     for (const device of devices) {
+      if (!device.deviceId) {
+        continue;
+      }
+      // HTML 側の「既定の入力」と重複する default はスキップ
+      if (device.deviceId === "default") {
+        if (device.label && defaultOption) {
+          defaultOption.textContent = device.label;
+        }
+        continue;
+      }
       const option = document.createElement("option");
       option.value = device.deviceId;
       option.textContent = device.label || `Audio input (${device.deviceId.slice(0, 6)}...)`;
@@ -7336,22 +7426,60 @@ const populateAudioDevices = async () => {
   } catch (error) {
     console.error(error);
   }
+
+  if ([...audioInputSelect.options].some((option) => option.value === previousValue)) {
+    audioInputSelect.value = previousValue;
+  }
+};
+
+let micPermissionGranted = false;
+let micPermissionRequest: Promise<boolean> | null = null;
+
+/**
+ * マイク権限取得を最優先する。
+ * getUserMedia はユーザー操作の同一ターンで呼び出すこと（setTimeout 後だとブロックされる）。
+ */
+const ensureMicPermission = (): Promise<boolean> => {
+  if (micPermissionGranted) {
+    return Promise.resolve(true);
+  }
+  if (micPermissionRequest) {
+    return micPermissionRequest;
+  }
+
+  micPermissionRequest = (async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false,
+      });
+      stream.getTracks().forEach((track) => track.stop());
+      micPermissionGranted = true;
+      await populateAudioDevices();
+      return true;
+    } catch (error) {
+      console.error(error);
+      micPermissionRequest = null;
+      await populateAudioDevices();
+      return false;
+    }
+  })();
+
+  return micPermissionRequest;
 };
 
 refreshAudioDevicesButton.addEventListener("click", async () => {
-  try {
-    await populateAudioDevices();
-    setStatus(refreshAudioDevicesButton.dataset.statusSuccess ?? "");
-  } catch (error) {
-    console.error(error);
-    setStatus(refreshAudioDevicesButton.dataset.statusError ?? "");
-  }
+  setStatus("Requesting microphone access…");
+  const ok = await ensureMicPermission();
+  setStatus(
+    ok
+      ? (refreshAudioDevicesButton.dataset.statusSuccess ?? "")
+      : (refreshAudioDevicesButton.dataset.statusError ?? "Microphone permission denied"),
+  );
 });
 
-// enumerateDevices が環境によっては例外/遅延するため、起動をブロックしない
-populateAudioDevices().catch((error) => {
-  console.error(error);
-});
+// 権限なしの仮一覧だけ先に出しておく（本一覧はユーザー操作後）
+void populateAudioDevices();
 
 // --- 完成時の環境クロスフェード（背景・ライト・スポットライト） ---
 let envMix = 0;
@@ -7402,12 +7530,12 @@ const updateWeatherHud = () => {
   }
   const active = getActiveWeatherSnapshot();
   const prefix =
-    import.meta.env.DEV && weatherPreviewPreset !== "live" ? "DEV/" : "";
+    isDevSurface() && weatherPreviewPreset !== "live" ? "DEV/" : "";
   hudWeatherFieldEl.textContent = active ? `${prefix}${active.label}` : "...";
 };
 
 const getActiveWeatherSnapshot = (): LiveWeatherSnapshot | null => {
-  if (import.meta.env.DEV && weatherPreviewPreset !== "live") {
+  if (isDevSurface() && weatherPreviewPreset !== "live") {
     return createWeatherPreviewSnapshot(
       weatherPreviewPreset,
       weatherPreviewRainScale,
@@ -7421,7 +7549,7 @@ const getActiveWeatherSnapshot = (): LiveWeatherSnapshot | null => {
 };
 
 const isWeatherFxActive = () =>
-  (import.meta.env.DEV && weatherPreviewPreset !== "live") || liveWeatherEnabled;
+  (isDevSurface() && weatherPreviewPreset !== "live") || liveWeatherEnabled;
 
 const snapshotToSceneWeather = (snapshot: LiveWeatherSnapshot | null): SceneWeatherState => {
   if (!snapshot || !isWeatherFxActive()) {
@@ -7470,6 +7598,24 @@ const syncDaytimeEnvironmentTargets = () => {
   const activeWeather = getActiveWeatherSnapshot();
   const cloudCover =
     isWeatherFxActive() && activeWeather ? activeWeather.cloudCover : 0;
+
+  // 網点: 夜まで沈めず昼帯のトーンを維持（UI は CSS の multiply+#fff）
+  if (ditherStyle) {
+    daytimeSkyActive = false;
+    appElement.classList.remove("daytime-linked");
+    appElement.style.removeProperty("--daytime-bg");
+    appElement.style.removeProperty("--dither-bg");
+    const dayLook = sampleDaytimeAtmosphereFromHour(
+      daytimeBackgroundEnabled ? Math.min(Math.max(getActiveDaytimeHour(), 8), 16) : 11,
+    );
+    const forming = tintHexWithClouds(dayLook.forming, Math.min(cloudCover, 0.35));
+    const complete = tintHexWithClouds(dayLook.complete, Math.min(cloudCover, 0.35));
+    envBackgroundForming.setHex(forming);
+    envBackgroundComplete.setHex(complete);
+    themeDarkActive = false;
+    appElement.classList.toggle("theme-dark", false);
+    return;
+  }
 
   if (daytimeBackgroundEnabled) {
     const atmosphere = sampleDaytimeAtmosphereFromHour(getActiveDaytimeHour());
@@ -7698,7 +7844,7 @@ weatherPreviewLiveButton?.addEventListener("click", () => {
   applyWeatherPreviewSelection();
 });
 
-if (import.meta.env.DEV) {
+if (isDevSurface()) {
   syncWeatherPreviewLabel();
   syncWeatherPreviewScaleLabels();
 }
@@ -7782,12 +7928,57 @@ const updateKeyLight = () => {
   );
 };
 
+type ArmedAudioSource = "input" | "system" | "dev" | null;
+let armedAudioSource: ArmedAudioSource = null;
+let sourceButtonsEnabled = true;
+const inputDevicePanel = document.querySelector<HTMLElement>("#input-device-panel");
+
+const syncArmedSourceUi = () => {
+  const useButtons: Array<{ button: HTMLButtonElement | null; source: Exclude<ArmedAudioSource, null> }> = [
+    { button: startButton, source: "input" },
+    { button: startSystemAudioButton, source: "system" },
+    { button: startDevAudioButton, source: "dev" },
+  ];
+  for (const entry of useButtons) {
+    if (!entry.button) continue;
+    const selected = armedAudioSource === entry.source;
+    entry.button.classList.toggle("is-selected", selected);
+    entry.button.setAttribute("aria-pressed", selected ? "true" : "false");
+  }
+
+  const inputDeviceActive = armedAudioSource === "input" && sourceButtonsEnabled;
+  if (inputDevicePanel) {
+    inputDevicePanel.classList.toggle("is-active", inputDeviceActive);
+    inputDevicePanel.setAttribute("aria-disabled", inputDeviceActive ? "false" : "true");
+  }
+  audioInputSelect.disabled = !inputDeviceActive;
+  refreshAudioDevicesButton.disabled = !inputDeviceActive;
+
+  beginRecordingButton.disabled = !sourceButtonsEnabled || armedAudioSource === null;
+  // Use 選択後 / 形成中 / 完成後は Reset で初期状態に戻せる
+  resetSculptureButton.disabled = !(armedAudioSource !== null || isAudioReady || isComplete);
+};
+
+const armAudioSource = (
+  source: Exclude<ArmedAudioSource, null>,
+  trigger: HTMLButtonElement,
+) => {
+  if (!sourceButtonsEnabled) {
+    return;
+  }
+  armedAudioSource = source;
+  syncArmedSourceUi();
+  setStatus(trigger.dataset.statusArmed ?? "Ready — press Start Recording");
+};
+
 const setStartButtonsEnabled = (enabled: boolean) => {
+  sourceButtonsEnabled = enabled;
   startButton.disabled = !enabled;
   startSystemAudioButton.disabled = !enabled;
   if (startDevAudioButton) {
     startDevAudioButton.disabled = !enabled;
   }
+  syncArmedSourceUi();
 };
 
 const completeSculpture = () => {
@@ -7819,22 +8010,25 @@ const completeSculpture = () => {
 };
 
 const resetSculptureSession = () => {
-  const seed = audioInput.getMorphologySeed() ?? undefined;
-  sculpture.reset(seed);
+  audioInput.stopPlayback();
+  audioInput.resetAnalysisState();
+  sculpture.reset();
   rhythm.reset();
   structureTracker.reset();
   speciesProfiler.setCalibrationSeconds(runtimeTuning.speciesCalibrationSeconds);
   speciesProfiler.reset();
   latestStructure = defaultStructureSnapshot();
   lastDisplayBands = emptyBands();
-  audioInput.resetAnalysisState();
   isComplete = false;
+  isAudioReady = false;
   hasHeardSound = false;
   silenceSeconds = 0;
   loudBurstSeconds = 0;
   hudFormingSeconds = 0;
   hudSlashLevel = 1;
   hudLastBpm = 0;
+  hudSignalLabel = "---";
+  armedAudioSource = null;
   latestRhythm = {
     kick: 0,
     snare: 0,
@@ -7858,13 +8052,13 @@ const resetSculptureSession = () => {
   };
   appElement.classList.remove("is-complete");
   viewControls.enabled = true;
-  completeButton.disabled = !isAudioReady;
+  completeButton.disabled = true;
   exportButton.disabled = true;
-  if (!isAudioReady) {
-    setStartButtonsEnabled(true);
+  if (bandToneTestButton) {
+    bandToneTestButton.disabled = true;
   }
-  audioInput.restartDevAudioIfActive();
-  setStatus(isAudioReady ? (resetSculptureButton.dataset.statusReset ?? "") : (statusElement.dataset.statusIdle ?? ""));
+  setStartButtonsEnabled(true);
+  setStatus(statusElement.dataset.statusIdle ?? "Standby");
 };
 
 const downloadBlob = (blob: Blob, filename: string) => {
@@ -7910,70 +8104,91 @@ const exportSculpture = () => {
   );
 };
 
-const startAudioInput = async (
-  trigger: HTMLButtonElement,
-  start: () => Promise<void>,
-) => {
+const finishAudioInputStart = () => {
+  isAudioReady = true;
+  hudFormingSeconds = 0;
+  hudSlashLevel = 1;
+  hudLastBpm = 0;
+  const seed = audioInput.getMorphologySeed() ?? undefined;
+  sculpture.reset(seed);
+  rhythm.reset();
+  structureTracker.reset();
+  speciesProfiler.setCalibrationSeconds(runtimeTuning.speciesCalibrationSeconds);
+  speciesProfiler.reset();
+  latestStructure = defaultStructureSnapshot();
+  hasHeardSound = false;
+  silenceSeconds = 0;
+  loudBurstSeconds = 0;
+  audioInput.restartDevAudioIfActive();
+  viewControls.enabled = true;
+  completeButton.disabled = isComplete;
+  resetSculptureButton.disabled = false;
+  if (bandToneTestButton) {
+    bandToneTestButton.disabled = isComplete;
+  }
+  setStatus(beginRecordingButton.dataset.statusReady ?? "Forming — drag to rotate");
+  void closeControlPanel();
+};
+
+startButton.addEventListener("click", () => {
+  armAudioSource("input", startButton);
+});
+
+startSystemAudioButton.addEventListener("click", () => {
+  armAudioSource("system", startSystemAudioButton);
+});
+
+if (isDevSurface() && startDevAudioButton) {
+  startDevAudioButton.addEventListener("click", () => {
+    armAudioSource("dev", startDevAudioButton);
+  });
+}
+
+beginRecordingButton.addEventListener("click", async () => {
+  if (!armedAudioSource || !sourceButtonsEnabled) {
+    return;
+  }
+
+  const source = armedAudioSource;
+  const deviceId = audioInputSelect.value || "default";
+
   setStartButtonsEnabled(false);
-  setStatus(trigger.dataset.statusPreparing ?? "");
+  setStatus(beginRecordingButton.dataset.statusPreparing ?? "Preparing audio input…");
 
   try {
-    await start();
-    isAudioReady = true;
-    hudFormingSeconds = 0;
-    hudSlashLevel = 1;
-    hudLastBpm = 0;
-    const seed = audioInput.getMorphologySeed() ?? undefined;
-    sculpture.reset(seed);
-    rhythm.reset();
-    structureTracker.reset();
-    speciesProfiler.setCalibrationSeconds(runtimeTuning.speciesCalibrationSeconds);
-    speciesProfiler.reset();
-    latestStructure = defaultStructureSnapshot();
-    hasHeardSound = false;
-    silenceSeconds = 0;
-    loudBurstSeconds = 0;
-    // 解析ロード中に進んだ再生を巻き戻し、シード付きリセットと先頭を揃える
-    audioInput.restartDevAudioIfActive();
-    viewControls.enabled = true;
-    completeButton.disabled = isComplete;
-    resetSculptureButton.disabled = false;
-    if (bandToneTestButton) {
-      bandToneTestButton.disabled = isComplete;
+    if (source === "input") {
+      hudSignalLabel = "INPUT";
+      await audioInput.startMicrophone(deviceId);
+      micPermissionGranted = true;
+      await populateAudioDevices();
+      if ([...audioInputSelect.options].some((option) => option.value === deviceId)) {
+        audioInputSelect.value = deviceId;
+      }
+    } else if (source === "system") {
+      hudSignalLabel = "SYSTEM";
+      setStatus("Preparing system / tab audio…");
+      await audioInput.startDisplayAudio();
+    } else {
+      hudSignalLabel = "BUFFER";
+      setStatus("Preparing dev audio…");
+      beginRecordingButton.dataset.statusReady = "Forming (s04) — drag to rotate";
+      const { DEV_AUDIO_URL } = await import("./dev-audio");
+      await audioInput.startDevAudio(DEV_AUDIO_URL);
     }
-    setStatus(trigger.dataset.statusReady ?? "");
+
+    finishAudioInputStart();
   } catch (error) {
     setStartButtonsEnabled(true);
     const message =
       error instanceof Error
         ? `${error.name}: ${error.message}`
-        : "音入力を開始できませんでした";
+        : "Failed to start audio input";
     setStatus(message);
     console.error(error);
   }
-};
-
-startButton.addEventListener("click", async () => {
-  hudSignalLabel = "MIC";
-  await startAudioInput(startButton, async () => {
-    await audioInput.startMicrophone(audioInputSelect.value);
-    // 権限取得後に label が読めるようになる事があるため、再取得して表示名を更新。
-    await populateAudioDevices();
-  });
 });
 
-startSystemAudioButton.addEventListener("click", async () => {
-  hudSignalLabel = "SYSTEM";
-  await startAudioInput(startSystemAudioButton, () => audioInput.startDisplayAudio());
-});
-
-if (import.meta.env.DEV && startDevAudioButton) {
-  startDevAudioButton.addEventListener("click", async () => {
-    hudSignalLabel = "BUFFER";
-    const { DEV_AUDIO_URL } = await import("./dev-audio");
-    await startAudioInput(startDevAudioButton, () => audioInput.startDevAudio(DEV_AUDIO_URL));
-  });
-}
+syncArmedSourceUi();
 
 completeButton.addEventListener("click", completeSculpture);
 resetSculptureButton.addEventListener("click", resetSculptureSession);
