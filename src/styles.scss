@@ -1378,3 +1378,16 @@ input[type="range"] {
     max-height: calc(100vh - 5rem);
   }
 }
+
+/* lumen: 闇＋控えめなマゼンタのにじみ */
+#app.style-lumen {
+  background:
+    radial-gradient(ellipse 50% 45% at 78% 26%, rgb(180 40 110 / 22%), transparent 58%),
+    linear-gradient(160deg, #060814 0%, #0a0c1a 55%, #100818 100%);
+}
+
+#app.style-lumen.theme-dark {
+  background:
+    radial-gradient(ellipse 50% 45% at 78% 26%, rgb(180 40 110 / 22%), transparent 58%),
+    linear-gradient(160deg, #060814 0%, #0a0c1a 55%, #100818 100%);
+}

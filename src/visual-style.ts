@@ -6,7 +6,7 @@
  * - metamorphosis: 形成中は生命体、音が止まると石化・結晶化して彫刻として完成する
  * - monolith:      彫刻に振り切る。膜なし・素材感重視、完成でギャラリー照明が灯る
  * - dither:        黒背景に Ordered Dither（網点）の有機ブロブ。vitekvisuals 系の見た目
- * - lumen:         闇の中の粒子雲。赤→青の発光と技術HUD。音で造形される（Bloom in the Dark 系）
+ * - lumen:         闇の虚空で音が物質を削る。低域＝質量、高域＝輪郭、トランジェント＝剥離
  */
 
 import type { SculptureMode } from "./sculpture-types";
@@ -324,7 +324,7 @@ const DITHER: VisualStyleConfig = {
 
 const LUMEN: VisualStyleConfig = {
   id: "lumen",
-  label: "発光 — Bloom in the Dark",
+  label: "発光 — 音が物質を削る",
   themeDark: true,
   membrane: {
     visible: false,
@@ -334,16 +334,16 @@ const LUMEN: VisualStyleConfig = {
     freezeTarget: 0.2,
   },
   particlesVisible: true,
-  idleWobble: 0.55,
+  idleWobble: 0.4,
   core: {
-    color: 0x6a8cff,
-    innerColor: 0xc4183a,
-    roughness: 0.4,
-    hueBase: 0.58,
-    hslSatBase: 0.7,
-    hslLightBase: 0.55,
-    shiftScale: 0.85,
-    emissiveScale: 1.4,
+    color: 0xd01848,
+    innerColor: 0x4a5aaa,
+    roughness: 0.45,
+    hueBase: 0.95,
+    hslSatBase: 0.65,
+    hslLightBase: 0.48,
+    shiftScale: 0.5,
+    emissiveScale: 1.1,
     sheen: 0,
     sheenColor: 0xffffff,
     iridescence: 0,
@@ -352,30 +352,30 @@ const LUMEN: VisualStyleConfig = {
   },
   completion: { mode: "breathe", seconds: 7 },
   env: {
-    background: 0x050812,
-    backgroundComplete: 0x060914,
+    background: 0x060814,
+    backgroundComplete: 0x070916,
     exposure: 1.05,
-    key: 0.35,
-    keyComplete: 0.28,
+    key: 0.7,
+    keyComplete: 0.58,
     fill: 0.55,
-    fillComplete: 0.48,
-    ambient: 0.42,
-    ambientComplete: 0.38,
+    fillComplete: 0.45,
+    ambient: 0.48,
+    ambientComplete: 0.42,
     stars: false,
     environmentMap: false,
     pedestal: false,
     spotlight: false,
     spotlightIntensity: 0,
-    cameraFar: 160,
+    cameraFar: 120,
     hemisphereGround: 0x04060e,
-    fillColor: 0x8a3a78,
-    rimLightIntensity: 0.55,
-    rimLightColor: 0xff4a7a,
+    fillColor: 0xb04888,
+    rimLightIntensity: 0.45,
+    rimLightColor: 0xff4a8a,
     backgroundProfile: {
       openVoid: true,
-      accentGlow: true,
       noStars: true,
-      fogDensity: 0.0028,
+      accentGlow: true,
+      fogDensity: 0.0015,
     },
   },
 };
@@ -441,8 +441,10 @@ export const EXPERIENCE_CATALOG: readonly ExperienceEntry[] = [
     sculptureMode: "lumen",
     visualStyleId: "lumen",
     introTitle: SHARED_INTRO.title,
-    introDescription: SHARED_INTRO.description,
-    introDescriptionEn: SHARED_INTRO.descriptionEn,
+    introDescription:
+      "音が入ると芯が灯り、低域が質量を、高域が輪郭を削り出す。トランジェントで表面が剥がれ、曲が形の記憶になる。",
+    introDescriptionEn:
+      "Sound lights a seed. Bass becomes mass, treble carves edge. Transients shed the surface until the song remains as form.",
   },
 ];
 

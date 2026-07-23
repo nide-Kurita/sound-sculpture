@@ -6888,12 +6888,12 @@ if (ditherStyle) {
   lightRig.visible = false;
 }
 
-// lumen: 粒子は Additive。ライトは弱く、マゼンタ寄りのフィルを強める
+// lumen: マゼンタ寄りの弱いフィルで輪郭を拾う（加算白飛びはさせない）
 if (lumenStyle) {
-  keyLight.intensity *= 0.35;
-  fillLight.intensity *= 1.15;
-  fillLight.color.setHex(0xb24a88);
-  ambientLight.intensity *= 0.7;
+  keyLight.intensity *= 0.7;
+  fillLight.color.setHex(0xb04888);
+  fillLight.intensity *= 1.05;
+  ambientLight.intensity *= 0.8;
 }
 
 // monolith スタイル: ギャラリーの台座

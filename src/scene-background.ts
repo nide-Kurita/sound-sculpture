@@ -283,10 +283,10 @@ class BackgroundDome {
     const top = this.material.uniforms.uTop.value as THREE.Color;
     const bottom = this.material.uniforms.uBottom.value as THREE.Color;
     const halo = this.material.uniforms.uHalo.value as THREE.Color;
-    top.setHSL(0.68, 0.45, 0.09);
-    bottom.setHSL(0.72, 0.35, 0.035);
-    halo.setHSL(0.92, 0.72, 0.22);
-    this.baseHaloStrength = 1.35;
+    top.setHSL(0.7, 0.42, 0.07);
+    bottom.setHSL(0.78, 0.4, 0.028);
+    halo.setHSL(0.92, 0.85, 0.28);
+    this.baseHaloStrength = 1.55;
     this.material.uniforms.uHaloStrength.value = this.baseHaloStrength;
   }
 
