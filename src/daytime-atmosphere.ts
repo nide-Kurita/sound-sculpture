@@ -159,6 +159,25 @@ export const formatAmPmFromHour = (hourFraction: number) => {
 export const formatLocalAmPm = (date = new Date()) =>
   formatAmPmFromHour(getLocalHourFraction(date));
 
+const MONTH_SHORT = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+
+/** 例: 23 Jul */
+export const formatLocalDateShort = (date = new Date()) =>
+  `${date.getDate()} ${MONTH_SHORT[date.getMonth()]}`;
+
 export const DAYTIME_BACKGROUND_STORAGE_KEY = "sound-sculpture:daytime-background";
 
 export const readDaytimeBackgroundEnabled = () => {

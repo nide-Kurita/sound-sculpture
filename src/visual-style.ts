@@ -5,16 +5,16 @@
  * - vita:          生命に振り切る。暗い環境で膜が真珠光沢に輝き、完成後も呼吸を続ける（基本）
  * - metamorphosis: 形成中は生命体、音が止まると石化・結晶化して彫刻として完成する
  * - monolith:      彫刻に振り切る。膜なし・素材感重視、完成でギャラリー照明が灯る
- * - carve:         無から音で形が出現する専用エンジン
- * - amoeba:        アメーバ増殖の専用エンジン
+ * - dither:        黒背景に Ordered Dither（網点）の有機ブロブ。vitekvisuals 系の見た目
+ * - lumen:         闇の中の粒子雲。赤→青の発光と技術HUD。音で造形される（Bloom in the Dark 系）
  */
 
 import type { SculptureMode } from "./sculpture-types";
 
-export type VisualStyleId = "metamorphosis" | "vita" | "monolith";
+export type VisualStyleId = "metamorphosis" | "vita" | "monolith" | "dither" | "lumen";
 
 /** 統合された作品モード ID（URL `style` パラメータ） */
-export type ExperienceId = VisualStyleId | "carve" | "amoeba";
+export type ExperienceId = VisualStyleId;
 
 export type BackgroundProfile = {
   studioSpace?: boolean;
@@ -24,6 +24,10 @@ export type BackgroundProfile = {
   openVoid?: boolean;
   /** 疎な生物発光粒子（vita） */
   biolumeMotes?: boolean;
+  /** 右上のマゼンタ・アクセントグロー（lumen） */
+  accentGlow?: boolean;
+  /** 星フィールドを生成しない（lumen） */
+  noStars?: boolean;
   /** スタイル別の FogExp2 密度 */
   fogDensity?: number;
 };
@@ -59,9 +63,6 @@ export type VisualStyleEnv = {
 export type VisualStyleConfig = {
   id: VisualStyleId;
   label: string;
-  introTitle: string;
-  introDescription: string;
-  introDescriptionEn?: string;
   themeDark: boolean;
   membrane: {
     visible: boolean;
@@ -103,12 +104,18 @@ export type VisualStyleConfig = {
   env: VisualStyleEnv;
 };
 
+/** 全スタイル共通のイントロコピー（index.html の初期文言・改行と一致） */
+export const SHARED_INTRO = {
+  title: "音の彫刻",
+  description:
+    "音を糧に、深海のような闇の中で生命体が育つ。\n膜は真珠のように輝き、\n完成後も音の鼓動を記憶して\n呼吸し続けます。",
+  descriptionEn:
+    "Fed by sound, a life-form grows. Its membrane gleams like a pearl, remembering the pulse of sound as it continues to breathe.",
+} as const;
+
 const METAMORPHOSIS: VisualStyleConfig = {
   id: "metamorphosis",
   label: "変容 — 生命が彫刻になる",
-  introTitle: "音の彫刻",
-  introDescription:
-    "音は膜の中で生命のように蠢き、形を蓄積します。演奏が終わり静寂が訪れると生命は結晶化し、音の記憶を刻んだ鉱物の彫刻として完成します。",
   themeDark: false,
   membrane: {
     visible: true,
@@ -150,22 +157,12 @@ const METAMORPHOSIS: VisualStyleConfig = {
     pedestal: false,
     spotlight: false,
     spotlightIntensity: 0,
-    backgroundProfile: {
-      studioSpace: true,
-      dustMotes: true,
-      domeVariant: "studio",
-    },
   },
 };
 
 const VITA: VisualStyleConfig = {
   id: "vita",
   label: "生命 — 神秘の生命体",
-  introTitle: "音の彫刻",
-  introDescription:
-    "音を糧に、深海のような闇の中で生命体が育つ。膜は真珠のように輝き、完成後も音の鼓動を記憶して呼吸し続けます。",
-  introDescriptionEn:
-    "Fed by sound, a life-form grows. Its membrane gleams like a pearl, remembering the pulse of sound as it continues to breathe.",
   themeDark: true,
   membrane: {
     visible: true,
@@ -225,9 +222,6 @@ const VITA: VisualStyleConfig = {
 const MONOLITH: VisualStyleConfig = {
   id: "monolith",
   label: "彫刻 — 石とブロンズ",
-  introTitle: "音の彫刻",
-  introDescription:
-    "低音が量塊を盛り、中音が面を流し、高音がノミの跡を刻みます。静寂とともにギャラリーの照明が灯り、音の性質から生まれた素材 — 大理石、ブロンズ、黒曜石 — の彫刻が現れます。",
   themeDark: false,
   membrane: {
     visible: false,
@@ -266,9 +260,123 @@ const MONOLITH: VisualStyleConfig = {
     ambientComplete: 0.3,
     stars: false,
     environmentMap: true,
-    pedestal: true,
+    pedestal: false,
     spotlight: true,
     spotlightIntensity: 3.4,
+  },
+};
+
+const DITHER: VisualStyleConfig = {
+  id: "dither",
+  label: "網点 — Ordered Dither",
+  themeDark: true,
+  membrane: {
+    visible: false,
+    vita: false,
+    opacityScale: 0,
+    completedOpacity: 0,
+    freezeTarget: 1,
+  },
+  particlesVisible: false,
+  idleWobble: 0.75,
+  core: {
+    // 中間グレー。ディザ前のシェーディング階調を確保する
+    color: 0xb8b8b8,
+    innerColor: 0x6e6e6e,
+    roughness: 0.78,
+    hueBase: 0.55,
+    hslSatBase: 0.04,
+    hslLightBase: 0.62,
+    shiftScale: 0.15,
+    emissiveScale: 0.08,
+    sheen: 0,
+    sheenColor: 0xffffff,
+    iridescence: 0,
+    clearcoat: 0.05,
+    pearlVariation: 0,
+  },
+  completion: { mode: "breathe", seconds: 6 },
+  env: {
+    background: 0x000000,
+    backgroundComplete: 0x000000,
+    exposure: 1,
+    key: 0,
+    keyComplete: 0,
+    fill: 0,
+    fillComplete: 0,
+    ambient: 0,
+    ambientComplete: 0,
+    stars: false,
+    environmentMap: false,
+    pedestal: false,
+    spotlight: false,
+    spotlightIntensity: 0,
+    cameraFar: 120,
+    hemisphereGround: 0x000000,
+    fillColor: 0x000000,
+    rimLightIntensity: 0,
+    backgroundProfile: {
+      openVoid: true,
+      fogDensity: 0,
+    },
+  },
+};
+
+const LUMEN: VisualStyleConfig = {
+  id: "lumen",
+  label: "発光 — Bloom in the Dark",
+  themeDark: true,
+  membrane: {
+    visible: false,
+    vita: false,
+    opacityScale: 0,
+    completedOpacity: 0,
+    freezeTarget: 0.2,
+  },
+  particlesVisible: true,
+  idleWobble: 0.55,
+  core: {
+    color: 0x6a8cff,
+    innerColor: 0xc4183a,
+    roughness: 0.4,
+    hueBase: 0.58,
+    hslSatBase: 0.7,
+    hslLightBase: 0.55,
+    shiftScale: 0.85,
+    emissiveScale: 1.4,
+    sheen: 0,
+    sheenColor: 0xffffff,
+    iridescence: 0,
+    clearcoat: 0,
+    pearlVariation: 0,
+  },
+  completion: { mode: "breathe", seconds: 7 },
+  env: {
+    background: 0x050812,
+    backgroundComplete: 0x060914,
+    exposure: 1.05,
+    key: 0.35,
+    keyComplete: 0.28,
+    fill: 0.55,
+    fillComplete: 0.48,
+    ambient: 0.42,
+    ambientComplete: 0.38,
+    stars: false,
+    environmentMap: false,
+    pedestal: false,
+    spotlight: false,
+    spotlightIntensity: 0,
+    cameraFar: 160,
+    hemisphereGround: 0x04060e,
+    fillColor: 0x8a3a78,
+    rimLightIntensity: 0.55,
+    rimLightColor: 0xff4a7a,
+    backgroundProfile: {
+      openVoid: true,
+      accentGlow: true,
+      noStars: true,
+      fogDensity: 0.0028,
+    },
   },
 };
 
@@ -276,32 +384,15 @@ export const VISUAL_STYLE_CATALOG: readonly VisualStyleConfig[] = [
   VITA,
   METAMORPHOSIS,
   MONOLITH,
+  DITHER,
+  LUMEN,
 ];
-
-/** classic 以外のモード用 — 従来どおりの環境（完成時も変化しない） */
-export const NEUTRAL_ENVIRONMENT: VisualStyleEnv = {
-  background: 0xf7f6f2,
-  backgroundComplete: 0xf7f6f2,
-  exposure: 1.08,
-  key: 3.4,
-  keyComplete: 3.4,
-  fill: 1.1,
-  fillComplete: 1.1,
-  ambient: 2.4,
-  ambientComplete: 2.4,
-  stars: true,
-  environmentMap: false,
-  pedestal: false,
-  spotlight: false,
-  spotlightIntensity: 0,
-};
 
 export type ExperienceEntry = {
   id: ExperienceId;
   label: string;
   sculptureMode: SculptureMode;
-  /** classic エンジン時のみビジュアルスタイルを持つ */
-  visualStyleId: VisualStyleId | null;
+  visualStyleId: VisualStyleId;
   introTitle: string;
   introDescription: string;
   introDescriptionEn?: string;
@@ -313,43 +404,45 @@ export const EXPERIENCE_CATALOG: readonly ExperienceEntry[] = [
     label: VITA.label,
     sculptureMode: "classic",
     visualStyleId: "vita",
-    introTitle: VITA.introTitle,
-    introDescription: VITA.introDescription,
-    introDescriptionEn: VITA.introDescriptionEn,
+    introTitle: SHARED_INTRO.title,
+    introDescription: SHARED_INTRO.description,
+    introDescriptionEn: SHARED_INTRO.descriptionEn,
   },
   {
     id: "metamorphosis",
     label: METAMORPHOSIS.label,
     sculptureMode: "classic",
     visualStyleId: "metamorphosis",
-    introTitle: METAMORPHOSIS.introTitle,
-    introDescription: METAMORPHOSIS.introDescription,
+    introTitle: SHARED_INTRO.title,
+    introDescription: SHARED_INTRO.description,
+    introDescriptionEn: SHARED_INTRO.descriptionEn,
   },
   {
     id: "monolith",
     label: MONOLITH.label,
     sculptureMode: "classic",
     visualStyleId: "monolith",
-    introTitle: MONOLITH.introTitle,
-    introDescription: MONOLITH.introDescription,
+    introTitle: SHARED_INTRO.title,
+    introDescription: SHARED_INTRO.description,
+    introDescriptionEn: SHARED_INTRO.descriptionEn,
   },
   {
-    id: "carve",
-    label: "出現 — 無から生み出す",
-    sculptureMode: "carve",
-    visualStyleId: null,
-    introTitle: "音の彫刻",
-    introDescription:
-      "無の中心から、音が触媒となって形が立ち上がります。低音は体積を、中音は表面の流れを、高音は細部を刻みます。曲の長さに合わせて未出現の領域が後から現れ、無音が続くとその瞬間の姿を作品として固定します。",
+    id: "dither",
+    label: DITHER.label,
+    sculptureMode: "classic",
+    visualStyleId: "dither",
+    introTitle: SHARED_INTRO.title,
+    introDescription: SHARED_INTRO.description,
+    introDescriptionEn: SHARED_INTRO.descriptionEn,
   },
   {
-    id: "amoeba",
-    label: "アメーバ — 増殖する生命体",
-    sculptureMode: "amoeba",
-    visualStyleId: null,
-    introTitle: "音の彫刻",
-    introDescription:
-      "音が触媒となり、原生質が増殖する。細胞が出芽し、偽足を伸ばし、膜が広がって群体を形づくります。低音・中音・高音が不可逆に蓄積され、無音が続くとその瞬間の成長結果を固定します。",
+    id: "lumen",
+    label: LUMEN.label,
+    sculptureMode: "lumen",
+    visualStyleId: "lumen",
+    introTitle: SHARED_INTRO.title,
+    introDescription: SHARED_INTRO.description,
+    introDescriptionEn: SHARED_INTRO.descriptionEn,
   },
 ];
 
@@ -360,16 +453,10 @@ export const getVisualStyle = (id: VisualStyleId): VisualStyleConfig =>
   VISUAL_STYLE_CATALOG.find((style) => style.id === id) ?? VITA;
 
 /** @deprecated ExperienceId へ統合。互換のため残す */
-export const parseVisualStyleId = (): VisualStyleId => {
-  const experience = parseExperienceId();
-  if (experience === "metamorphosis" || experience === "monolith" || experience === "vita") {
-    return experience;
-  }
-  return "vita";
-};
+export const parseVisualStyleId = (): VisualStyleId => parseExperienceId();
 
 /**
- * URL `?style=` を優先。旧 `?mode=carve|amoeba` も受け付ける。
+ * URL `?style=` を優先。旧 `?mode=` / carve・amoeba は vita へフォールバック。
  * デフォルトは vita。
  */
 export const parseExperienceId = (): ExperienceId => {
@@ -378,16 +465,8 @@ export const parseExperienceId = (): ExperienceId => {
   if (style === "vita") return "vita";
   if (style === "metamorphosis") return "metamorphosis";
   if (style === "monolith") return "monolith";
-  if (style === "carve") return "carve";
-  if (style === "amoeba") return "amoeba";
-
-  const mode = params.get("mode");
-  if (mode === "carve") return "carve";
-  if (mode === "amoeba") return "amoeba";
-  if (mode === "classic") {
-    // 旧 URL: mode=classic のみ → デフォルト vita
-    return "vita";
-  }
+  if (style === "dither") return "dither";
+  if (style === "lumen") return "lumen";
 
   return "vita";
 };

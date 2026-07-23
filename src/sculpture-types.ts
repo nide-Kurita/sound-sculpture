@@ -3,7 +3,7 @@ import type { StructureSnapshot } from "./structure-tracker";
 import type { SpeciesProfile } from "./species-profile";
 import type { SculpturePalette } from "./audio-palette";
 
-export type SculptureMode = "classic" | "carve" | "amoeba";
+export type SculptureMode = "classic" | "lumen";
 
 export type AudioBands = {
   /** サブ低域 (キック胴・フロアタム) 30–120 Hz */
@@ -148,12 +148,4 @@ export const curlNoiseSample = (
 };
 
 /** @deprecated `parseExperienceId`（visual-style）へ統合。互換のため残す */
-export const parseSculptureMode = (): SculptureMode => {
-  const style = new URLSearchParams(window.location.search).get("style");
-  if (style === "carve") return "carve";
-  if (style === "amoeba") return "amoeba";
-  const param = new URLSearchParams(window.location.search).get("mode");
-  if (param === "carve") return "carve";
-  if (param === "amoeba") return "amoeba";
-  return "classic";
-};
+export const parseSculptureMode = (): SculptureMode => "classic";

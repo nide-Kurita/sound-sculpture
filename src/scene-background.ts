@@ -277,6 +277,19 @@ class BackgroundDome {
     this.material.uniforms.uAbyss.value = enabled ? 1 : 0;
   }
 
+  /** lumen 用: 右上マゼンタのハローを強める */
+  setAccentGlow(enabled: boolean) {
+    if (!enabled) return;
+    const top = this.material.uniforms.uTop.value as THREE.Color;
+    const bottom = this.material.uniforms.uBottom.value as THREE.Color;
+    const halo = this.material.uniforms.uHalo.value as THREE.Color;
+    top.setHSL(0.68, 0.45, 0.09);
+    bottom.setHSL(0.72, 0.35, 0.035);
+    halo.setHSL(0.92, 0.72, 0.22);
+    this.baseHaloStrength = 1.35;
+    this.material.uniforms.uHaloStrength.value = this.baseHaloStrength;
+  }
+
   setFromBackground(base: THREE.Color, dark: boolean, studio = false, abyss = false) {
     base.getHSL(this._hsl);
     const { h, s, l } = this._hsl;
@@ -571,7 +584,7 @@ class StarField {
     time: number,
     bands: AudioBands,
     deltaTime: number,
-    camera?: THREE.PerspectiveCamera,
+    camera?: THREE.Camera,
     pointerNDC?: THREE.Vector2 | null,
     motionEnabled = true,
     /** true=曲中の軽量共有フィールド / false=停止中の全星フル評価 */
@@ -645,7 +658,7 @@ class StarField {
   /** カーソル付近の星を画面空間で少し押し退ける */
   private refreshPointerAvoid(
     deltaTime: number,
-    camera?: THREE.PerspectiveCamera,
+    camera?: THREE.Camera,
     pointerNDC?: THREE.Vector2 | null,
   ) {
     const count = this.twinklePhase.length;
@@ -1538,8 +1551,10 @@ export class SceneBackground {
       this.innerDome.setAbyssVariant(this.abyssVariant);
     }
 
+    const noStars = this.profile?.noStars === true;
+
     this.starsNear = new StarField({
-      count: this.abyssVariant ? 900 : 820,
+      count: noStars ? 0 : this.abyssVariant ? 900 : 820,
       // カメラ(~6)に近すぎると sizeAttenuation で巨大な四角になる
       minRadius: this.abyssVariant ? 16 : 10,
       maxRadius: this.abyssVariant ? 28 : 26,
@@ -1548,11 +1563,12 @@ export class SceneBackground {
       parallax: 1.6,
       parallaxAmount: this.abyssVariant ? 0.14 : 0.04,
       coolBias: this.abyssVariant,
-      organicDrift: this.abyssVariant,
+      organicDrift: this.abyssVariant && !noStars,
       idleMotion: 1,
-      trailSteps: 3,
+      trailSteps: noStars ? 1 : 3,
     });
-    this.starsMid = this.abyssVariant
+    this.starsMid =
+      !noStars && this.abyssVariant
       ? new StarField({
           count: 2200,
           minRadius: 28,
@@ -1568,7 +1584,7 @@ export class SceneBackground {
         })
       : null;
     this.starsFar = new StarField({
-      count: this.abyssVariant ? 6400 : 3400,
+      count: noStars ? 0 : this.abyssVariant ? 6400 : 3400,
       minRadius: 26,
       maxRadius: this.abyssVariant ? 150 : 58,
       size: this.abyssVariant ? 0.028 : 0.02,
@@ -1576,10 +1592,16 @@ export class SceneBackground {
       parallax: 0.38,
       parallaxAmount: this.abyssVariant ? 0.05 : 0.04,
       coolBias: this.abyssVariant,
-      organicDrift: this.abyssVariant,
+      organicDrift: this.abyssVariant && !noStars,
       idleMotion: 0.28,
-      trailSteps: 2,
+      trailSteps: noStars ? 1 : 2,
     });
+    if (noStars) {
+      this.starsNear.points.visible = false;
+      this.starsNear.trailPoints.visible = false;
+      this.starsFar.points.visible = false;
+      this.starsFar.trailPoints.visible = false;
+    }
 
     this.dust = this.profile?.dustMotes ? new DustMoteField() : null;
     this.biolume = this.profile?.biolumeMotes
@@ -1714,6 +1736,27 @@ export class SceneBackground {
     this.floor.position.y = usePedestal ? -2.62 : -1.82;
   }
 
+  /** 網点など純黒グラフィック用: ドーム・星・埃を消し、クリア色だけにする */
+  setGraphicVoid(enabled: boolean) {
+    this.dome.mesh.visible = !enabled;
+    if (this.innerDome) {
+      this.innerDome.mesh.visible = !enabled;
+    }
+    if (enabled) {
+      this.starsNear.points.visible = false;
+      this.starsNear.trailPoints.visible = false;
+      if (this.starsMid) {
+        this.starsMid.points.visible = false;
+        this.starsMid.trailPoints.visible = false;
+      }
+      this.starsFar.points.visible = false;
+      this.starsFar.trailPoints.visible = false;
+      if (this.dust) this.dust.points.visible = false;
+      if (this.biolume) this.biolume.points.visible = false;
+      if (this.biolumeFar) this.biolumeFar.points.visible = false;
+    }
+  }
+
   setPaletteColors(forming: THREE.Color, complete: THREE.Color) {
     this.formingColor.copy(forming);
     this.completeColor.copy(complete);
@@ -1724,6 +1767,9 @@ export class SceneBackground {
     this.envMix = envMix;
     this.dome.setFromBackground(color, dark, this.studioVariant, this.abyssVariant);
     this.innerDome?.setFromBackground(color, dark, this.studioVariant, this.abyssVariant);
+    if (this.profile?.accentGlow) {
+      this.dome.setAccentGlow(true);
+    }
     this.cyclorama?.setFromBackground(color, envMix);
     this.studioFloor?.setFromBackground(color, envMix);
   }
@@ -1769,6 +1815,10 @@ export class SceneBackground {
 
   syncFog(scene: THREE.Scene, color: THREE.Color, dark: boolean) {
     const density = this.getFogDensity(dark);
+    if (density <= 0) {
+      scene.fog = null;
+      return;
+    }
     if (this.abyssVariant) {
       const fogColor = color.clone();
       const hsl = { h: 0, s: 0, l: 0 };
@@ -1799,7 +1849,7 @@ export class SceneBackground {
     time: number,
     bands: AudioBands,
     deltaTime: number,
-    camera: THREE.PerspectiveCamera,
+    camera: THREE.Camera,
     pointerNDC: THREE.Vector2 | null = null,
     starsMotionEnabled = true,
     /** 曲中は true（軽量）/ 停止中は false（全星フル） */

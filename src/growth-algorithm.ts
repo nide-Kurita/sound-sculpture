@@ -29,7 +29,7 @@ export const GROWTH_ALGORITHM_CATALOG: GrowthAlgorithmMeta[] = [
   { id: "lsystem", label: "L-System", tagline: "枝分かれ — 触手・骨格・器官" },
   { id: "differential-growth", label: "Differential Growth", tagline: "面の押し合い — レタス・脳・珊瑚" },
   { id: "reaction-diffusion", label: "Reaction Diffusion", tagline: "反応拡散 — 皮膚模様・侵食文様" },
-  { id: "voronoi", label: "Voronoi Growth", tagline: "細胞分裂・鉱物の割れ目" },
+  { id: "voronoi", label: "Voronoi Growth", tagline: "細胞分裂・細胞の斑模様" },
   { id: "dla", label: "DLA", tagline: "拡散限定凝集 — 雪の結晶・菌糸" },
   { id: "physarum", label: "Physarum", tagline: "粘菌網 — 神経・血管の経路" },
   { id: "flow-field", label: "Flow Field", tagline: "流れ場に沿った成長" },
@@ -89,21 +89,16 @@ const laplacianPattern = (x: number, y: number, z: number, salt: number, base: (
 };
 
 /**
- * 割れ目・細胞っぽい境界場（O(1)）。
- * 本格 Voronoi は毎頂点×複数チャネルで落ちるため、折りたたみ格子で近似する。
+ * 細胞ドメイン風の連続場（O(1)）。
+ * 格子フォールドの F2-F1 は稜線が尖りすぎてメッシュに割れ目が出るため使わない。
  */
 const voronoiEdge = (x: number, y: number, z: number, salt: number) => {
-  const px = x * 3.35 + salt * 0.13;
-  const py = y * 3.1 - salt * 0.11;
-  const pz = z * 3.45 + salt * 0.09;
-  // 格子中心からの距離（各軸）
-  const fx = Math.abs(px - Math.floor(px + 0.5));
-  const fy = Math.abs(py - Math.floor(py + 0.5));
-  const fz = Math.abs(pz - Math.floor(pz + 0.5));
-  const nearest = Math.min(fx, fy, fz);
-  const mid = fx + fy + fz - nearest - Math.max(fx, fy, fz);
-  // F2-F1 風の稜線
-  return (mid - nearest) * 1.15;
+  const a = Math.sin(x * 3.6 + salt * 0.31) * Math.cos(y * 3.2 - salt * 0.22);
+  const b = Math.sin(y * 4.1 + z * 2.4 + salt * 0.47);
+  const c = Math.cos(z * 3.8 - x * 2.1 + salt * 0.19);
+  const d = Math.sin((x + y) * 2.3 - z * 1.7 + salt * 0.55);
+  // なだらかな斑・区画感（不連続なし）
+  return (a * 0.45 + b * 0.28 + c * 0.18 + d * 0.09);
 };
 
 const flowFromAngle = (x: number, y: number, z: number, salt: number, out: GrowthVec3, scale = 1) => {
@@ -210,9 +205,8 @@ const reactionDiffusionAlgo: GrowthAlgorithm = {
 
 const voronoiAlgo: GrowthAlgorithm = {
   id: "voronoi",
-  pattern: (x, y, z, salt) => voronoiEdge(x, y, z, salt) * 1.7 - 0.22,
-  // hash を重ねず角度だけ（呼び出し回数が多い）
-  flow: (x, y, z, salt, out) => flowFromAngle(x, y, z, salt, out, 0.45),
+  pattern: (x, y, z, salt) => voronoiEdge(x, y, z, salt) * 1.15,
+  flow: (x, y, z, salt, out) => flowFromAngle(x, y, z, salt, out, 0.38),
   placeOnSphere: (index, _total, seed) => {
     const c = Math.floor(seededUnit(index, seed) * 10);
     const cx = Math.sin(c * 2.399 + seed) * 0.85;
@@ -221,7 +215,7 @@ const voronoiAlgo: GrowthAlgorithm = {
     return normalize3(cx, cy, cz);
   },
   spikeMask: (x, y, z, salt) =>
-    clamp01(Math.abs(Math.sin(x * 8.7 + y * 6.4 - z * 5.1 + salt * 0.9)) * 0.7 + 0.2),
+    clamp01(0.22 + Math.abs(voronoiEdge(x, y, z, salt + 1.7)) * 0.45),
 };
 
 const dlaAlgo: GrowthAlgorithm = {
@@ -546,7 +540,7 @@ const ALGO_CHANNEL_BIAS: Partial<
   lsystem: { anchor: 1.45, flow: 1.32, mid: 1.22, bulk: 1.12 },
   "differential-growth": { bulk: 1.32, mid: 1.28, flow: 1.22, surface: 1.2 },
   "reaction-diffusion": { mid: 1.38, surface: 1.4, erosion: 1.28, bulk: 1.1 },
-  voronoi: { bulk: 1.18, mid: 1.15, high: 1.0, global: 1.08 },
+  voronoi: { bulk: 1.08, mid: 1.05, high: 0.82, global: 1.02 },
   dla: { high: 1.4, anchor: 1.35, flow: 1.28, bulk: 1.12 },
   physarum: { flow: 1.48, anchor: 1.35, surface: 1.3, mid: 1.18 },
   "flow-field": { flow: 1.55, surface: 1.32, live: 1.22, bulk: 1.1 },

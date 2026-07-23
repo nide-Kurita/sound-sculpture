@@ -62,8 +62,6 @@ import {
   nudgeClayColorShift,
   resolveClayPalette,
 } from "./clay-color";
-import { AmoebaSculpture } from "./amoeba-sculpture";
-import { CarveSculpture } from "./carve-sculpture";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import {
   deriveAfterlifeMaterial,
@@ -82,16 +80,18 @@ import {
   EXPERIENCE_CATALOG,
   getActiveVisualStyle,
   getExperience,
-  NEUTRAL_ENVIRONMENT,
   parseExperienceId,
   setActiveVisualStyle,
   type ExperienceId,
   type VisualStyleId,
 } from "./visual-style";
+import { OrderedDitherPass, createDitherMatteMaterial } from "./dither-pass";
+import { LumenSculpture } from "./lumen-sculpture";
 import { SceneBackground } from "./scene-background";
 import {
   formatAmPmFromHour,
   formatLocalAmPm,
+  formatLocalDateShort,
   getLocalHourFraction,
   readDaytimeBackgroundEnabled,
   sampleDaytimeAtmosphere,
@@ -117,7 +117,6 @@ import {
   type AudioBands,
   type RhythmEvents,
   type SculptureExperience,
-  type SculptureMode,
 } from "./sculpture-types";
 import {
   buildDeterministicTimeline,
@@ -1879,6 +1878,14 @@ class SoundSculpture {
       this.detachmentDustMetal.visible = false;
       this.detachmentDustSpark.visible = false;
     }
+    // dither: 2D 網点用のマット陰影。内側コア・影を消し、階調はポストプロセスへ
+    if (this.style.id === "dither") {
+      this.core.material = createDitherMatteMaterial();
+      this.innerCore.visible = false;
+      this.core.castShadow = false;
+      this.core.receiveShadow = false;
+      this.innerCore.castShadow = false;
+    }
     this.parkInactivePointPools();
 
     this.basePositions = new Float32Array(this.geometry.attributes.position.array);
@@ -1920,7 +1927,7 @@ class SoundSculpture {
 
     if (styleCore.pearlVariation > 0) {
       this.bakeCorePearlColors(styleCore.pearlVariation);
-    } else {
+    } else if (this.style.id !== "dither") {
       this.bakeCoreClayMottle(0.18);
     }
   }
@@ -3310,6 +3317,9 @@ class SoundSculpture {
   }
 
   private updateCoreMaterial(bands: AudioBands, deltaTime: number) {
+    if (this.style.id === "dither") {
+      return;
+    }
     const t = runtimeTuning;
     const st = this.style.core;
     const shift = t.coreColorShift * st.shiftScale;
@@ -5753,13 +5763,11 @@ if (
 
 const experienceId: ExperienceId = parseExperienceId();
 const experience = getExperience(experienceId);
-const sculptureMode: SculptureMode = experience.sculptureMode;
-const visualStyleId: VisualStyleId = experience.visualStyleId ?? "vita";
+const visualStyleId: VisualStyleId = experience.visualStyleId;
 setActiveVisualStyle(visualStyleId);
 const visualStyle = getActiveVisualStyle();
-// classic エンジンの作品スタイルだけ環境を差し替える
-const styleEnvActive = sculptureMode === "classic";
-const sceneEnv = styleEnvActive ? visualStyle.env : NEUTRAL_ENVIRONMENT;
+const styleEnvActive = true;
+const sceneEnv = visualStyle.env;
 const daytimeBackgroundInput = document.querySelector<HTMLInputElement>("#daytime-background");
 const liveWeatherInput = document.querySelector<HTMLInputElement>("#live-weather");
 const liveWeatherStatusEl = document.querySelector<HTMLElement>("#live-weather-status");
@@ -5800,8 +5808,7 @@ if (import.meta.env.DEV && daytimePreviewRoot) {
 if (import.meta.env.DEV && weatherPreviewRoot) {
   weatherPreviewRoot.hidden = false;
 }
-let growthAlgorithmId: GrowthAlgorithmId =
-  sculptureMode === "carve" ? "flow-field" : parseGrowthAlgorithmId();
+let growthAlgorithmId: GrowthAlgorithmId = parseGrowthAlgorithmId();
 setGrowthAlgorithmId(growthAlgorithmId);
 
 const populateGrowthAlgorithmSelect = () => {
@@ -5817,8 +5824,7 @@ const populateGrowthAlgorithmSelect = () => {
 const applyGrowthAlgorithmUi = (id: GrowthAlgorithmId) => {
   growthAlgorithmSelect.value = id;
   const meta = getGrowthAlgorithmMeta(id);
-  growthAlgorithmHint.textContent =
-    sculptureMode === "carve" ? `出現パターン — ${meta.tagline}` : meta.tagline;
+  growthAlgorithmHint.textContent = meta.tagline;
 };
 
 populateGrowthAlgorithmSelect();
@@ -5854,43 +5860,39 @@ setBandSoloMode(bandSoloMode);
 const applyExperienceUi = (id: ExperienceId) => {
   const entry = getExperience(id);
   experienceStyleSelect.value = id;
-  appElement.classList.toggle("mode-carve", entry.sculptureMode === "carve");
-  appElement.classList.toggle("mode-classic", entry.sculptureMode === "classic");
-  appElement.classList.toggle("mode-amoeba", entry.sculptureMode === "amoeba");
+  appElement.classList.toggle("mode-classic", true);
   appElement.classList.toggle("style-metamorphosis", entry.visualStyleId === "metamorphosis");
   appElement.classList.toggle("style-vita", entry.visualStyleId === "vita");
   appElement.classList.toggle("style-monolith", entry.visualStyleId === "monolith");
+  appElement.classList.toggle("style-dither", entry.visualStyleId === "dither");
+  appElement.classList.toggle("style-lumen", entry.visualStyleId === "lumen");
   if (!daytimeBackgroundEnabled) {
     appElement.classList.toggle("theme-dark", styleEnvActive && visualStyle.themeDark);
   }
 
-  // 既定の VITA のコピーは index.html を正とし、SEO向けの初期HTMLを保持する。
-  // URLで別スタイルを開いた場合のみ、そのスタイル固有のコピーへ差し替える。
-  if (entry.id !== "vita") {
-    const introTitle = document.querySelector<HTMLElement>("#intro-title");
-    const introDescription = document.querySelector<HTMLElement>("#intro-description");
-    const introDescriptionJa = document.querySelector<HTMLElement>("#intro-description-ja");
-    if (introTitle) {
-      introTitle.textContent = entry.introTitle;
-    }
-    if (introDescription) {
-      introDescription.textContent = entry.introDescriptionEn ?? "";
-    }
-    if (introDescriptionJa) {
-      introDescriptionJa.textContent = entry.introDescription.replaceAll("。", "。\n").trim();
-    }
-  }
-
-  if (entry.sculptureMode === "carve") {
-    document.title = "Sound Sculpture — 生み出す";
-  } else if (entry.sculptureMode === "amoeba") {
-    document.title = "Sound Sculpture — 生命体";
-  } else if (entry.id === "vita") {
+  if (entry.id === "vita") {
     document.title = "Sound Sculpture — 生命";
   } else if (entry.id === "monolith") {
     document.title = "Sound Sculpture — 彫刻";
+  } else if (entry.id === "metamorphosis") {
+    document.title = "Sound Sculpture — 変容";
+  } else if (entry.id === "dither") {
+    document.title = "Sound Sculpture — 網点";
+  } else if (entry.id === "lumen") {
+    document.title = "Sound Sculpture — 発光";
   } else {
     document.title = "Sound Sculpture";
+  }
+
+  const introTitleEl = document.querySelector<HTMLElement>("#intro-title");
+  const introDescEl = document.querySelector<HTMLElement>("#intro-description");
+  const introDescJaEl = document.querySelector<HTMLElement>("#intro-description-ja");
+  if (introTitleEl) introTitleEl.textContent = entry.introTitle;
+  if (introDescEl && entry.introDescriptionEn) {
+    introDescEl.textContent = entry.introDescriptionEn;
+  }
+  if (introDescJaEl) {
+    introDescJaEl.innerHTML = entry.introDescription.replace(/\n/g, "<br>");
   }
 };
 
@@ -6272,28 +6274,52 @@ const syncSceneFog = () => {
 
 syncSceneFog();
 
-const camera = new THREE.PerspectiveCamera(
-  36,
-  window.innerWidth / window.innerHeight,
-  0.1,
-  sceneEnv.cameraFar ?? 100,
-);
-camera.position.set(0, 0.28, 6.4);
+const ditherStyle = visualStyleId === "dither";
+const lumenStyle = visualStyleId === "lumen";
+const cameraAspect = window.innerWidth / Math.max(1, window.innerHeight);
+const orthoHalf = 3.15;
+const camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = ditherStyle
+  ? new THREE.OrthographicCamera(
+      -orthoHalf * cameraAspect,
+      orthoHalf * cameraAspect,
+      orthoHalf,
+      -orthoHalf,
+      0.1,
+      sceneEnv.cameraFar ?? 100,
+    )
+  : new THREE.PerspectiveCamera(36, cameraAspect, 0.1, sceneEnv.cameraFar ?? 100);
+// 正投影は真正面寄りにして 2D グラフィックに見せる
+camera.position.set(0, ditherStyle ? 0 : lumenStyle ? 0.12 : 0.28, ditherStyle ? 8 : lumenStyle ? 5.6 : 6.4);
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
-  antialias: true,
+  antialias: !ditherStyle,
   alpha: false,
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(
+  ditherStyle ? 1 : lumenStyle ? Math.min(window.devicePixelRatio, 1.5) : Math.min(window.devicePixelRatio, 2),
+);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(scene.background as THREE.Color);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = sceneEnv.exposure;
-renderer.shadowMap.enabled = true;
+renderer.toneMapping = ditherStyle ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = ditherStyle ? 1 : sceneEnv.exposure;
+renderer.shadowMap.enabled = !ditherStyle && !lumenStyle;
 // VSM は回転時に自己影が飛んで急に暗くなることがあるため、PCF Soft を使う
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const ditherPass = ditherStyle
+  ? (() => {
+      const bufferSize = new THREE.Vector2();
+      renderer.getDrawingBufferSize(bufferSize);
+      return new OrderedDitherPass(bufferSize.x, bufferSize.y);
+    })()
+  : null;
+
+if (ditherStyle) {
+  scene.fog = null;
+  sceneBackground.setGraphicVoid(true);
+}
 
 // monolith スタイル: 環境マップで石・金属の質感を出す
 if (sceneEnv.environmentMap) {
@@ -6424,13 +6450,7 @@ const updateAudioCameraSway = (
 };
 
 const sculpture: SculptureExperience =
-  sculptureMode === "amoeba"
-    ? new AmoebaSculpture({
-        consumeOrganBudget: (cost) => structureTracker.consumeOrganBudget(cost),
-      })
-    : sculptureMode === "carve"
-      ? new CarveSculpture()
-      : new SoundSculpture();
+  experience.sculptureMode === "lumen" ? new LumenSculpture() : new SoundSculpture();
 scene.add(sculpture.group);
 
 // ドラッグ: オブジェクト自体を回す。背景とライトは回転量の3%だけ追従
@@ -6597,16 +6617,20 @@ let sculptureStickUserMoved = false;
 const getSculptureStickDockPosition = (): { left: number; top: number } => {
   if (!sculptureStickEl) return { left: 0, top: 0 };
   const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
-  // intro / hud-left-bottom と同じ左インセットに揃える
+  // intro / hud-left-stack と同じ左インセットに揃える
   const introEl = document.querySelector<HTMLElement>(".intro");
+  const leftStackEl = document.querySelector<HTMLElement>(".hud-left-stack");
   const leftBottomEl = document.querySelector<HTMLElement>(".hud-left-bottom");
   const alignedLeft =
     introEl?.getBoundingClientRect().left ??
-    leftBottomEl?.getBoundingClientRect().left ??
+    leftStackEl?.getBoundingClientRect().left ??
     clamp(window.innerWidth * 0.045, 1.5 * rem, 3.2 * rem);
   const height = sculptureStickEl.offsetHeight;
   const introBottom = introEl?.getBoundingClientRect().bottom ?? 0;
-  const metersTop = leftBottomEl?.getBoundingClientRect().top ?? window.innerHeight;
+  const metersTop =
+    leftBottomEl?.getBoundingClientRect().top ??
+    leftStackEl?.getBoundingClientRect().top ??
+    window.innerHeight;
   const centerY = (introBottom + metersTop) * 0.5;
   return {
     left: alignedLeft,
@@ -6737,6 +6761,9 @@ const pokeSculptureAtClient = (clientX: number, clientY: number) => {
   sculpture.group.worldToLocal(sculptureHitLocal);
   sculpture.pokeSurface?.(sculptureHitLocal);
   sculpture.pokeIdle?.();
+  if (ditherPass) {
+    ditherPass.cyclePalette();
+  }
 };
 
 const starPointerNdc = new THREE.Vector2();
@@ -6856,6 +6883,19 @@ if (sceneEnv.rimLightIntensity) {
   lightRig.add(rimLight);
 }
 
+// dither: 陰影はマットシェーダ側。シーンライトは消して 3D 感を出さない
+if (ditherStyle) {
+  lightRig.visible = false;
+}
+
+// lumen: 粒子は Additive。ライトは弱く、マゼンタ寄りのフィルを強める
+if (lumenStyle) {
+  keyLight.intensity *= 0.35;
+  fillLight.intensity *= 1.15;
+  fillLight.color.setHex(0xb24a88);
+  ambientLight.intensity *= 0.7;
+}
+
 // monolith スタイル: ギャラリーの台座
 if (sceneEnv.pedestal) {
   sceneBackground.setPedestalLayout(true);
@@ -6926,16 +6966,20 @@ const hudMidEl = document.querySelector<HTMLElement>("#hud-mid");
 const hudHighEl = document.querySelector<HTMLElement>("#hud-high");
 const hudSignalEl = document.querySelector<HTMLElement>("#hud-signal");
 const hudStatusEl = document.querySelector<HTMLElement>("#hud-status");
-const hudLocalTimeEl = document.querySelector<HTMLElement>("#hud-local-time");
 const hudLocalTimeFieldEl = document.querySelector<HTMLElement>("#hud-local-time-field");
-const hudWeatherEl = document.querySelector<HTMLElement>("#hud-weather");
+const hudLocalTimeEl = document.querySelector<HTMLElement>("#hud-local-time");
 const hudWeatherFieldEl = document.querySelector<HTMLElement>("#hud-weather-field");
+const hudWeatherEl = document.querySelector<HTMLElement>("#hud-weather");
 const hudTimecodeEl = document.querySelector<HTMLElement>("#hud-timecode");
 const hudBpmEl = document.querySelector<HTMLElement>("#hud-bpm");
 const hudAlgoEl = document.querySelector<HTMLElement>("#hud-algo");
 const hudScopeEl = document.querySelector<HTMLElement>("#hud-scope");
 const hudTicksEl = document.querySelector<HTMLElement>("#hud-ticks");
 const hudTicksXEl = document.querySelector<HTMLElement>("#hud-ticks-x");
+
+if (hudAlgoEl) {
+  hudAlgoEl.textContent = growthAlgorithmId.toUpperCase();
+}
 
 /** オブジェクトの向きを連続座標で示す照準 */
 const HUD_TICK_COUNT = 13;
@@ -7335,12 +7379,10 @@ const setLiveWeatherStatus = (message: string, visible = true) => {
 };
 
 const updateWeatherHud = () => {
-  if (hudWeatherFieldEl) {
-    hudWeatherFieldEl.hidden = !liveWeatherEnabled;
-  }
-  if (!hudWeatherEl) {
+  if (!hudWeatherFieldEl || !hudWeatherEl) {
     return;
   }
+  hudWeatherFieldEl.hidden = !liveWeatherEnabled;
   if (!liveWeatherEnabled) {
     hudWeatherEl.textContent = "---";
     return;
@@ -7444,22 +7486,26 @@ const syncDaytimeEnvironmentTargets = () => {
 };
 
 const updateLocalClockHud = () => {
+  const showDateTime = daytimeBackgroundEnabled;
   if (hudLocalTimeFieldEl) {
-    hudLocalTimeFieldEl.hidden = !daytimeBackgroundEnabled;
+    hudLocalTimeFieldEl.hidden = !showDateTime;
   }
-  if (!daytimeBackgroundEnabled) {
+  if (!showDateTime) {
     return;
   }
-  const label =
+  const now = new Date();
+  const date = formatLocalDateShort(now);
+  const time =
     daytimePreviewHour === null
-      ? formatLocalAmPm()
+      ? formatLocalAmPm(now)
       : formatAmPmFromHour(daytimePreviewHour);
-  if (label === lastLocalTimeLabel) {
+  const stamp = `${date}|${time}`;
+  if (stamp === lastLocalTimeLabel) {
     return;
   }
-  lastLocalTimeLabel = label;
+  lastLocalTimeLabel = stamp;
   if (hudLocalTimeEl) {
-    hudLocalTimeEl.textContent = label;
+    hudLocalTimeEl.textContent = `${date}  ${time}`;
   }
 };
 
@@ -7915,9 +7961,22 @@ resetSculptureButton.addEventListener("click", resetSculptureSession);
 exportButton.addEventListener("click", exportSculpture);
 
 const resize = () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
+  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  if (camera instanceof THREE.OrthographicCamera) {
+    camera.left = -orthoHalf * aspect;
+    camera.right = orthoHalf * aspect;
+    camera.top = orthoHalf;
+    camera.bottom = -orthoHalf;
+  } else {
+    camera.aspect = aspect;
+  }
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  if (ditherPass) {
+    const bufferSize = new THREE.Vector2();
+    renderer.getDrawingBufferSize(bufferSize);
+    ditherPass.setSize(bufferSize.x, bufferSize.y);
+  }
   viewControls.handleResize();
 };
 
@@ -8188,7 +8247,12 @@ const render = () => {
     rhythmEvents,
     isAudioReady && !isComplete,
   );
-  renderer.render(scene, camera);
+  if (ditherPass) {
+    ditherPass.update(deltaTime);
+    ditherPass.render(renderer, scene, camera);
+  } else {
+    renderer.render(scene, camera);
+  }
   requestAnimationFrame(render);
 };
 
