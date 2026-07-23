@@ -6,6 +6,7 @@ import {
   growthModulateScalar,
   growthModulateVector3,
   growthPattern,
+  isHeavyGrowthPatternAlgorithm,
   type GrowthVec3,
 } from "./growth-algorithm";
 import type { BackgroundProfile, VisualStyleEnv } from "./visual-style";
@@ -39,8 +40,9 @@ let starGrowthFieldAlgo = "";
 
 const refreshStarGrowthField = (time: number) => {
   const algoId = getGrowthAlgorithmId();
-  // ~24fps 相当で十分（星は遅い漂い）。アルゴリズム切替時は即更新
-  if (algoId === starGrowthFieldAlgo && time - starGrowthFieldClock < 1 / 24) {
+  // 重い pattern は更新頻度を下げる（星は遅い漂いで足りる）
+  const minInterval = isHeavyGrowthPatternAlgorithm(algoId) ? 1 / 8 : 1 / 24;
+  if (algoId === starGrowthFieldAlgo && time - starGrowthFieldClock < minInterval) {
     return;
   }
   starGrowthFieldAlgo = algoId;
@@ -49,8 +51,12 @@ const refreshStarGrowthField = (time: number) => {
   const slow = time * 0.32;
   const fast = time * 0.58 + 13.7;
   const flowSalt = slow * 0.55;
+  const heavy = isHeavyGrowthPatternAlgorithm(algoId);
+  // 重い algo はサンプル半分だけ再計算
+  const sampleStride = heavy ? 2 : 1;
+  const samplePhase = heavy ? Math.floor(time * 8) % sampleStride : 0;
 
-  for (let i = 0; i < STAR_GROWTH_SAMPLE_COUNT; i += 1) {
+  for (let i = samplePhase; i < STAR_GROWTH_SAMPLE_COUNT; i += sampleStride) {
     const di = i * 3;
     const nx = STAR_GROWTH_DIRS[di];
     const ny = STAR_GROWTH_DIRS[di + 1];
@@ -578,7 +584,8 @@ class StarField {
 
     if (this.organicDrift && this.anchorPositions && this.particleSeed) {
       if (motionEnabled) {
-        if (growthLite) {
+        // Voronoi 等はフル評価だと星の数で落ちるため、常に共有フィールド経路へ
+        if (growthLite || isHeavyGrowthPatternAlgorithm()) {
           this.updateOrganicDriftLite(this.motionClock, bands, deltaTime, cameraPosition);
         } else {
           this.updateOrganicDriftFull(this.motionClock, bands, deltaTime, cameraPosition);

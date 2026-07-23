@@ -88,22 +88,22 @@ const laplacianPattern = (x: number, y: number, z: number, salt: number, base: (
   return (lx + ly + lz) * 0.25 - c;
 };
 
-const voronoiEdge = (x: number, y: number, z: number, salt: number, cells = 6) => {
-  let best = 1e9;
-  let second = 1e9;
-  for (let c = 0; c < cells; c += 1) {
-    const cx = Math.sin(c * 2.399 + salt * 0.17) * 0.9;
-    const cy = Math.cos(c * 1.731 + salt * 0.23) * 0.9;
-    const cz = Math.sin(c * 3.113 - salt * 0.11) * 0.9;
-    const d = Math.hypot(x - cx, y - cy, z - cz);
-    if (d < best) {
-      second = best;
-      best = d;
-    } else if (d < second) {
-      second = d;
-    }
-  }
-  return second - best;
+/**
+ * 割れ目・細胞っぽい境界場（O(1)）。
+ * 本格 Voronoi は毎頂点×複数チャネルで落ちるため、折りたたみ格子で近似する。
+ */
+const voronoiEdge = (x: number, y: number, z: number, salt: number) => {
+  const px = x * 3.35 + salt * 0.13;
+  const py = y * 3.1 - salt * 0.11;
+  const pz = z * 3.45 + salt * 0.09;
+  // 格子中心からの距離（各軸）
+  const fx = Math.abs(px - Math.floor(px + 0.5));
+  const fy = Math.abs(py - Math.floor(py + 0.5));
+  const fz = Math.abs(pz - Math.floor(pz + 0.5));
+  const nearest = Math.min(fx, fy, fz);
+  const mid = fx + fy + fz - nearest - Math.max(fx, fy, fz);
+  // F2-F1 風の稜線
+  return (mid - nearest) * 1.15;
 };
 
 const flowFromAngle = (x: number, y: number, z: number, salt: number, out: GrowthVec3, scale = 1) => {
@@ -210,8 +210,9 @@ const reactionDiffusionAlgo: GrowthAlgorithm = {
 
 const voronoiAlgo: GrowthAlgorithm = {
   id: "voronoi",
-  pattern: (x, y, z, salt) => voronoiEdge(x, y, z, salt) * 2.4 - 0.35,
-  flow: (x, y, z, salt, out) => flowFromAngle(x, y, z, salt + hash3(x, y, z, salt) * 2, out, 0.8),
+  pattern: (x, y, z, salt) => voronoiEdge(x, y, z, salt) * 1.7 - 0.22,
+  // hash を重ねず角度だけ（呼び出し回数が多い）
+  flow: (x, y, z, salt, out) => flowFromAngle(x, y, z, salt, out, 0.45),
   placeOnSphere: (index, _total, seed) => {
     const c = Math.floor(seededUnit(index, seed) * 10);
     const cx = Math.sin(c * 2.399 + seed) * 0.85;
@@ -219,7 +220,8 @@ const voronoiAlgo: GrowthAlgorithm = {
     const cz = Math.sin(c * 3.113 - seed) * 0.85;
     return normalize3(cx, cy, cz);
   },
-  spikeMask: (x, y, z, salt) => clamp01(Math.abs(vertexPattern(x * 3.1, y * 3.1, z * 3.1, salt)) * 0.9 + 0.1),
+  spikeMask: (x, y, z, salt) =>
+    clamp01(Math.abs(Math.sin(x * 8.7 + y * 6.4 - z * 5.1 + salt * 0.9)) * 0.7 + 0.2),
 };
 
 const dlaAlgo: GrowthAlgorithm = {
@@ -457,8 +459,16 @@ export const isHeavyGrowthFlowAlgorithm = (id: GrowthAlgorithmId = activeGrowthA
 
 /** 重い flow の頂点ストライド（大きいほど軽い） */
 export const getHeavyGrowthFlowStride = (id: GrowthAlgorithmId = activeGrowthAlgorithmId) => {
+  if (id === "voronoi") return 8;
   if (id === "space-colonization") return 3;
   if (isHeavyGrowthFlowAlgorithm(id)) return 2;
+  return 1;
+};
+
+/** 重い pattern の頂点ストライド（idle 揺らぎなど） */
+export const getHeavyGrowthPatternStride = (id: GrowthAlgorithmId = activeGrowthAlgorithmId) => {
+  if (id === "voronoi") return 8;
+  if (isHeavyGrowthPatternAlgorithm(id)) return 2;
   return 1;
 };
 
@@ -536,7 +546,7 @@ const ALGO_CHANNEL_BIAS: Partial<
   lsystem: { anchor: 1.45, flow: 1.32, mid: 1.22, bulk: 1.12 },
   "differential-growth": { bulk: 1.32, mid: 1.28, flow: 1.22, surface: 1.2 },
   "reaction-diffusion": { mid: 1.38, surface: 1.4, erosion: 1.28, bulk: 1.1 },
-  voronoi: { bulk: 1.42, mid: 1.38, high: 1.05, global: 1.25 },
+  voronoi: { bulk: 1.18, mid: 1.15, high: 1.0, global: 1.08 },
   dla: { high: 1.4, anchor: 1.35, flow: 1.28, bulk: 1.12 },
   physarum: { flow: 1.48, anchor: 1.35, surface: 1.3, mid: 1.18 },
   "flow-field": { flow: 1.55, surface: 1.32, live: 1.22, bulk: 1.1 },
@@ -662,7 +672,20 @@ export const growthModulateScalar = (
   const spike = needsSpike
     ? algo.spikeMask(nx, ny, nz, salt)
     : deformSmooth01(Math.abs(pattern));
-  const gain = rawChannelGain(channel, pattern, spike, algo.id);
+  return growthModulateFromPattern(amount, pattern, spike, channel);
+};
+
+/** 既に評価した pattern / spike で変調（重い algo の再評価を避ける） */
+export const growthModulateFromPattern = (
+  amount: number,
+  pattern: number,
+  spike: number,
+  channel: GrowthDeformChannel = "bulk",
+) => {
+  if (amount === 0) {
+    return 0;
+  }
+  const gain = rawChannelGain(channel, pattern, spike, activeGrowthAlgorithmId);
   const blended = 1 + (gain - 1) * growthDeformInfluence;
   return amount * blended;
 };

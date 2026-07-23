@@ -42,6 +42,7 @@ import {
   getGrowthAlgorithmId,
   getGrowthAlgorithmMeta,
   growthFlow,
+  growthModulateFromPattern,
   growthModulateScalar,
   growthModulateVector3,
   growthPattern,
@@ -49,6 +50,7 @@ import {
   growthSpikeMask,
   isHeavyGrowthFlowAlgorithm,
   getHeavyGrowthFlowStride,
+  getHeavyGrowthPatternStride,
   isHeavyGrowthPatternAlgorithm,
   parseGrowthAlgorithmId,
   setGrowthAlgorithmId,
@@ -2515,8 +2517,8 @@ class SoundSculpture {
     // 重い flow/pattern は頂点を間引き更新（見た目はほぼ同じで負荷低減）
     const flowStride = getHeavyGrowthFlowStride();
     const flowPhase = heavyFlow ? (Math.floor(this.idleTime * 30) % flowStride) : 0;
-    const patternStride = heavyPattern ? 2 : 1;
-    const patternPhase = heavyPattern ? (Math.floor(this.idleTime * 22) & 1) : 0;
+    const patternStride = getHeavyGrowthPatternStride();
+    const patternPhase = heavyPattern ? (Math.floor(this.idleTime * 22) % patternStride) : 0;
     for (let i = 0; i < this.idleWobbleField.length; i += 1) {
       const index = i * 3;
       const x = this.basePositions[index];
@@ -3841,34 +3843,49 @@ class SoundSculpture {
         axisFocusB * 0.12 -
         0.16;
       const spikeMask = smoothstep(0.62, 0.96, spikeNoise * 0.58 + axisFocusA * 0.42 + bands.brightness * 0.24);
+      const spikeEdge = heavyPattern
+        ? Math.min(1, Math.abs(largeForm) * 0.85 + 0.15)
+        : growthSpikeMask(nx, ny, nz, audioSalt);
       const spikePressure =
         Math.pow(spikeMask, 2.7) *
         (0.26 + bands.contrast * 0.22 + bands.overall * 0.2) *
-        (0.55 + growthSpikeMask(nx, ny, nz, audioSalt) * 0.65);
-      const bulkDelta = growthModulateScalar(
-        lowAmount * roundedPressure,
-        nx,
-        ny,
-        nz,
-        audioSalt,
-        "bulk",
-      );
-      const midDelta = growthModulateScalar(
-        midAmount * bumpPressure,
-        nx,
-        ny,
-        nz,
-        audioSalt + 6.3,
-        "mid",
-      );
-      const highDelta = growthModulateScalar(
-        highAmount * spikePressure * 0.85,
-        nx,
-        ny,
-        nz,
-        audioSalt + 28.9,
-        "high",
-      );
+        (0.55 + spikeEdge * 0.65);
+      const softSpike = Math.min(1, Math.abs(largeForm));
+      const bulkDelta = heavyPattern
+        ? growthModulateFromPattern(lowAmount * roundedPressure, largeForm, softSpike, "bulk")
+        : growthModulateScalar(
+            lowAmount * roundedPressure,
+            nx,
+            ny,
+            nz,
+            audioSalt,
+            "bulk",
+          );
+      const midDelta = heavyPattern
+        ? growthModulateFromPattern(midAmount * bumpPressure, surfaceGrain, softSpike, "mid")
+        : growthModulateScalar(
+            midAmount * bumpPressure,
+            nx,
+            ny,
+            nz,
+            audioSalt + 6.3,
+            "mid",
+          );
+      const highDelta = heavyPattern
+        ? growthModulateFromPattern(
+            highAmount * spikePressure * 0.85,
+            spikeNoise,
+            spikeEdge,
+            "high",
+          )
+        : growthModulateScalar(
+            highAmount * spikePressure * 0.85,
+            nx,
+            ny,
+            nz,
+            audioSalt + 28.9,
+            "high",
+          );
       this.accumulated[i] = this.accumulateWithMemory(
         this.accumulated[i],
         bulkDelta,
@@ -6099,6 +6116,21 @@ toggleControlPanelButton.addEventListener("click", () => {
       closeControlPanel();
     }
   }, 260);
+});
+
+/** パネル／トグル以外をクリックしたら閉じる */
+document.addEventListener("pointerdown", (event) => {
+  if (controlPanelShell.classList.contains("is-collapsed")) {
+    return;
+  }
+  const target = event.target;
+  if (!(target instanceof Node)) {
+    return;
+  }
+  if (controlPanelShell.contains(target) || toggleControlPanelButton.contains(target)) {
+    return;
+  }
+  void closeControlPanel();
 });
 
 toggleControlPanelButton.addEventListener("dblclick", (event) => {
