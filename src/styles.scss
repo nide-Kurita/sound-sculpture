@@ -126,7 +126,6 @@ body {
   font-size: 0.72rem;
   letter-spacing: 0.12em;
   line-height: 2;
-  white-space: pre-line;
   writing-mode: vertical-rl;
   margin-top: 12px;
   transition: color 0.85s ease;
@@ -320,14 +319,36 @@ body {
   will-change: transform;
 }
 
-/* 左下: 帯域メーター + 進行バー */
-.hud-left-bottom {
+/* 左下スタック: 環境（日時・天気） + メーター */
+.hud-left-stack {
   position: absolute;
   bottom: clamp(1.5rem, 4.5vw, 3.2rem);
   left: clamp(1.5rem, 4.5vw, 3.2rem);
   display: grid;
+  gap: 1.45rem;
+  align-content: end;
+  justify-items: start;
+}
+
+.hud-left-env {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.hud-env-value {
+  margin: 0;
+  font-size: 0.92rem;
+  letter-spacing: 0.16em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+/* 左下: 帯域メーター + 進行バー */
+.hud-left-bottom {
+  position: static;
+  display: grid;
   gap: 1.1rem;
-  margin-top: 12px;
+  margin-top: 0;
 }
 
 .hud-meters {
@@ -1356,7 +1377,7 @@ input[type="range"] {
     display: none;
   }
 
-  .hud-left-bottom {
+  .hud-left-stack {
     bottom: 1.1rem;
     left: 1.1rem;
   }

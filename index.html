@@ -46,46 +46,49 @@
           </span>
           <span class="hud-reticle__plus" aria-hidden="true">+</span>
         </div>
-        <div class="hud-left-bottom">
-          <div class="hud-meters">
-            <p class="hud-meter">
-              <span class="hud-meter__plus">+</span>
-              <span class="hud-meter__label">LOW</span>
-              <span id="hud-low" class="hud-meter__value">0.00</span>
-            </p>
-            <p class="hud-meter">
-              <span class="hud-meter__plus">+</span>
-              <span class="hud-meter__label">MID</span>
-              <span id="hud-mid" class="hud-meter__value">0.00</span>
-            </p>
-            <p class="hud-meter">
-              <span class="hud-meter__plus">+</span>
-              <span class="hud-meter__label">HIGH</span>
-              <span id="hud-high" class="hud-meter__value">0.00</span>
-            </p>
+        <div class="hud-left-stack">
+          <div class="hud-left-env" id="hud-left-env">
+            <p id="hud-date-field" class="hud-env-value" hidden>-- ---</p>
+            <p id="hud-local-time-field" class="hud-env-value" hidden>--:-- --</p>
+            <p id="hud-weather-field" class="hud-env-value" hidden>---</p>
           </div>
-          <p id="hud-scope" class="hud-scope">////////////////////</p>
+          <div class="hud-left-bottom">
+            <div class="hud-meters">
+              <p class="hud-meter">
+                <span class="hud-meter__plus">+</span>
+                <span class="hud-meter__label">LOW</span>
+                <span id="hud-low" class="hud-meter__value">0.00</span>
+              </p>
+              <p class="hud-meter">
+                <span class="hud-meter__plus">+</span>
+                <span class="hud-meter__label">MID</span>
+                <span id="hud-mid" class="hud-meter__value">0.00</span>
+              </p>
+              <p class="hud-meter">
+                <span class="hud-meter__plus">+</span>
+                <span class="hud-meter__label">HIGH</span>
+                <span id="hud-high" class="hud-meter__value">0.00</span>
+              </p>
+            </div>
+            <p id="hud-scope" class="hud-scope">////////////////////</p>
+          </div>
         </div>
         <div class="hud-right-bottom">
-          <div class="hud-field" id="hud-local-time-field" hidden>
-            <p class="hud-field__label">LOCAL_TIME</p>
-            <p id="hud-local-time" class="hud-field__value">--:-- --</p>
-          </div>
-          <div class="hud-field" id="hud-weather-field" hidden>
-            <p class="hud-field__label">WEATHER</p>
-            <p id="hud-weather" class="hud-field__value">---</p>
-          </div>
           <div class="hud-field">
-            <p class="hud-field__label">SIGNAL_TYPE</p>
+            <p class="hud-field__label">SIGNAL</p>
             <p id="hud-signal" class="hud-field__value">---</p>
           </div>
           <div class="hud-field">
-            <p class="hud-field__label">SYS_STATUS</p>
-            <p id="hud-status" class="hud-field__value">STANDBY</p>
+            <p class="hud-field__label">STYLE</p>
+            <p id="hud-style" class="hud-field__value">---</p>
           </div>
           <div class="hud-field">
             <p class="hud-field__label">ALGO</p>
             <p id="hud-algo" class="hud-field__value">---</p>
+          </div>
+          <div class="hud-field">
+            <p class="hud-field__label">STATUS</p>
+            <p id="hud-status" class="hud-field__value">STANDBY</p>
           </div>
           <div class="hud-field">
             <p class="hud-field__label">BPM / TIME</p>

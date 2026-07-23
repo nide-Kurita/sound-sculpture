@@ -109,6 +109,9 @@ export const SHARED_INTRO = {
   title: "音の彫刻",
   description:
     "音を糧に、深海のような闇の中で生命体が育つ。\n膜は真珠のように輝き、\n完成後も音の鼓動を記憶して\n呼吸し続けます。",
+  /** index.html の #intro-description-ja と同じマークアップ */
+  descriptionHtml:
+    "音を糧に、深海のような闇の中で生命体が育つ。<br>\n膜は真珠のように輝き、<br>\n完成後も音の鼓動を記憶して<br>\n呼吸し続けます。",
   descriptionEn:
     "Fed by sound, a life-form grows. Its membrane gleams like a pearl, remembering the pulse of sound as it continues to breathe.",
 } as const;
@@ -441,10 +444,8 @@ export const EXPERIENCE_CATALOG: readonly ExperienceEntry[] = [
     sculptureMode: "lumen",
     visualStyleId: "lumen",
     introTitle: SHARED_INTRO.title,
-    introDescription:
-      "音が入ると芯が灯り、低域が質量を、高域が輪郭を削り出す。トランジェントで表面が剥がれ、曲が形の記憶になる。",
-    introDescriptionEn:
-      "Sound lights a seed. Bass becomes mass, treble carves edge. Transients shed the surface until the song remains as form.",
+    introDescription: SHARED_INTRO.description,
+    introDescriptionEn: SHARED_INTRO.descriptionEn,
   },
 ];
 

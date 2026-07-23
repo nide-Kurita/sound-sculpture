@@ -82,6 +82,7 @@ import {
   getExperience,
   parseExperienceId,
   setActiveVisualStyle,
+  SHARED_INTRO,
   type ExperienceId,
   type VisualStyleId,
 } from "./visual-style";
@@ -5892,7 +5893,16 @@ const applyExperienceUi = (id: ExperienceId) => {
     introDescEl.textContent = entry.introDescriptionEn;
   }
   if (introDescJaEl) {
-    introDescJaEl.innerHTML = entry.introDescription.replace(/\n/g, "<br>");
+    // index.html と同じ <br> 改行を維持（改行なしテキストで縦書きが崩れるのを防ぐ）
+    introDescJaEl.innerHTML =
+      entry.introDescription === SHARED_INTRO.description
+        ? SHARED_INTRO.descriptionHtml
+        : entry.introDescription
+            .trim()
+            .split(/\n/)
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .join("<br>\n");
   }
 };
 
@@ -6967,16 +6977,19 @@ const hudHighEl = document.querySelector<HTMLElement>("#hud-high");
 const hudSignalEl = document.querySelector<HTMLElement>("#hud-signal");
 const hudStatusEl = document.querySelector<HTMLElement>("#hud-status");
 const hudLocalTimeFieldEl = document.querySelector<HTMLElement>("#hud-local-time-field");
-const hudLocalTimeEl = document.querySelector<HTMLElement>("#hud-local-time");
+const hudDateFieldEl = document.querySelector<HTMLElement>("#hud-date-field");
 const hudWeatherFieldEl = document.querySelector<HTMLElement>("#hud-weather-field");
-const hudWeatherEl = document.querySelector<HTMLElement>("#hud-weather");
 const hudTimecodeEl = document.querySelector<HTMLElement>("#hud-timecode");
 const hudBpmEl = document.querySelector<HTMLElement>("#hud-bpm");
+const hudStyleEl = document.querySelector<HTMLElement>("#hud-style");
 const hudAlgoEl = document.querySelector<HTMLElement>("#hud-algo");
 const hudScopeEl = document.querySelector<HTMLElement>("#hud-scope");
 const hudTicksEl = document.querySelector<HTMLElement>("#hud-ticks");
 const hudTicksXEl = document.querySelector<HTMLElement>("#hud-ticks-x");
 
+if (hudStyleEl) {
+  hudStyleEl.textContent = experienceId.toUpperCase();
+}
 if (hudAlgoEl) {
   hudAlgoEl.textContent = growthAlgorithmId.toUpperCase();
 }
@@ -7379,18 +7392,18 @@ const setLiveWeatherStatus = (message: string, visible = true) => {
 };
 
 const updateWeatherHud = () => {
-  if (!hudWeatherFieldEl || !hudWeatherEl) {
+  if (!hudWeatherFieldEl) {
     return;
   }
   hudWeatherFieldEl.hidden = !liveWeatherEnabled;
   if (!liveWeatherEnabled) {
-    hudWeatherEl.textContent = "---";
+    hudWeatherFieldEl.textContent = "---";
     return;
   }
   const active = getActiveWeatherSnapshot();
   const prefix =
     import.meta.env.DEV && weatherPreviewPreset !== "live" ? "DEV/" : "";
-  hudWeatherEl.textContent = active ? `${prefix}${active.label}` : "...";
+  hudWeatherFieldEl.textContent = active ? `${prefix}${active.label}` : "...";
 };
 
 const getActiveWeatherSnapshot = (): LiveWeatherSnapshot | null => {
@@ -7487,6 +7500,9 @@ const syncDaytimeEnvironmentTargets = () => {
 
 const updateLocalClockHud = () => {
   const showDateTime = daytimeBackgroundEnabled;
+  if (hudDateFieldEl) {
+    hudDateFieldEl.hidden = !showDateTime;
+  }
   if (hudLocalTimeFieldEl) {
     hudLocalTimeFieldEl.hidden = !showDateTime;
   }
@@ -7504,8 +7520,11 @@ const updateLocalClockHud = () => {
     return;
   }
   lastLocalTimeLabel = stamp;
-  if (hudLocalTimeEl) {
-    hudLocalTimeEl.textContent = `${date}  ${time}`;
+  if (hudDateFieldEl) {
+    hudDateFieldEl.textContent = date;
+  }
+  if (hudLocalTimeFieldEl) {
+    hudLocalTimeFieldEl.textContent = time;
   }
 };
 
