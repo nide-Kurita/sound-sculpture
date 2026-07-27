@@ -3,12 +3,22 @@
  * API キー不要。位置は Geolocation（拒否時は東京へフォールバック）。
  */
 
-export type WeatherCondition = "clear" | "cloudy" | "overcast" | "fog" | "rain" | "snow";
+export type WeatherCondition =
+  | "clear"
+  | "cloudy"
+  | "overcast"
+  | "fog"
+  | "rain"
+  | "snow"
+  | "thunder"
+  | "thunderstorm";
 
 export type LiveWeatherSnapshot = {
   condition: WeatherCondition;
   /** HUD 用短いラベル */
   label: string;
+  /** 摂氏（Open-Meteo temperature_2m） */
+  temperatureC: number;
   cloudCover: number;
   precipitation: number;
   windSpeed: number;
@@ -17,6 +27,8 @@ export type LiveWeatherSnapshot = {
   rainIntensity: number;
   /** 0..1 風の強さ */
   windStrength: number;
+  /** 0..1 雷の強さ（フラッシュ頻度・明るさ） */
+  lightningIntensity: number;
   /** 風が粒子を流す方向（ワールド XZ、正規化済みに近い） */
   windX: number;
   windZ: number;
@@ -27,11 +39,22 @@ export type LiveWeatherSnapshot = {
 
 export const LIVE_WEATHER_STORAGE_KEY = "sound-sculpture:live-weather";
 
+export class GeolocationPermissionDeniedError extends Error {
+  constructor() {
+    super("Geolocation permission denied");
+    this.name = "GeolocationPermissionDeniedError";
+  }
+}
+
 export const readLiveWeatherEnabled = () => {
   try {
-    return window.localStorage.getItem(LIVE_WEATHER_STORAGE_KEY) === "1";
+    const stored = window.localStorage.getItem(LIVE_WEATHER_STORAGE_KEY);
+    if (stored === null) {
+      return true;
+    }
+    return stored === "1";
   } catch {
-    return false;
+    return true;
   }
 };
 
@@ -53,6 +76,8 @@ const CONDITION_LABEL: Record<WeatherCondition, string> = {
   fog: "FOG",
   rain: "RAIN",
   snow: "SNOW",
+  thunder: "THUNDER",
+  thunderstorm: "THUNDERSTORM",
 };
 
 /** WMO Weather interpretation codes → ざっくりした条件 */
@@ -62,11 +87,9 @@ export const conditionFromWmoCode = (code: number): WeatherCondition => {
   if (code === 3) return "overcast";
   if (code === 45 || code === 48) return "fog";
   if ((code >= 71 && code <= 77) || code === 85 || code === 86) return "snow";
-  if (
-    (code >= 51 && code <= 67) ||
-    (code >= 80 && code <= 82) ||
-    (code >= 95 && code <= 99)
-  ) {
+  // 95–99: Thunderstorm / Thunderstorm with hail
+  if (code >= 95 && code <= 99) return "thunderstorm";
+  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
     return "rain";
   }
   return "cloudy";
@@ -80,6 +103,7 @@ export const buildWeatherSnapshot = (params: {
   precipitation: number;
   windSpeed: number;
   windDirectionDeg: number;
+  temperatureC: number;
   latitude: number;
   longitude: number;
 }): LiveWeatherSnapshot => {
@@ -87,12 +111,19 @@ export const buildWeatherSnapshot = (params: {
   const cloudCover = clamp01(params.cloudCover / 100);
   const windStrength = clamp01(params.windSpeed / 14);
   let rainIntensity = 0;
+  let lightningIntensity = 0;
   if (condition === "rain") {
     rainIntensity = clamp01(0.25 + params.precipitation / 6 + cloudCover * 0.2);
   } else if (condition === "snow") {
     rainIntensity = clamp01(0.18 + params.precipitation / 5);
   } else if (condition === "fog") {
-    rainIntensity = 0.05;
+    rainIntensity = 0;
+  } else if (condition === "thunderstorm") {
+    rainIntensity = clamp01(0.45 + params.precipitation / 5 + cloudCover * 0.2);
+    lightningIntensity = clamp01(0.7 + params.precipitation / 12);
+  } else if (condition === "thunder") {
+    rainIntensity = clamp01(params.precipitation / 10);
+    lightningIntensity = 0.85;
   }
 
   // 気象の風向は「風上」。粒子は風下へ流すので +180°
@@ -103,12 +134,14 @@ export const buildWeatherSnapshot = (params: {
   return {
     condition,
     label: CONDITION_LABEL[condition],
+    temperatureC: params.temperatureC,
     cloudCover,
     precipitation: params.precipitation,
     windSpeed: params.windSpeed,
     windDirectionDeg: params.windDirectionDeg,
     rainIntensity,
     windStrength,
+    lightningIntensity,
     windX,
     windZ,
     latitude: params.latitude,
@@ -117,8 +150,14 @@ export const buildWeatherSnapshot = (params: {
   };
 };
 
+/** HUD 用: CLEAR 24° */
+export const formatWeatherHudLabel = (
+  snapshot: Pick<LiveWeatherSnapshot, "label" | "temperatureC">,
+  prefix = "",
+) => `${prefix}${snapshot.label} ${Math.round(snapshot.temperatureC)}°`;
+
 export const getGeolocation = (): Promise<{ latitude: number; longitude: number }> =>
-  new Promise((resolve) => {
+  new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
       resolve({ latitude: FALLBACK_LAT, longitude: FALLBACK_LON });
       return;
@@ -130,7 +169,11 @@ export const getGeolocation = (): Promise<{ latitude: number; longitude: number 
           longitude: pos.coords.longitude,
         });
       },
-      () => {
+      (error) => {
+        if (error.code === error.PERMISSION_DENIED) {
+          reject(new GeolocationPermissionDeniedError());
+          return;
+        }
         resolve({ latitude: FALLBACK_LAT, longitude: FALLBACK_LON });
       },
       { enableHighAccuracy: false, timeout: 8000, maximumAge: 10 * 60 * 1000 },
@@ -139,6 +182,7 @@ export const getGeolocation = (): Promise<{ latitude: number; longitude: number 
 
 type OpenMeteoCurrent = {
   weather_code?: number;
+  temperature_2m?: number;
   cloud_cover?: number;
   precipitation?: number;
   wind_speed_10m?: number;
@@ -154,10 +198,11 @@ export const fetchLiveWeather = async (
   url.searchParams.set("longitude", String(longitude));
   url.searchParams.set(
     "current",
-    "weather_code,cloud_cover,precipitation,wind_speed_10m,wind_direction_10m",
+    "temperature_2m,weather_code,cloud_cover,precipitation,wind_speed_10m,wind_direction_10m",
   );
   url.searchParams.set("timezone", "auto");
   url.searchParams.set("wind_speed_unit", "ms");
+  url.searchParams.set("temperature_unit", "celsius");
 
   const response = await fetch(url.toString());
   if (!response.ok) {
@@ -167,6 +212,7 @@ export const fetchLiveWeather = async (
   const current = data.current ?? {};
   return buildWeatherSnapshot({
     code: current.weather_code ?? 1,
+    temperatureC: current.temperature_2m ?? 20,
     cloudCover: current.cloud_cover ?? 30,
     precipitation: current.precipitation ?? 0,
     windSpeed: current.wind_speed_10m ?? 0,
@@ -191,7 +237,9 @@ export type WeatherPreviewPresetId =
   | "rain-heavy"
   | "snow"
   | "windy"
-  | "storm";
+  | "storm"
+  | "thunder"
+  | "thunderstorm";
 
 export const WEATHER_PREVIEW_PRESETS: {
   id: WeatherPreviewPresetId;
@@ -207,6 +255,8 @@ export const WEATHER_PREVIEW_PRESETS: {
   { id: "snow", label: "雪" },
   { id: "windy", label: "強風" },
   { id: "storm", label: "嵐（雨＋風）" },
+  { id: "thunder", label: "雷" },
+  { id: "thunderstorm", label: "雷雨" },
 ];
 
 /** DEV プレビュー用の合成スナップショット */
@@ -221,12 +271,14 @@ export const createWeatherPreviewSnapshot = (
   const finish = (partial: {
     condition: WeatherCondition;
     label: string;
+    temperatureC: number;
     cloudCover: number;
     precipitation: number;
     windSpeed: number;
     windDirectionDeg: number;
     rainIntensity: number;
     windStrength: number;
+    lightningIntensity?: number;
   }): LiveWeatherSnapshot => {
     const rainIntensity = Math.min(1, partial.rainIntensity * rainMul);
     const windStrength = Math.min(1, partial.windStrength * windMul);
@@ -234,12 +286,14 @@ export const createWeatherPreviewSnapshot = (
     return {
       condition: partial.condition,
       label: partial.label,
+      temperatureC: partial.temperatureC,
       cloudCover: partial.cloudCover,
       precipitation: partial.precipitation,
       windSpeed: partial.windSpeed * windMul,
       windDirectionDeg: partial.windDirectionDeg,
       rainIntensity,
       windStrength,
+      lightningIntensity: Math.min(1, Math.max(0, partial.lightningIntensity ?? 0)),
       windX: Math.sin(blowRad) * windStrength,
       windZ: Math.cos(blowRad) * windStrength,
       latitude: FALLBACK_LAT,
@@ -253,6 +307,7 @@ export const createWeatherPreviewSnapshot = (
       return finish({
         condition: "clear",
         label: "CLEAR",
+        temperatureC: 26,
         cloudCover: 0.05,
         precipitation: 0,
         windSpeed: 1.2,
@@ -264,6 +319,7 @@ export const createWeatherPreviewSnapshot = (
       return finish({
         condition: "cloudy",
         label: "CLOUDY",
+        temperatureC: 22,
         cloudCover: 0.45,
         precipitation: 0,
         windSpeed: 3,
@@ -275,6 +331,7 @@ export const createWeatherPreviewSnapshot = (
       return finish({
         condition: "overcast",
         label: "OVERCAST",
+        temperatureC: 18,
         cloudCover: 0.88,
         precipitation: 0,
         windSpeed: 4,
@@ -286,17 +343,19 @@ export const createWeatherPreviewSnapshot = (
       return finish({
         condition: "fog",
         label: "FOG",
-        cloudCover: 0.7,
+        temperatureC: 12,
+        cloudCover: 0.82,
         precipitation: 0,
         windSpeed: 0.8,
         windDirectionDeg: 90,
-        rainIntensity: 0.05,
+        rainIntensity: 0,
         windStrength: 0.06,
       });
     case "rain":
       return finish({
         condition: "rain",
         label: "RAIN",
+        temperatureC: 16,
         cloudCover: 0.75,
         precipitation: 2.2,
         windSpeed: 5,
@@ -308,6 +367,7 @@ export const createWeatherPreviewSnapshot = (
       return finish({
         condition: "rain",
         label: "RAIN+",
+        temperatureC: 14,
         cloudCover: 0.92,
         precipitation: 8,
         windSpeed: 8,
@@ -319,6 +379,7 @@ export const createWeatherPreviewSnapshot = (
       return finish({
         condition: "snow",
         label: "SNOW",
+        temperatureC: -2,
         cloudCover: 0.8,
         precipitation: 1.5,
         windSpeed: 3.5,
@@ -330,6 +391,7 @@ export const createWeatherPreviewSnapshot = (
       return finish({
         condition: "cloudy",
         label: "WINDY",
+        temperatureC: 20,
         cloudCover: 0.35,
         precipitation: 0,
         windSpeed: 14,
@@ -341,12 +403,39 @@ export const createWeatherPreviewSnapshot = (
       return finish({
         condition: "rain",
         label: "STORM",
+        temperatureC: 15,
         cloudCover: 0.95,
         precipitation: 10,
         windSpeed: 16,
         windDirectionDeg: 260,
         rainIntensity: 1,
         windStrength: 1,
+      });
+    case "thunder":
+      return finish({
+        condition: "thunder",
+        label: "THUNDER",
+        temperatureC: 19,
+        cloudCover: 0.88,
+        precipitation: 0.2,
+        windSpeed: 6,
+        windDirectionDeg: 240,
+        rainIntensity: 0.08,
+        windStrength: 0.42,
+        lightningIntensity: 0.9,
+      });
+    case "thunderstorm":
+      return finish({
+        condition: "thunderstorm",
+        label: "THUNDERSTORM",
+        temperatureC: 17,
+        cloudCover: 0.96,
+        precipitation: 9,
+        windSpeed: 12,
+        windDirectionDeg: 250,
+        rainIntensity: 0.95,
+        windStrength: 0.82,
+        lightningIntensity: 1,
       });
   }
 };

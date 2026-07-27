@@ -130,8 +130,17 @@
                   aria-pressed="false"
                   data-status-armed="Dev audio ready — press Start Recording"
                 >
-                  Dev Audio (s04)
+                  Dev Audio
                 </button>
+              </div>
+              <div class="actions__row actions__row--dev-audio" id="dev-audio-row" hidden>
+                <label class="dev-audio-track" for="dev-audio-track">
+                  <span class="dev-audio-track__label">Track</span>
+                  <select
+                    id="dev-audio-track"
+                    class="sculpture-mode__select input-device__select"
+                  ></select>
+                </label>
               </div>
               <div class="actions__row actions__row--record">
                 <button
@@ -265,6 +274,8 @@
                   <option value="snow">雪</option>
                   <option value="windy">強風</option>
                   <option value="storm">嵐（雨＋風）</option>
+                  <option value="thunder">雷</option>
+                  <option value="thunderstorm">雷雨</option>
                 </select>
               </label>
               <label class="weather-preview__field">

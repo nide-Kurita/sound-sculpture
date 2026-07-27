@@ -104,11 +104,17 @@ import {
   sampleDaytimeAtmosphere,
   sampleDaytimeAtmosphereFromHour,
   writeDaytimeBackgroundEnabled,
+  uiTokensFromBackground,
+  DEFAULT_DAYTIME_LOCATION,
+  type DaytimeAtmosphere,
 } from "./daytime-atmosphere";
 import {
   applyCloudCoverToSky,
   createWeatherPreviewSnapshot,
   fetchLiveWeatherForUser,
+  formatWeatherHudLabel,
+  GeolocationPermissionDeniedError,
+  readLiveWeatherEnabled,
   writeLiveWeatherEnabled,
   type LiveWeatherSnapshot,
   type WeatherPreviewPresetId,
@@ -1627,6 +1633,8 @@ class SoundSculpture {
   private waveImpulse = 0;
   private lastBands: AudioBands | null = null;
   private readonly baseScale = new THREE.Vector3(1, 1, 1);
+  /** 周囲 FX をワールド固定にするための逆クォータニオン */
+  private readonly ambientFxInvQuat = new THREE.Quaternion();
   // --- アイドル揺らぎ（vita: 無音・形成初期も成長アルゴリズムのパターンでホヨホヨ蠢く） ---
   /** formingTime と違い、音が無くても常に進む時計 */
   private idleTime = 0;
@@ -2472,6 +2480,8 @@ class SoundSculpture {
       this.updateGlowDust(bands, deltaTime);
       this.updateSparkles(bands, deltaTime);
       this.updateParticles(bands, deltaTime);
+      // 周囲の粒はワールド固定（回転・スクイーズに追従させない）
+      this.syncAmbientFxWorldLock();
     }
 
     const innerBase = this.style.membrane.vita ? 0.9 : 1;
@@ -3050,12 +3060,48 @@ class SoundSculpture {
     }
   }
 
+  /**
+   * glow / sparkle / detachment は group 配下だが、見た目はワールド固定にする。
+   * （形成中の付着パーティクル this.particles はオブジェクトに追従させる）
+   */
+  private syncAmbientFxWorldLock() {
+    this.ambientFxInvQuat.copy(this.group.quaternion).invert();
+    const sx = this.group.scale.x || 1;
+    const sy = this.group.scale.y || 1;
+    const sz = this.group.scale.z || 1;
+    const lock = (obj: THREE.Object3D) => {
+      obj.quaternion.copy(this.ambientFxInvQuat);
+      obj.scale.set(1 / sx, 1 / sy, 1 / sz);
+    };
+    lock(this.glowDust);
+    lock(this.sparkles);
+    lock(this.detachmentDustSand);
+    lock(this.detachmentDustMetal);
+    lock(this.detachmentDustSpark);
+  }
+
+  /** ambient FX バッファはワールド座標として扱う（world lock 前提） */
+  private toAmbientFxWorldPoint(out: THREE.Vector3) {
+    this.group.updateMatrixWorld(true);
+    out.applyMatrix4(this.group.matrixWorld);
+  }
+
+  private toAmbientFxWorldDirection(out: THREE.Vector3) {
+    this.group.updateMatrixWorld(true);
+    out.transformDirection(this.group.matrixWorld);
+  }
+
   private emitDetachmentDust(
     kind: "sand" | "metal" | "spark",
     origin: THREE.Vector3,
     dir: THREE.Vector3,
     strength: number,
   ) {
+    // ワールド固定 FX 用に、発生位置・方向をワールドへ
+    const worldOrigin = origin.clone();
+    const worldDir = dir.clone().normalize();
+    this.toAmbientFxWorldPoint(worldOrigin);
+    this.toAmbientFxWorldDirection(worldDir);
     const burstCount =
       kind === "spark"
         ? Math.min(220, Math.floor(60 + strength * 340))
@@ -3065,7 +3111,7 @@ class SoundSculpture {
     const tangent = new THREE.Vector3();
     const bitangent = new THREE.Vector3();
     const normal = new THREE.Vector3();
-    buildFragmentBasis(dir, tangent, bitangent, normal);
+    buildFragmentBasis(worldDir, tangent, bitangent, normal);
 
     const positions =
       kind === "spark" ? this.detachmentDustSparkPositions : kind === "metal" ? this.detachmentDustMetalPositions : this.detachmentDustSandPositions;
@@ -3097,9 +3143,9 @@ class SoundSculpture {
       const a = seededUnit(index, this.formingTime + i * 0.17) * Math.PI * 2;
       const r = (seededUnit(index, this.formingTime + 9.1) ** 0.55) * (0.18 + strength * 0.35);
       const jitter = seededUnit(index, this.formingTime + 18.7) * 0.08;
-      const px = origin.x + tangent.x * Math.cos(a) * r + bitangent.x * Math.sin(a) * r + normal.x * jitter;
-      const py = origin.y + tangent.y * Math.cos(a) * r + bitangent.y * Math.sin(a) * r + normal.y * jitter;
-      const pz = origin.z + tangent.z * Math.cos(a) * r + bitangent.z * Math.sin(a) * r + normal.z * jitter;
+      const px = worldOrigin.x + tangent.x * Math.cos(a) * r + bitangent.x * Math.sin(a) * r + normal.x * jitter;
+      const py = worldOrigin.y + tangent.y * Math.cos(a) * r + bitangent.y * Math.sin(a) * r + normal.y * jitter;
+      const pz = worldOrigin.z + tangent.z * Math.cos(a) * r + bitangent.z * Math.sin(a) * r + normal.z * jitter;
       positions[idx] = px;
       positions[idx + 1] = py;
       positions[idx + 2] = pz;
@@ -5543,6 +5589,7 @@ class SoundSculpture {
     const idx = index * 3;
     const origin = new THREE.Vector3();
     this.pickDetachmentOrigin(origin);
+    this.toAmbientFxWorldPoint(origin);
     const jitter = 0.06 + drive * 0.1;
     // 見た目のジッターのみ — 形態決定論には影響しない
     this.sparklePositions[idx] = origin.x + (seededUnit(index, this.formingTime + 1.1) - 0.5) * jitter;
@@ -5743,6 +5790,8 @@ const appElement = document.querySelector<HTMLElement>("#app");
 const startButton = document.querySelector<HTMLButtonElement>("#start-audio");
 const startSystemAudioButton = document.querySelector<HTMLButtonElement>("#start-system-audio");
 const startDevAudioButton = document.querySelector<HTMLButtonElement>("#start-dev-audio");
+const devAudioRow = document.querySelector<HTMLElement>("#dev-audio-row");
+const devAudioTrackSelect = document.querySelector<HTMLSelectElement>("#dev-audio-track");
 const beginRecordingButton = document.querySelector<HTMLButtonElement>("#begin-recording");
 const resetSculptureButton = document.querySelector<HTMLButtonElement>("#reset-sculpture");
 const completeButton = document.querySelector<HTMLButtonElement>("#complete-sculpture");
@@ -5816,8 +5865,7 @@ const daytimePreviewHourInput = document.querySelector<HTMLInputElement>("#dayti
 const daytimePreviewValueEl = document.querySelector<HTMLElement>("#daytime-preview-value");
 const daytimePreviewLiveButton = document.querySelector<HTMLButtonElement>("#daytime-preview-live");
 let daytimeBackgroundEnabled = readDaytimeBackgroundEnabled();
-/** 天気リンクはオプトイン。起動時は常にオフ */
-let liveWeatherEnabled = false;
+let liveWeatherEnabled = readLiveWeatherEnabled();
 /** DEV: null なら実時刻、数値なら 0..24 のプレビュー時刻 */
 let daytimePreviewHour: number | null = null;
 /** DEV: live なら API / 実天気、それ以外は合成天気 */
@@ -5831,7 +5879,7 @@ if (daytimeBackgroundInput) {
   daytimeBackgroundInput.checked = daytimeBackgroundEnabled;
 }
 if (liveWeatherInput) {
-  liveWeatherInput.checked = false;
+  liveWeatherInput.checked = liveWeatherEnabled;
 }
 
 const devSurface = isDevSurface();
@@ -5887,6 +5935,66 @@ applyGrowthAlgorithmUi(growthAlgorithmId);
 
 if (devSurface && startDevAudioButton) {
   startDevAudioButton.hidden = false;
+}
+
+let getSelectedDevAudioUrl: (() => Promise<{ url: string; label: string }>) | null = null;
+
+if (devSurface && startDevAudioButton) {
+  void (async () => {
+    const {
+      DEV_AUDIO_TRACKS,
+      resolveInitialDevAudioTrack,
+      writeStoredDevAudioTrackId,
+      getDevAudioTrackById,
+    } = await import("./dev-audio");
+
+    if (devAudioRow) {
+      devAudioRow.hidden = DEV_AUDIO_TRACKS.length === 0;
+    }
+    if (!devAudioTrackSelect) {
+      return;
+    }
+
+    devAudioTrackSelect.replaceChildren();
+    for (const track of DEV_AUDIO_TRACKS) {
+      const option = document.createElement("option");
+      option.value = track.id;
+      option.textContent = track.label;
+      devAudioTrackSelect.append(option);
+    }
+
+    const initial = resolveInitialDevAudioTrack();
+    if (initial) {
+      devAudioTrackSelect.value = initial.id;
+      writeStoredDevAudioTrackId(initial.id);
+    }
+
+    const syncSelectedTrack = () => {
+      const track = getDevAudioTrackById(devAudioTrackSelect.value) ?? resolveInitialDevAudioTrack();
+      if (!track) {
+        return null;
+      }
+      writeStoredDevAudioTrackId(track.id);
+      startDevAudioButton.dataset.statusArmed = `Dev audio (${track.label}) ready — press Start Recording`;
+      if (armedAudioSource === "dev" && statusElement && !isAudioReady) {
+        setStatus(startDevAudioButton.dataset.statusArmed);
+      }
+      return track;
+    };
+
+    syncSelectedTrack();
+    devAudioTrackSelect.addEventListener("change", () => {
+      syncSelectedTrack();
+    });
+
+    getSelectedDevAudioUrl = async () => {
+      const track = syncSelectedTrack();
+      if (!track) {
+        throw new Error("開発用音源がありません（src/music を確認してください）");
+      }
+      return { url: track.url, label: track.label };
+    };
+  })();
 }
 
 if (devSurface && bandTestPanel) {
@@ -6180,15 +6288,33 @@ const closeControlPanel = async () => {
 
 let panelToggleClickTimer: number | null = null;
 
+const resetPanelToggleToDock = () => {
+  suppressPanelToggleClick = true;
+  const dock = getToggleDockPosition();
+  applyTogglePosition(dock, { animate: true });
+
+  // パネルが開いていれば、同じ位置関係のまま初期位置へ寄せる。
+  if (!controlPanelShell.classList.contains("is-collapsed")) {
+    const iconSize = getToggleIconSize();
+    const gap = getHudPanelGap();
+    applyControlPanelPosition({
+      left: dock.left - (controlPanel.offsetWidth - iconSize) * 0.5,
+      top: dock.top - gap - controlPanel.offsetHeight,
+    });
+    controlPanelDragged = false;
+  }
+};
+
 toggleControlPanelButton.addEventListener("click", () => {
   if (suppressPanelToggleClick) {
     suppressPanelToggleClick = false;
     return;
   }
-  // ダブルクリックと単クリックを切り分ける。
+  // ダブルクリック / ダブルタップと単クリックを切り分ける。
   if (panelToggleClickTimer !== null) {
     window.clearTimeout(panelToggleClickTimer);
     panelToggleClickTimer = null;
+    resetPanelToggleToDock();
     return;
   }
 
@@ -6225,21 +6351,7 @@ toggleControlPanelButton.addEventListener("dblclick", (event) => {
     window.clearTimeout(panelToggleClickTimer);
     panelToggleClickTimer = null;
   }
-  suppressPanelToggleClick = true;
-
-  const dock = getToggleDockPosition();
-  applyTogglePosition(dock, { animate: true });
-
-  // パネルが開いていれば、同じ位置関係のまま初期位置へ寄せる。
-  if (!controlPanelShell.classList.contains("is-collapsed")) {
-    const iconSize = getToggleIconSize();
-    const gap = getHudPanelGap();
-    applyControlPanelPosition({
-      left: dock.left - (controlPanel.offsetWidth - iconSize) * 0.5,
-      top: dock.top - gap - controlPanel.offsetHeight,
-    });
-    controlPanelDragged = false;
-  }
+  resetPanelToggleToDock();
 });
 
 // 初期表示: トグルを画面の真ん中下にドック。
@@ -6342,8 +6454,8 @@ let themeDarkActive = styleEnvActive && visualStyle.themeDark;
 if (daytimeBackgroundEnabled && visualStyleId !== "dither") {
   themeDarkActive = (
     daytimePreviewHour === null
-      ? sampleDaytimeAtmosphere()
-      : sampleDaytimeAtmosphereFromHour(daytimePreviewHour)
+      ? sampleDaytimeAtmosphere(new Date(), DEFAULT_DAYTIME_LOCATION)
+      : sampleDaytimeAtmosphereFromHour(daytimePreviewHour, DEFAULT_DAYTIME_LOCATION)
   ).dark;
   appElement.classList.toggle("theme-dark", themeDarkActive);
 }
@@ -6367,16 +6479,31 @@ const ditherStyle = visualStyleId === "dither";
 const lumenStyle = visualStyleId === "lumen";
 const cameraAspect = window.innerWidth / Math.max(1, window.innerHeight);
 const orthoHalf = 3.15;
+const BASE_CAMERA_FOV = 36;
+/** 短辺がこの px のとき見た目スケール 1。小さい窓ではオブジェクトを小さく、大きい窓では大きく */
+const VIEW_FIT_REFERENCE_PX = 960;
+const getViewportFitScale = () =>
+  THREE.MathUtils.clamp(
+    Math.min(window.innerWidth, window.innerHeight) / VIEW_FIT_REFERENCE_PX,
+    0.52,
+    1.18,
+  );
+const initialViewFit = getViewportFitScale();
 const camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = ditherStyle
   ? new THREE.OrthographicCamera(
-      -orthoHalf * cameraAspect,
-      orthoHalf * cameraAspect,
-      orthoHalf,
-      -orthoHalf,
+      -(orthoHalf / initialViewFit) * cameraAspect,
+      (orthoHalf / initialViewFit) * cameraAspect,
+      orthoHalf / initialViewFit,
+      -(orthoHalf / initialViewFit),
       0.1,
       sceneEnv.cameraFar ?? 100,
     )
-  : new THREE.PerspectiveCamera(36, cameraAspect, 0.1, sceneEnv.cameraFar ?? 100);
+  : new THREE.PerspectiveCamera(
+      BASE_CAMERA_FOV / initialViewFit,
+      cameraAspect,
+      0.1,
+      sceneEnv.cameraFar ?? 100,
+    );
 // 正投影は真正面寄りにして 2D グラフィックに見せる
 camera.position.set(0, ditherStyle ? 0 : lumenStyle ? 0.12 : 0.28, ditherStyle ? 8 : lumenStyle ? 5.6 : 6.4);
 
@@ -6709,21 +6836,52 @@ const getSculptureStickDockPosition = (): { left: number; top: number } => {
   // intro / hud-left-stack と同じ左インセットに揃える
   const introEl = document.querySelector<HTMLElement>(".intro");
   const leftStackEl = document.querySelector<HTMLElement>(".hud-left-stack");
-  const leftBottomEl = document.querySelector<HTMLElement>(".hud-left-bottom");
   const alignedLeft =
     introEl?.getBoundingClientRect().left ??
     leftStackEl?.getBoundingClientRect().left ??
     clamp(window.innerWidth * 0.045, 1.5 * rem, 3.2 * rem);
   const height = sculptureStickEl.offsetHeight;
   const introBottom = introEl?.getBoundingClientRect().bottom ?? 0;
-  const metersTop =
-    leftBottomEl?.getBoundingClientRect().top ??
-    leftStackEl?.getBoundingClientRect().top ??
-    window.innerHeight;
-  const centerY = (introBottom + metersTop) * 0.5;
+  const stackTop =
+    leftStackEl?.getBoundingClientRect().top ?? window.innerHeight;
+
+  // SP のみ: hud-left-stack の少し上。PC は header と左下 HUD のあいだ中央
+  const isSpLayout = window.matchMedia("(max-width: 768px)").matches;
+  if (isSpLayout) {
+    const gap = Math.max(0.7 * rem, 12);
+    const preferredTop = stackTop - height - gap;
+    return {
+      left: alignedLeft,
+      top: clamp(
+        preferredTop,
+        introBottom + Math.max(0.45 * rem, 8),
+        Math.max(introBottom + 4, window.innerHeight - height - 12),
+      ),
+    };
+  }
+
+  const gap = Math.max(1.15 * rem, 20);
+  const minTop = introBottom + gap;
+  const maxTop = stackTop - height - gap;
+  let top: number;
+  if (maxTop >= minTop) {
+    top = (minTop + maxTop) * 0.5;
+  } else {
+    const tightGap = Math.max(0.55 * rem, 10);
+    const tightMin = introBottom + tightGap;
+    const tightMax = stackTop - height - tightGap;
+    top =
+      tightMax >= tightMin
+        ? (tightMin + tightMax) * 0.5
+        : clamp(
+            (introBottom + stackTop) * 0.5 - height * 0.5,
+            introBottom + 4,
+            Math.max(introBottom + 4, stackTop - height - 4),
+          );
+  }
   return {
     left: alignedLeft,
-    top: centerY - height * 0.5,
+    top,
   };
 };
 
@@ -6752,12 +6910,45 @@ requestAnimationFrame(() => {
 });
 window.addEventListener("resize", () => dockSculptureStick());
 
+const SCULPTURE_STICK_DOUBLE_TAP_MS = 320;
+const SCULPTURE_STICK_TAP_MOVE_PX = 10;
+let sculptureStickLastTapAt = 0;
+let sculptureStickTapCandidate = false;
+let sculptureStickTapOriginX = 0;
+let sculptureStickTapOriginY = 0;
+
+const resetSculptureStickToDock = () => {
+  releaseSculptureStick();
+  if (sculptureStickMove.active) {
+    sculptureStickMove.active = false;
+    sculptureStickMove.id = null;
+    sculptureStickEl?.classList.remove("is-moving");
+  }
+  sculptureStickUserMoved = false;
+  sculptureStickLastTapAt = 0;
+  sculptureStickTapCandidate = false;
+  dockSculptureStick({ force: true, animate: true });
+  resetSculptureViewOrientation();
+};
+
+const noteSculptureStickTap = () => {
+  const now = performance.now();
+  if (now - sculptureStickLastTapAt <= SCULPTURE_STICK_DOUBLE_TAP_MS) {
+    resetSculptureStickToDock();
+    return;
+  }
+  sculptureStickLastTapAt = now;
+};
+
 if (sculptureStickHandleEl && sculptureStickEl) {
+  let handleDragMoved = false;
+
   sculptureStickHandleEl.addEventListener("pointerdown", (event: PointerEvent) => {
     if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
     releaseSculptureStick();
+    handleDragMoved = false;
     sculptureStickMove.active = true;
     sculptureStickMove.id = event.pointerId;
     sculptureStickMove.startX = event.clientX;
@@ -6767,15 +6958,21 @@ if (sculptureStickHandleEl && sculptureStickEl) {
     sculptureStickMove.originTop = rect.top;
     sculptureStickHandleEl.setPointerCapture(event.pointerId);
     sculptureStickEl.classList.add("is-moving");
-    sculptureStickUserMoved = true;
   });
 
   sculptureStickHandleEl.addEventListener("pointermove", (event: PointerEvent) => {
     if (!sculptureStickMove.active || sculptureStickMove.id !== event.pointerId) return;
     event.preventDefault();
+    const dx = event.clientX - sculptureStickMove.startX;
+    const dy = event.clientY - sculptureStickMove.startY;
+    if (!handleDragMoved && Math.hypot(dx, dy) > SCULPTURE_STICK_TAP_MOVE_PX) {
+      handleDragMoved = true;
+      sculptureStickUserMoved = true;
+    }
+    if (!handleDragMoved) return;
     applySculptureStickPosition(
-      sculptureStickMove.originLeft + (event.clientX - sculptureStickMove.startX),
-      sculptureStickMove.originTop + (event.clientY - sculptureStickMove.startY),
+      sculptureStickMove.originLeft + dx,
+      sculptureStickMove.originTop + dy,
     );
   });
 
@@ -6784,6 +6981,9 @@ if (sculptureStickHandleEl && sculptureStickEl) {
     sculptureStickMove.active = false;
     sculptureStickMove.id = null;
     sculptureStickEl.classList.remove("is-moving");
+    if (!handleDragMoved) {
+      noteSculptureStickTap();
+    }
   };
 
   sculptureStickHandleEl.addEventListener("pointerup", endSculptureStickMove);
@@ -6797,6 +6997,9 @@ sculptureStickEl?.addEventListener("pointerdown", (event: PointerEvent) => {
   event.preventDefault();
   sculptureStick.active = true;
   sculptureStick.id = event.pointerId;
+  sculptureStickTapCandidate = true;
+  sculptureStickTapOriginX = event.clientX;
+  sculptureStickTapOriginY = event.clientY;
   sculptureStickEl.setPointerCapture(event.pointerId);
   sculptureStickEl.classList.add("is-active");
   isViewInteracting = true;
@@ -6806,29 +7009,42 @@ sculptureStickEl?.addEventListener("pointerdown", (event: PointerEvent) => {
 sculptureStickEl?.addEventListener("pointermove", (event: PointerEvent) => {
   if (!sculptureStick.active || sculptureStick.id !== event.pointerId) return;
   event.preventDefault();
+  if (
+    sculptureStickTapCandidate &&
+    Math.hypot(
+      event.clientX - sculptureStickTapOriginX,
+      event.clientY - sculptureStickTapOriginY,
+    ) > SCULPTURE_STICK_TAP_MOVE_PX
+  ) {
+    sculptureStickTapCandidate = false;
+  }
   setSculptureStickFromPointer(event.clientX, event.clientY);
 });
 
 sculptureStickEl?.addEventListener("pointerup", (event: PointerEvent) => {
   if (sculptureStick.id !== event.pointerId) return;
+  const wasTap = sculptureStickTapCandidate;
   releaseSculptureStick();
+  sculptureStickTapCandidate = false;
+  if (wasTap) {
+    noteSculptureStickTap();
+  }
 });
 
-sculptureStickEl?.addEventListener("pointercancel", releaseSculptureStick);
-sculptureStickEl?.addEventListener("lostpointercapture", releaseSculptureStick);
+sculptureStickEl?.addEventListener("pointercancel", () => {
+  sculptureStickTapCandidate = false;
+  releaseSculptureStick();
+});
+sculptureStickEl?.addEventListener("lostpointercapture", () => {
+  if (!sculptureStick.active) return;
+  sculptureStickTapCandidate = false;
+  releaseSculptureStick();
+});
 
 sculptureStickEl?.addEventListener("dblclick", (event) => {
   event.preventDefault();
   event.stopPropagation();
-  releaseSculptureStick();
-  if (sculptureStickMove.active) {
-    sculptureStickMove.active = false;
-    sculptureStickMove.id = null;
-    sculptureStickEl.classList.remove("is-moving");
-  }
-  sculptureStickUserMoved = false;
-  dockSculptureStick({ force: true, animate: true });
-  resetSculptureViewOrientation();
+  resetSculptureStickToDock();
 });
 
 const pokeSculptureAtClient = (clientX: number, clientY: number) => {
@@ -7485,14 +7701,35 @@ void populateAudioDevices();
 let envMix = 0;
 const envBackgroundForming = new THREE.Color(sceneEnv.background);
 const envBackgroundComplete = new THREE.Color(sceneEnv.backgroundComplete);
+const lightningFlashColor = new THREE.Color(0xd6e6ff);
 const envLerp = (from: number, to: number) => from + (to - from) * envMix;
 let lastLocalTimeLabel = "";
 const daytimeZenithColor = new THREE.Color();
 const daytimeHorizonColor = new THREE.Color();
+const daytimeZenithFlashColor = new THREE.Color();
+const daytimeHorizonFlashColor = new THREE.Color();
 let daytimeSkyActive = false;
+/** 時刻プレビュー／実時刻から得た Kelvin ライティング状態 */
+let activeDaytimeLook: DaytimeAtmosphere | null = null;
 
 const getActiveDaytimeHour = () =>
   daytimePreviewHour === null ? getLocalHourFraction() : daytimePreviewHour;
+
+/** 天気／位置情報から昼光計算用の緯度経度を取る */
+const getActiveDaytimeLocation = () => {
+  const weather = getActiveWeatherSnapshot();
+  if (
+    weather &&
+    Number.isFinite(weather.latitude) &&
+    Number.isFinite(weather.longitude)
+  ) {
+    return { latitude: weather.latitude, longitude: weather.longitude };
+  }
+  return DEFAULT_DAYTIME_LOCATION;
+};
+
+const sampleActiveDaytimeAtmosphere = (hour = getActiveDaytimeHour()) =>
+  sampleDaytimeAtmosphereFromHour(hour, getActiveDaytimeLocation());
 
 const syncDaytimePreviewLabel = () => {
   if (!daytimePreviewValueEl) {
@@ -7523,15 +7760,21 @@ const updateWeatherHud = () => {
   if (!hudWeatherFieldEl) {
     return;
   }
+  const wasHidden = hudWeatherFieldEl.hidden;
   hudWeatherFieldEl.hidden = !liveWeatherEnabled;
   if (!liveWeatherEnabled) {
     hudWeatherFieldEl.textContent = "---";
-    return;
+  } else {
+    const active = getActiveWeatherSnapshot();
+    const prefix =
+      isDevSurface() && weatherPreviewPreset !== "live" ? "DEV/" : "";
+    hudWeatherFieldEl.textContent = active
+      ? formatWeatherHudLabel(active, prefix)
+      : "...";
   }
-  const active = getActiveWeatherSnapshot();
-  const prefix =
-    isDevSurface() && weatherPreviewPreset !== "live" ? "DEV/" : "";
-  hudWeatherFieldEl.textContent = active ? `${prefix}${active.label}` : "...";
+  if (wasHidden !== hudWeatherFieldEl.hidden) {
+    dockSculptureStick();
+  }
 };
 
 const getActiveWeatherSnapshot = (): LiveWeatherSnapshot | null => {
@@ -7562,13 +7805,24 @@ const snapshotToSceneWeather = (snapshot: LiveWeatherSnapshot | null): SceneWeat
       windZ: 0,
       snow: false,
       fogBoost: 1,
+      fogIntensity: 0,
+      lightningIntensity: 0,
     };
   }
+  const isFog = snapshot.condition === "fog";
+  const fogIntensity = isFog
+    ? 1
+    : snapshot.condition === "overcast"
+      ? 0.28
+      : snapshot.cloudCover > 0.85
+        ? 0.18
+        : 0;
   const fogBoost =
     1 +
-    snapshot.cloudCover * 0.35 +
+    snapshot.cloudCover * 0.45 +
     snapshot.rainIntensity * 0.55 +
-    (snapshot.condition === "fog" ? 0.7 : 0);
+    (isFog ? 3.2 : 0) +
+    snapshot.lightningIntensity * 0.2;
   return {
     enabled: true,
     cloudCover: snapshot.cloudCover,
@@ -7578,6 +7832,8 @@ const snapshotToSceneWeather = (snapshot: LiveWeatherSnapshot | null): SceneWeat
     windZ: snapshot.windZ,
     snow: snapshot.condition === "snow",
     fogBoost,
+    fogIntensity,
+    lightningIntensity: snapshot.lightningIntensity,
   };
 };
 
@@ -7594,6 +7850,38 @@ const tintHexWithClouds = (hex: number, cloudCover: number) => {
   return applyCloudCoverToSky(hex, hex, cloudCover).zenith;
 };
 
+const clearDaytimeUiTokens = () => {
+  for (const key of [
+    "--daytime-bg",
+    "--ui-ink",
+    "--ui-ink-soft",
+    "--ui-ink-faint",
+    "--ui-panel",
+    "--ui-border",
+    "--ui-badge-bg",
+  ]) {
+    appElement.style.removeProperty(key);
+  }
+};
+
+const applyDaytimeUiTokens = (
+  backgroundHex: number,
+  sky?: { horizon: number; zenith: number },
+) => {
+  const tokens = uiTokensFromBackground(backgroundHex, {
+    horizonHex: sky?.horizon,
+    zenithHex: sky?.zenith,
+  });
+  appElement.style.setProperty("--daytime-bg", `#${backgroundHex.toString(16).padStart(6, "0")}`);
+  appElement.style.setProperty("--ui-ink", tokens.ink);
+  appElement.style.setProperty("--ui-ink-soft", tokens.soft);
+  appElement.style.setProperty("--ui-ink-faint", tokens.faint);
+  appElement.style.setProperty("--ui-panel", tokens.panel);
+  appElement.style.setProperty("--ui-border", tokens.border);
+  appElement.style.setProperty("--ui-badge-bg", tokens.badgeBg);
+  return tokens;
+};
+
 const syncDaytimeEnvironmentTargets = () => {
   const activeWeather = getActiveWeatherSnapshot();
   const cloudCover =
@@ -7602,10 +7890,11 @@ const syncDaytimeEnvironmentTargets = () => {
   // 網点: 夜まで沈めず昼帯のトーンを維持（UI は CSS の multiply+#fff）
   if (ditherStyle) {
     daytimeSkyActive = false;
+    activeDaytimeLook = null;
     appElement.classList.remove("daytime-linked");
-    appElement.style.removeProperty("--daytime-bg");
+    clearDaytimeUiTokens();
     appElement.style.removeProperty("--dither-bg");
-    const dayLook = sampleDaytimeAtmosphereFromHour(
+    const dayLook = sampleActiveDaytimeAtmosphere(
       daytimeBackgroundEnabled ? Math.min(Math.max(getActiveDaytimeHour(), 8), 16) : 11,
     );
     const forming = tintHexWithClouds(dayLook.forming, Math.min(cloudCover, 0.35));
@@ -7618,7 +7907,8 @@ const syncDaytimeEnvironmentTargets = () => {
   }
 
   if (daytimeBackgroundEnabled) {
-    const atmosphere = sampleDaytimeAtmosphereFromHour(getActiveDaytimeHour());
+    const atmosphere = sampleActiveDaytimeAtmosphere();
+    activeDaytimeLook = atmosphere;
     const sky = applyCloudCoverToSky(atmosphere.zenith, atmosphere.horizon, cloudCover);
     const forming = tintHexWithClouds(atmosphere.forming, cloudCover);
     const complete = tintHexWithClouds(atmosphere.complete, cloudCover);
@@ -7627,16 +7917,17 @@ const syncDaytimeEnvironmentTargets = () => {
     daytimeZenithColor.setHex(sky.zenith);
     daytimeHorizonColor.setHex(sky.horizon);
     daytimeSkyActive = true;
-    const bgCss = `#${forming.toString(16).padStart(6, "0")}`;
     appElement.classList.add("daytime-linked");
-    appElement.style.setProperty("--daytime-bg", bgCss);
-    themeDarkActive = atmosphere.dark || cloudCover > 0.72;
+    const ui = applyDaytimeUiTokens(forming, { horizon: sky.horizon, zenith: sky.zenith });
+    // 背景輝度に合わせてダーク UI クラスも同期（パネル等のフォールバック用）
+    themeDarkActive = ui.darkUi || cloudCover > 0.78;
     appElement.classList.toggle("theme-dark", themeDarkActive);
     return;
   }
   daytimeSkyActive = false;
+  activeDaytimeLook = null;
   appElement.classList.remove("daytime-linked");
-  appElement.style.removeProperty("--daytime-bg");
+  clearDaytimeUiTokens();
   envBackgroundForming.setHex(tintHexWithClouds(sceneEnv.background, cloudCover));
   envBackgroundComplete.setHex(tintHexWithClouds(sceneEnv.backgroundComplete, cloudCover));
   const styleDark = styleEnvActive && visualStyle.themeDark;
@@ -7646,11 +7937,19 @@ const syncDaytimeEnvironmentTargets = () => {
 
 const updateLocalClockHud = () => {
   const showDateTime = daytimeBackgroundEnabled;
+  const dateWasHidden = hudDateFieldEl?.hidden ?? true;
+  const timeWasHidden = hudLocalTimeFieldEl?.hidden ?? true;
   if (hudDateFieldEl) {
     hudDateFieldEl.hidden = !showDateTime;
   }
   if (hudLocalTimeFieldEl) {
     hudLocalTimeFieldEl.hidden = !showDateTime;
+  }
+  if (
+    dateWasHidden !== !showDateTime ||
+    timeWasHidden !== !showDateTime
+  ) {
+    dockSculptureStick();
   }
   if (!showDateTime) {
     return;
@@ -7699,6 +7998,17 @@ const refreshLiveWeather = async () => {
     syncDaytimeEnvironmentTargets();
   } catch (error) {
     if (seq !== liveWeatherFetchSeq || !liveWeatherEnabled) {
+      return;
+    }
+    if (error instanceof GeolocationPermissionDeniedError) {
+      liveWeatherEnabled = false;
+      writeLiveWeatherEnabled(false);
+      if (liveWeatherInput) {
+        liveWeatherInput.checked = false;
+      }
+      stopLiveWeather();
+      setLiveWeatherStatus("位置情報が許可されなかったため Match local weather をOFFにしました");
+      updateWeatherHud();
       return;
     }
     console.error(error);
@@ -7807,6 +8117,8 @@ const parseWeatherPreviewPreset = (value: string): WeatherPreviewPresetId => {
     case "snow":
     case "windy":
     case "storm":
+    case "thunder":
+    case "thunderstorm":
       return value;
     default:
       return "live";
@@ -7876,6 +8188,13 @@ syncDaytimePreviewLabel();
 syncDaytimeEnvironmentTargets();
 updateLocalClockHud();
 updateWeatherHud();
+if (liveWeatherEnabled) {
+  startLiveWeather();
+}
+// 日時・天気 HUD の表示後にスティック位置を再計算（header / 左下スタックと被らない帯へ）
+requestAnimationFrame(() => {
+  dockSculptureStick();
+});
 (scene.background as THREE.Color).copy(envBackgroundForming);
 renderer.setClearColor(scene.background as THREE.Color);
 if (daytimeSkyActive) {
@@ -7895,6 +8214,10 @@ const updateEnvironmentCrossfade = (deltaTime: number) => {
   (scene.background as THREE.Color)
     .copy(envBackgroundForming)
     .lerp(envBackgroundComplete, envMix);
+  const lightningFlash = sceneBackground.getLightningFlash();
+  if (lightningFlash > 0.01) {
+    (scene.background as THREE.Color).lerp(lightningFlashColor, Math.min(1, lightningFlash * 0.92));
+  }
   renderer.setClearColor(scene.background as THREE.Color);
   if (daytimeSkyActive) {
     sceneBackground.setDaytimeSky(
@@ -7906,25 +8229,90 @@ const updateEnvironmentCrossfade = (deltaTime: number) => {
   } else {
     sceneBackground.setFromBackground(scene.background as THREE.Color, themeDarkActive, envMix);
   }
+  // 雷の瞬間はドーム側もフラッシュ色を重ねる
+  if (lightningFlash > 0.01 && daytimeSkyActive) {
+    daytimeZenithFlashColor.copy(daytimeZenithColor).lerp(lightningFlashColor, lightningFlash * 0.9);
+    daytimeHorizonFlashColor.copy(daytimeHorizonColor).lerp(lightningFlashColor, lightningFlash * 0.75);
+    sceneBackground.setDaytimeSky(
+      daytimeZenithFlashColor,
+      daytimeHorizonFlashColor,
+      themeDarkActive,
+      envMix,
+    );
+  }
   syncSceneFog();
-  keyLight.intensity = envLerp(sceneEnv.key, sceneEnv.keyComplete);
-  fillLight.intensity = envLerp(sceneEnv.fill, sceneEnv.fillComplete);
-  softFillLight.intensity = envLerp(sceneEnv.fill, sceneEnv.fillComplete) * 0.55;
-  ambientLight.intensity = envLerp(sceneEnv.ambient, sceneEnv.ambientComplete);
+  const baseKey = envLerp(sceneEnv.key, sceneEnv.keyComplete);
+  const baseFill = envLerp(sceneEnv.fill, sceneEnv.fillComplete);
+  const baseAmbient = envLerp(sceneEnv.ambient, sceneEnv.ambientComplete);
+
+  if (daytimeSkyActive && activeDaytimeLook) {
+    const li = activeDaytimeLook.lightIntensity;
+    // 正午で最大、日の出・日没・夜は光量を落とす
+    keyLight.intensity = baseKey * (0.2 + li * 0.95) + lightningFlash * 2.4;
+    fillLight.intensity = baseFill * (0.28 + li * 0.78) + lightningFlash * 1.1;
+    softFillLight.intensity = baseFill * 0.55 * (0.3 + li * 0.75) + lightningFlash * 0.7;
+    ambientLight.intensity = baseAmbient * (0.32 + li * 0.72) + lightningFlash * 1.6;
+    keyLight.color.setHex(activeDaytimeLook.sunColor);
+    fillLight.color.setHex(activeDaytimeLook.fillColor);
+    softFillLight.color.copy(fillLight.color);
+    ambientLight.color.setHex(activeDaytimeLook.sunColor);
+    ambientLight.groundColor.setHex(activeDaytimeLook.horizon);
+  } else {
+    keyLight.intensity = baseKey + lightningFlash * 2.4;
+    fillLight.intensity = baseFill + lightningFlash * 1.1;
+    softFillLight.intensity = baseFill * 0.55 + lightningFlash * 0.7;
+    ambientLight.intensity = baseAmbient + lightningFlash * 1.6;
+    keyLight.color.setHex(0xffffff);
+    if (lumenStyle) {
+      fillLight.color.setHex(0xb04888);
+      softFillLight.color.setHex(0xb04888);
+    } else {
+      fillLight.color.setHex(sceneEnv.fillColor ?? 0xe8f0ff);
+      softFillLight.color.copy(fillLight.color);
+    }
+    ambientLight.color.setHex(0xffffff);
+    ambientLight.groundColor.setHex(sceneEnv.hemisphereGround ?? 0xd6d0c6);
+  }
   if (spotLight) {
     spotLight.intensity = sceneEnv.spotlightIntensity * envMix;
   }
+  updateKeyLight();
 };
 
-/** 上からやや広げて当てる（俯瞰＋広がり） */
+/** 左下（朝）→ 正午真上 → 右下（夕〜夜）の弧でキーライトを置く */
 const updateKeyLight = () => {
-  const azimuth = THREE.MathUtils.degToRad(32);
-  const elevation = THREE.MathUtils.degToRad(72);
+  const look = daytimeSkyActive ? activeDaytimeLook : null;
+  let elevationDeg = 72;
+  let sideDeg = 18; // -左 / +右（画面左右）
+  if (look) {
+    const h = look.hour;
+    // 3:30〜20:30 で左下→右下へ大きく振る。夜は右下に固定
+    if (look.usingMoonlight || h >= 20.5 || h < 3.5) {
+      sideDeg = 68;
+      elevationDeg = 8;
+    } else if (h <= 12) {
+      const t = THREE.MathUtils.smoothstep(3.5, 12, h);
+      sideDeg = THREE.MathUtils.lerp(-70, 0, t);
+      elevationDeg = THREE.MathUtils.lerp(6, 78, t);
+    } else {
+      const t = THREE.MathUtils.smoothstep(12, 20.5, h);
+      sideDeg = THREE.MathUtils.lerp(0, 70, t);
+      elevationDeg = THREE.MathUtils.lerp(78, 6, t);
+    }
+    // 実太陽高度で上下を少し補正（季節の明るさ開始を反映）
+    if (!look.usingMoonlight && look.sunElevationDeg > -8) {
+      const solarLift = THREE.MathUtils.clamp(look.sunElevationDeg * 0.18, -3, 8);
+      elevationDeg = THREE.MathUtils.clamp(elevationDeg + solarLift, 5, 82);
+    }
+  }
+  const side = THREE.MathUtils.degToRad(sideDeg);
+  const elevation = THREE.MathUtils.degToRad(elevationDeg);
   const radius = 7.6;
+  // side<0 = 左下寄り、side>0 = 右下寄り。正午は真上近く
   keyLight.position.set(
-    Math.cos(elevation) * Math.sin(azimuth) * radius,
+    Math.sin(side) * Math.cos(elevation) * radius,
     Math.sin(elevation) * radius,
-    Math.cos(elevation) * Math.cos(azimuth) * radius,
+    Math.cos(side) * Math.cos(elevation) * radius * 0.55 + 2.2,
   );
 };
 
@@ -8149,6 +8537,8 @@ beginRecordingButton.addEventListener("click", async () => {
     return;
   }
 
+  void closeControlPanel();
+
   const source = armedAudioSource;
   const deviceId = audioInputSelect.value || "default";
 
@@ -8171,9 +8561,19 @@ beginRecordingButton.addEventListener("click", async () => {
     } else {
       hudSignalLabel = "BUFFER";
       setStatus("Preparing dev audio…");
-      beginRecordingButton.dataset.statusReady = "Forming (s04) — drag to rotate";
-      const { DEV_AUDIO_URL } = await import("./dev-audio");
-      await audioInput.startDevAudio(DEV_AUDIO_URL);
+      let selected: { url: string; label: string };
+      if (getSelectedDevAudioUrl) {
+        selected = await getSelectedDevAudioUrl();
+      } else {
+        const mod = await import("./dev-audio");
+        const track = mod.resolveInitialDevAudioTrack();
+        if (!track) {
+          throw new Error("開発用音源がありません（src/music を確認してください）");
+        }
+        selected = { url: track.url, label: track.label };
+      }
+      beginRecordingButton.dataset.statusReady = `Forming (${selected.label}) — drag to rotate`;
+      await audioInput.startDevAudio(selected.url);
     }
 
     finishAudioInputStart();
@@ -8196,13 +8596,16 @@ exportButton.addEventListener("click", exportSculpture);
 
 const resize = () => {
   const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  const fit = getViewportFitScale();
   if (camera instanceof THREE.OrthographicCamera) {
-    camera.left = -orthoHalf * aspect;
-    camera.right = orthoHalf * aspect;
-    camera.top = orthoHalf;
-    camera.bottom = -orthoHalf;
+    const half = orthoHalf / fit;
+    camera.left = -half * aspect;
+    camera.right = half * aspect;
+    camera.top = half;
+    camera.bottom = -half;
   } else {
     camera.aspect = aspect;
+    camera.fov = BASE_CAMERA_FOV / fit;
   }
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);

@@ -10,6 +10,9 @@ import {
   type GrowthVec3,
 } from "./growth-algorithm";
 import type { BackgroundProfile, VisualStyleEnv } from "./visual-style";
+/** Codrops Procedural Clouds の外形 / ノイズ画像 */
+import cloudShapeUrl from "./assets/clouds/shape.png";
+import cloudNoiseUrl from "./assets/clouds/noise.png";
 
 /**
  * 星ドリフト用の共有成長フィールド。
@@ -122,6 +125,174 @@ const getPointCircleMap = () => {
   return sharedPointCircleMap;
 };
 
+type CloudShapeStyle = "sky" | "mist";
+
+/**
+ * Codrops Procedural Clouds の外形テクスチャ（中央の柔らかい白シルエット、外周は黒）。
+ * @see https://github.com/dghez/THREEJS_Procedural-clouds
+ */
+let sharedCloudShapeMap: THREE.Texture | null = null;
+const getCloudShapeMap = () => {
+  if (sharedCloudShapeMap) {
+    return sharedCloudShapeMap;
+  }
+  const tex = new THREE.TextureLoader().load(cloudShapeUrl);
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  sharedCloudShapeMap = tex;
+  return sharedCloudShapeMap;
+};
+
+/**
+ * Codrops の雲ノイズ（タイル可能なグレーノイズ。外形を揺らす用）。
+ */
+let sharedCloudNoiseMap: THREE.Texture | null = null;
+const getCloudNoiseMap = () => {
+  if (sharedCloudNoiseMap) {
+    return sharedCloudNoiseMap;
+  }
+  const tex = new THREE.TextureLoader().load(cloudNoiseUrl);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  sharedCloudNoiseMap = tex;
+  return sharedCloudNoiseMap;
+};
+
+/** Codrops 風のビルボード雲頂点（Sprite 相当） */
+const proceduralCloudVertexShader = /* glsl */ `
+  uniform float rotation;
+  uniform vec2 center;
+  varying vec2 vUv;
+
+  void main() {
+    vUv = uv;
+    vec4 mvPosition = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+    vec2 scale;
+    scale.x = length(vec3(modelMatrix[0].x, modelMatrix[0].y, modelMatrix[0].z));
+    scale.y = length(vec3(modelMatrix[1].x, modelMatrix[1].y, modelMatrix[1].z));
+    vec2 alignedPosition = (position.xy - (center - vec2(0.5))) * scale;
+    vec2 rotatedPosition;
+    rotatedPosition.x = cos(rotation) * alignedPosition.x - sin(rotation) * alignedPosition.y;
+    rotatedPosition.y = sin(rotation) * alignedPosition.x + cos(rotation) * alignedPosition.y;
+    mvPosition.xy += rotatedPosition;
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+
+/**
+ * Codrops cloud.frag 相当。
+ * 外形画像（角まで黒）× ノイズ levels でアルファを作るため、クワッドの辺が出にくい。
+ */
+const proceduralCloudFragmentShader = /* glsl */ `
+  uniform sampler2D uTxtShape;
+  uniform sampler2D uTxtCloudNoise;
+  uniform float uTime;
+  uniform float uOpacity;
+  uniform vec3 uColor;
+  uniform float uFac1;
+  uniform float uFac2;
+  uniform float uTimeFactor1;
+  uniform float uTimeFactor2;
+  uniform float uDisplStrenght1;
+  uniform float uDisplStrenght2;
+  varying vec2 vUv;
+
+  vec4 gammaCorrect(vec4 color, float gamma) {
+    return pow(color, vec4(1.0 / gamma));
+  }
+  vec4 levelRange(vec4 color, float minInput, float maxInput) {
+    return min(max(color - vec4(minInput), vec4(0.0)) / (vec4(maxInput) - vec4(minInput)), vec4(1.0));
+  }
+  vec4 levels(vec4 color, float minInput, float gamma, float maxInput) {
+    return gammaCorrect(levelRange(color, minInput, maxInput), gamma);
+  }
+
+  float hash(vec3 p) {
+    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+  }
+  float noise3(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+      mix(mix(hash(i), hash(i + vec3(1,0,0)), f.x),
+          mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y),
+      mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x),
+          mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y), f.z);
+  }
+  float fbm3(vec3 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+      v += a * noise3(p);
+      p = p * 2.03 + vec3(1.7, 9.2, 3.1);
+      a *= 0.5;
+    }
+    return v;
+  }
+
+  void main() {
+    vec2 newUv = vUv;
+
+    vec4 txtNoise1 = texture2D(uTxtCloudNoise, vec2(vUv.x + uTime * 0.0001, vUv.y - uTime * 0.00014));
+    vec4 txtNoise2 = texture2D(uTxtCloudNoise, vec2(vUv.x - uTime * 0.00002, vUv.y + uTime * 0.000017 + 0.2));
+
+    float noiseBig = fbm3(vec3(vUv * uFac1, uTime * uTimeFactor1)) + 0.5;
+    newUv += noiseBig * uDisplStrenght1;
+
+    float noiseSmall = noise3(vec3(newUv * uFac2, uTime * uTimeFactor2)) * 2.0 - 1.0;
+    newUv += noiseSmall * uDisplStrenght2;
+
+    vec4 txtShape = texture2D(uTxtShape, newUv);
+    float alpha = levels((txtNoise1 + txtNoise2) * 0.6, 0.2, 0.4, 0.7).r;
+    alpha *= txtShape.r;
+    alpha *= uOpacity;
+    if (alpha < 0.01) discard;
+    gl_FragColor = vec4(uColor, alpha);
+  }
+`;
+
+const createProceduralCloudMaterial = (seed: number, style: CloudShapeStyle = "sky") => {
+  const shape = getCloudShapeMap();
+  const noise = getCloudNoiseMap();
+  const jitter = (seed * 17.13) % 1;
+  const misty = style === "mist";
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      rotation: { value: 0 },
+      center: { value: new THREE.Vector2(0.5, 0.5) },
+      uTime: { value: seed * 120 },
+      uTxtShape: { value: shape },
+      uTxtCloudNoise: { value: noise },
+      uOpacity: { value: 0 },
+      uColor: { value: new THREE.Color(misty ? 0xe4eaf0 : 0xd8dee6) },
+      // Codrops デモ寄りの既定値＋個体差
+      uFac1: { value: 15 + jitter * 6 },
+      uFac2: { value: 2.2 + jitter * 1.2 },
+      uTimeFactor1: { value: 0.0015 + jitter * 0.001 },
+      uTimeFactor2: { value: 0.001 + jitter * 0.001 },
+      uDisplStrenght1: { value: 0.035 + jitter * 0.02 },
+      uDisplStrenght2: { value: 0.06 + jitter * 0.04 },
+    },
+    vertexShader: proceduralCloudVertexShader,
+    fragmentShader: proceduralCloudFragmentShader,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.NormalBlending,
+    toneMapped: false,
+    side: THREE.DoubleSide,
+  });
+};
+
 const domeVertexShader = /* glsl */ `
   varying vec3 vDir;
   void main() {
@@ -139,6 +310,9 @@ const domeFragmentShader = /* glsl */ `
   uniform float uAudio;
   uniform float uStudio;
   uniform float uAbyss;
+  uniform float uCloudCover;
+  uniform float uFogHaze;
+  uniform float uLightningFlash;
   uniform vec3 uCameraPos;
   varying vec3 vDir;
 
@@ -159,21 +333,32 @@ const domeFragmentShader = /* glsl */ `
           mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y), f.z);
   }
 
+  float fbm(vec3 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+      v += a * noise(p);
+      p = p * 2.03 + vec3(1.7, 9.2, 3.1);
+      a *= 0.5;
+    }
+    return v;
+  }
+
   void main() {
     vec3 dir = normalize(vDir);
     float h = dir.y * 0.5 + 0.5;
+    float cloud = clamp(uCloudCover, 0.0, 1.0);
+    float fogH = clamp(uFogHaze, 0.0, 1.0);
+    float flash = clamp(uLightningFlash, 0.0, 1.0);
 
     if (uAbyss > 0.5) {
-      // 非線形の垂直グラデーション — 天頂が開き、深部は沈む
       float vGrad = pow(h, 0.58);
       vec3 col = mix(uBottom, uTop, smoothstep(0.02, 0.98, vGrad));
 
-      // 地平方向の大気遠近 — 水平線ほど霞が厚く、奥行きの手がかりになる
       float horizonView = 1.0 - abs(dir.y);
       float atmosHaze = horizonView * horizonView * (0.55 + noise(dir * 1.8 + vec3(uTime * 0.01)) * 0.45);
       col = mix(col, uHalo, atmosHaze * 0.26);
 
-      // 高度ごとの霞レイヤー（深海の層 + 宇宙の微光）
       float murk = noise(dir * 2.4 + vec3(uTime * 0.018, uTime * 0.012, uTime * 0.008));
       float midHaze = smoothstep(0.12, 0.68, h) * (murk * 0.45 + 0.55);
       col += uHalo * midHaze * 0.065;
@@ -186,10 +371,15 @@ const domeFragmentShader = /* glsl */ `
       float abyssBands = sin(dir.x * 9.0 + dir.z * 7.0 + uTime * 0.06) * 0.032;
       col *= 1.0 + abyssBands * smoothstep(0.08, 0.7, h);
 
+      // 雲・霧はスプライト側。ドームは薄い下地のみ
+      col = mix(col, mix(uBottom, uHalo, 0.25), cloud * horizonView * 0.18);
+      col = mix(col, uHalo, fogH * horizonView * horizonView * 0.22);
+
       vec3 behind = normalize(uCameraPos);
       float halo = smoothstep(0.5, 0.99, dot(dir, behind));
       float haloStrength = uHaloStrength * 1.15 * (1.0 + uAudio * 0.06);
       col = mix(col, uHalo, halo * halo * haloStrength);
+      col = mix(col, vec3(0.86, 0.91, 1.0), flash * 0.85);
       gl_FragColor = vec4(col, 1.0);
       return;
     }
@@ -212,12 +402,28 @@ const domeFragmentShader = /* glsl */ `
       col = mix(col, uTop, ceilingWarm * 0.08);
     }
 
+    // 空の下地だけ薄く落とす（雲・霧の実体はプロシージャル雲スプライト側）
+    {
+      float elev = dir.y;
+      float band = smoothstep(0.0, 0.18, elev) * (1.0 - smoothstep(0.35, 0.85, elev));
+      vec3 overcast = mix(uBottom, vec3(0.58, 0.62, 0.66), 0.45);
+      col = mix(col, overcast, band * cloud * 0.28);
+      col = mix(col, overcast, cloud * cloud * 0.12 * smoothstep(0.1, 0.9, elev));
+    }
+
+    // 霧の下地: フレアにならないよう低コントラストの霞のみ
+    {
+      float rise = 1.0 - smoothstep(-0.15, 0.5, dir.y);
+      vec3 mistCol = mix(uBottom, vec3(0.7, 0.74, 0.78), 0.5);
+      col = mix(col, mistCol, rise * fogH * 0.35);
+    }
+
     vec3 behind = normalize(uCameraPos);
     float halo = smoothstep(0.55, 0.985, dot(dir, behind));
-    float haloBoost = 1.0;
     float audioPulse = uStudio > 0.5 ? 0.08 : 0.0;
-    float haloStrength = uHaloStrength * haloBoost * (1.0 + uAudio * audioPulse);
+    float haloStrength = uHaloStrength * (1.0 + uAudio * audioPulse);
     col = mix(col, uHalo, halo * halo * haloStrength);
+    col = mix(col, vec3(0.88, 0.92, 1.0), flash * 0.9);
 
     gl_FragColor = vec4(col, 1.0);
   }
@@ -257,6 +463,9 @@ class BackgroundDome {
         uAudio: { value: 0 },
         uStudio: { value: 0 },
         uAbyss: { value: 0 },
+        uCloudCover: { value: 0 },
+        uFogHaze: { value: 0 },
+        uLightningFlash: { value: 0 },
         uCameraPos: { value: new THREE.Vector3(0, 0.28, 6.4) },
       },
       vertexShader: domeVertexShader,
@@ -339,6 +548,15 @@ class BackgroundDome {
     if (camera) {
       (this.material.uniforms.uCameraPos.value as THREE.Vector3).copy(camera);
     }
+  }
+
+  setWeatherAtmosphere(cloudCover: number, fogHaze: number, lightningFlash: number) {
+    if (!this.material.uniforms.uCloudCover) {
+      return;
+    }
+    this.material.uniforms.uCloudCover.value = cloudCover;
+    this.material.uniforms.uFogHaze.value = fogHaze;
+    this.material.uniforms.uLightningFlash.value = lightningFlash;
   }
 
   applyParallax(camera: THREE.Vector3, amount: number) {
@@ -1278,30 +1496,62 @@ class StudioFloor {
   }
 }
 
-/** 実天気の雨・雪ストリーク */
+/** 実天気の雨・雪（雨は上から落ちる筋、雪は粒） */
 class WeatherPrecipField {
-  readonly points: THREE.Points;
-  private readonly positions: Float32Array;
-  private readonly speeds: Float32Array;
-  private readonly geometry: THREE.BufferGeometry;
-  private readonly material: THREE.PointsMaterial;
+  readonly object: THREE.Object3D;
+  readonly rainLines: THREE.LineSegments;
+  readonly snowPoints: THREE.Points;
+  private readonly rainPositions: Float32Array;
+  private readonly rainSpeeds: Float32Array;
+  private readonly rainLengths: Float32Array;
+  private readonly snowPositions: Float32Array;
+  private readonly snowSpeeds: Float32Array;
+  private readonly snowPhase: Float32Array;
+  private readonly rainGeometry: THREE.BufferGeometry;
+  private readonly snowGeometry: THREE.BufferGeometry;
+  private readonly rainMaterial: THREE.LineBasicMaterial;
+  private readonly snowMaterial: THREE.PointsMaterial;
   private intensity = 0;
   private windX = 0;
   private windZ = 0;
   private snowMode = false;
+  private readonly rainCount: number;
+  private readonly snowCount: number;
+  private time = 0;
 
-  constructor(count = 1400) {
-    this.positions = new Float32Array(count * 3);
-    this.speeds = new Float32Array(count);
-    for (let i = 0; i < count; i += 1) {
-      this.resetDrop(i, true);
-    }
-    this.geometry = new THREE.BufferGeometry();
-    this.geometry.setAttribute("position", new THREE.BufferAttribute(this.positions, 3));
-    this.material = new THREE.PointsMaterial({
-      size: 0.045,
+  constructor(rainCount = 1600, snowCount = 900) {
+    this.rainCount = rainCount;
+    this.snowCount = snowCount;
+    this.rainPositions = new Float32Array(rainCount * 6);
+    this.rainSpeeds = new Float32Array(rainCount);
+    this.rainLengths = new Float32Array(rainCount);
+    this.snowPositions = new Float32Array(snowCount * 3);
+    this.snowSpeeds = new Float32Array(snowCount);
+    this.snowPhase = new Float32Array(snowCount);
+
+    for (let i = 0; i < rainCount; i += 1) this.resetRain(i, true);
+    for (let i = 0; i < snowCount; i += 1) this.resetSnow(i, true);
+
+    this.rainGeometry = new THREE.BufferGeometry();
+    this.rainGeometry.setAttribute("position", new THREE.BufferAttribute(this.rainPositions, 3));
+    this.rainMaterial = new THREE.LineBasicMaterial({
+      color: 0xc4d0dc,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    });
+    this.rainLines = new THREE.LineSegments(this.rainGeometry, this.rainMaterial);
+    this.rainLines.frustumCulled = false;
+    this.rainLines.renderOrder = -3;
+
+    this.snowGeometry = new THREE.BufferGeometry();
+    this.snowGeometry.setAttribute("position", new THREE.BufferAttribute(this.snowPositions, 3));
+    this.snowMaterial = new THREE.PointsMaterial({
+      size: 0.07,
       sizeAttenuation: true,
-      color: 0xb8c4d4,
+      color: 0xe4ebf4,
       transparent: true,
       opacity: 0,
       depthWrite: false,
@@ -1309,18 +1559,38 @@ class WeatherPrecipField {
       map: getPointCircleMap(),
       toneMapped: false,
     });
-    this.points = new THREE.Points(this.geometry, this.material);
-    this.points.frustumCulled = false;
-    this.points.renderOrder = -3;
-    this.points.visible = false;
+    this.snowPoints = new THREE.Points(this.snowGeometry, this.snowMaterial);
+    this.snowPoints.frustumCulled = false;
+    this.snowPoints.renderOrder = -3;
+
+    this.object = new THREE.Group();
+    this.object.add(this.rainLines, this.snowPoints);
+    this.object.visible = false;
   }
 
-  private resetDrop(index: number, scatterY: boolean) {
+  /** 常に上空から再出現（横からは降らせない） */
+  private resetRain(index: number, scatterY: boolean) {
+    const head = index * 6;
+    const x = (Math.random() - 0.5) * 22;
+    const y = scatterY ? 4 + Math.random() * 12 : 12 + Math.random() * 6;
+    const z = (Math.random() - 0.5) * 22;
+    this.rainPositions[head] = x;
+    this.rainPositions[head + 1] = y;
+    this.rainPositions[head + 2] = z;
+    this.rainPositions[head + 3] = x;
+    this.rainPositions[head + 4] = y;
+    this.rainPositions[head + 5] = z;
+    this.rainSpeeds[index] = 10 + Math.random() * 9;
+    this.rainLengths[index] = 0.22 + Math.random() * 0.35;
+  }
+
+  private resetSnow(index: number, scatterY: boolean) {
     const idx = index * 3;
-    this.positions[idx] = (Math.random() - 0.5) * 28;
-    this.positions[idx + 1] = scatterY ? Math.random() * 16 - 2 : 10 + Math.random() * 8;
-    this.positions[idx + 2] = (Math.random() - 0.5) * 28;
-    this.speeds[index] = 6.5 + Math.random() * 7.5;
+    this.snowPositions[idx] = (Math.random() - 0.5) * 22;
+    this.snowPositions[idx + 1] = scatterY ? 3 + Math.random() * 12 : 11 + Math.random() * 6;
+    this.snowPositions[idx + 2] = (Math.random() - 0.5) * 22;
+    this.snowSpeeds[index] = 1.2 + Math.random() * 2.4;
+    this.snowPhase[index] = Math.random() * Math.PI * 2;
   }
 
   setWeather(intensity: number, windX: number, windZ: number, snow: boolean) {
@@ -1328,68 +1598,330 @@ class WeatherPrecipField {
     this.windX = windX;
     this.windZ = windZ;
     this.snowMode = snow;
-    this.points.visible = this.intensity > 0.02;
-    this.material.color.setHex(snow ? 0xd8e0ea : 0x9aacc0);
-    this.material.size = snow ? 0.055 : 0.038;
+    this.object.visible = this.intensity > 0.02;
+    this.rainLines.visible = !snow && this.intensity > 0.02;
+    this.snowPoints.visible = snow && this.intensity > 0.02;
+    this.rainMaterial.color.setHex(0xc4d0dc);
   }
 
   update(deltaTime: number) {
+    this.time += deltaTime;
     if (this.intensity < 0.02) {
-      this.material.opacity = 0;
+      this.rainMaterial.opacity = 0;
+      this.snowMaterial.opacity = 0;
       return;
     }
-    const count = this.speeds.length;
-    const fallMul = this.snowMode ? 0.35 : 1;
-    // 風が強いほど雨筋が横に流れる（見た目の傾き）
+
     const windMag = Math.hypot(this.windX, this.windZ);
-    const windMul = (this.snowMode ? 2.2 : 4.8) * (0.35 + windMag * 2.4);
-    for (let i = 0; i < count; i += 1) {
-      // 弱い雨のときは一部の粒だけ動かす
-      if (i / count > 0.25 + this.intensity * 0.75) {
+    let wx = this.windX;
+    let wz = this.windZ;
+    if (windMag > 0.001) {
+      wx /= windMag;
+      wz /= windMag;
+    } else {
+      wx = 0;
+      wz = 0;
+    }
+
+    if (this.snowMode) {
+      const active = 0.2 + this.intensity * 0.8;
+      for (let i = 0; i < this.snowCount; i += 1) {
+        if (i / this.snowCount > active) {
+          this.snowPositions[i * 3 + 1] = -99;
+          continue;
+        }
+        const idx = i * 3;
+        const flutter = Math.sin(this.time * 1.6 + this.snowPhase[i]) * 0.45;
+        const drift = Math.cos(this.time * 1.1 + this.snowPhase[i] * 1.3) * 0.35;
+        this.snowPositions[idx] += (wx * windMag * 1.6 + flutter) * deltaTime;
+        this.snowPositions[idx + 1] -= this.snowSpeeds[i] * deltaTime * (0.55 + this.intensity * 0.5);
+        this.snowPositions[idx + 2] += (wz * windMag * 1.6 + drift) * deltaTime;
+        if (this.snowPositions[idx + 1] < -3.2) this.resetSnow(i, false);
+      }
+      this.snowGeometry.attributes.position.needsUpdate = true;
+      this.snowMaterial.opacity = 0.22 + this.intensity * 0.62;
+      this.snowMaterial.size = 0.055 + this.intensity * 0.04;
+      this.rainMaterial.opacity = 0;
+      return;
+    }
+
+    // 雨はほぼ鉛直落下。風はわずかな傾きだけ（横から降らない）
+    const active = 0.22 + this.intensity * 0.78;
+    const fallBoost = 0.95 + this.intensity * 1.05;
+    const windLean = Math.min(2.2, windMag * 2.4);
+    for (let i = 0; i < this.rainCount; i += 1) {
+      if (i / this.rainCount > active) {
+        const head = i * 6;
+        this.rainPositions[head + 1] = -99;
+        this.rainPositions[head + 4] = -99;
         continue;
       }
-      const idx = i * 3;
-      this.positions[idx] += this.windX * deltaTime * windMul;
-      this.positions[idx + 1] -= this.speeds[i] * deltaTime * fallMul * (0.7 + this.intensity);
-      this.positions[idx + 2] += this.windZ * deltaTime * windMul;
-      if (this.positions[idx + 1] < -3.5) {
-        this.resetDrop(i, false);
+      const head = i * 6;
+      const speed = this.rainSpeeds[i] * fallBoost;
+      const vx = wx * windLean;
+      const vy = -speed;
+      const vz = wz * windLean;
+      this.rainPositions[head] += vx * deltaTime;
+      this.rainPositions[head + 1] += vy * deltaTime;
+      this.rainPositions[head + 2] += vz * deltaTime;
+
+      const len = this.rainLengths[i] * (0.85 + this.intensity * 0.9);
+      const inv = 1 / Math.max(0.001, Math.hypot(vx, vy, vz));
+      this.rainPositions[head + 3] = this.rainPositions[head] - vx * inv * len;
+      this.rainPositions[head + 4] = this.rainPositions[head + 1] - vy * inv * len;
+      this.rainPositions[head + 5] = this.rainPositions[head + 2] - vz * inv * len;
+
+      // 地面に落ちたら上空へ戻す（横方向はみ出しでも上空リスポーン）
+      if (this.rainPositions[head + 1] < -3.5) {
+        this.resetRain(i, false);
+      } else if (
+        Math.abs(this.rainPositions[head]) > 14 ||
+        Math.abs(this.rainPositions[head + 2]) > 14
+      ) {
+        this.resetRain(i, false);
       }
     }
-    this.geometry.attributes.position.needsUpdate = true;
-    this.material.opacity = 0.15 + this.intensity * 0.55;
+    this.rainGeometry.attributes.position.needsUpdate = true;
+    // 豪雨でも本数・長さで強さを出し、1本の不透明度は薄く保つ
+    this.rainMaterial.opacity = 0.14 + this.intensity * 0.1;
+    this.snowMaterial.opacity = 0;
   }
 }
 
+type ProceduralCloudLayerMode = "wind" | "mist" | "sky";
+
+type ProceduralCloudPuff = {
+  mesh: THREE.Mesh;
+  material: THREE.ShaderMaterial;
+  speed: number;
+  phase: number;
+  baseW: number;
+  baseH: number;
+  homeY: number;
+};
+
 /**
- * 風そのものを見せる流線・飛沫。
- * 雨がなくても風速で横方向のストリークが流れる。
+ * Codrops Procedural Clouds 系のビルボード雲レイヤー。
+ * Points のフレアではなく、外形×ノイズの大きな半透明シートで表現する。
  */
-class WeatherWindField {
-  readonly lines: THREE.LineSegments;
-  private readonly positions: Float32Array;
-  private readonly speeds: Float32Array;
-  private readonly lengths: Float32Array;
-  private readonly geometry: THREE.BufferGeometry;
-  private readonly material: THREE.LineBasicMaterial;
-  private strength = 0;
+class ProceduralCloudLayer {
+  readonly group = new THREE.Group();
+  private readonly puffs: ProceduralCloudPuff[] = [];
+  private readonly mode: ProceduralCloudLayerMode;
+  private intensity = 0;
   private windX = 0;
   private windZ = 0;
-  private readonly count: number;
+  private time = 0;
+  private gust = 0;
+  private readonly sharedGeometry: THREE.PlaneGeometry;
 
-  constructor(count = 220) {
-    this.count = count;
-    // 各ストリークは 2 頂点（始点・終点）
-    this.positions = new Float32Array(count * 6);
-    this.speeds = new Float32Array(count);
-    this.lengths = new Float32Array(count);
+  constructor(mode: ProceduralCloudLayerMode, count: number) {
+    this.mode = mode;
+    this.sharedGeometry = new THREE.PlaneGeometry(1, 1, 1, 1);
+    this.group.renderOrder = mode === "sky" ? -5 : mode === "mist" ? -4 : -2;
+    this.group.visible = false;
+    this.group.frustumCulled = false;
+
+    const shapeStyle: CloudShapeStyle = mode === "mist" ? "mist" : "sky";
     for (let i = 0; i < count; i += 1) {
-      this.resetStreak(i, true);
+      const material = createProceduralCloudMaterial(
+        i + (mode === "sky" ? 40 : mode === "mist" ? 20 : 0),
+        shapeStyle,
+      );
+      const mesh = new THREE.Mesh(this.sharedGeometry, material);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = this.group.renderOrder;
+      const puff: ProceduralCloudPuff = {
+        mesh,
+        material,
+        speed: 0.4 + Math.random() * 0.8,
+        phase: Math.random() * Math.PI * 2,
+        baseW: 1,
+        baseH: 1,
+        homeY: 0,
+      };
+      this.resetPuff(puff, true);
+      this.puffs.push(puff);
+      this.group.add(mesh);
     }
+  }
+
+  private resetPuff(puff: ProceduralCloudPuff, scatter: boolean) {
+    const mesh = puff.mesh;
+    if (this.mode === "mist") {
+      // 丸い房を低く重ねて「帯」ではなく地面の霞にする
+      mesh.position.set((Math.random() - 0.5) * 20, -1.35 + Math.random() * 2.4, (Math.random() - 0.5) * 20);
+      const size = 3.2 + Math.random() * 3.4;
+      const aspect = 0.92 + Math.random() * 0.45;
+      puff.baseW = size * aspect;
+      puff.baseH = size / aspect;
+      puff.homeY = mesh.position.y;
+    } else if (this.mode === "sky") {
+      mesh.position.set((Math.random() - 0.5) * 30, 4.2 + Math.random() * 6.5, (Math.random() - 0.5) * 30);
+      const size = 5.2 + Math.random() * 5.5;
+      const aspect = 1.15 + Math.random() * 0.7;
+      puff.baseW = size * aspect;
+      puff.baseH = size / Math.max(1, aspect * 0.85);
+      puff.homeY = mesh.position.y;
+    } else {
+      // wind: やや横長の薄い雲が流れる
+      const y = scatter ? 0.4 + Math.random() * 6.2 : 0.8 + Math.random() * 5.5;
+      mesh.position.set((Math.random() - 0.5) * 24, y, (Math.random() - 0.5) * 24);
+      puff.baseW = 3.8 + Math.random() * 4.2;
+      puff.baseH = 2.0 + Math.random() * 1.6;
+      puff.homeY = y;
+    }
+    puff.speed = 0.35 + Math.random() * 0.85;
+    puff.phase = Math.random() * Math.PI * 2;
+    mesh.scale.set(puff.baseW, puff.baseH, 1);
+    // 板を傾けない（辺が斜め線として見えるのを防ぐ）。形の変化はノイズ変位に任せる
+    puff.material.uniforms.rotation.value = 0;
+  }
+
+  setWeather(intensity: number, windX = 0, windZ = 0) {
+    this.intensity = Math.min(1, Math.max(0, intensity));
+    this.windX = windX;
+    this.windZ = windZ;
+    const visibleThreshold = this.mode === "sky" ? 0.1 : 0.05;
+    this.group.visible = this.intensity > visibleThreshold;
+
+    const color =
+      this.mode === "mist"
+        ? new THREE.Color(0xe8eef4)
+        : this.mode === "sky"
+          ? new THREE.Color(this.intensity > 0.7 ? 0x8f9aa8 : 0xb8c2cd)
+          : new THREE.Color(this.intensity > 0.55 ? 0xa7b4c2 : 0xc2cbd4);
+    for (const puff of this.puffs) {
+      puff.material.uniforms.uColor.value.copy(color);
+    }
+  }
+
+  update(deltaTime: number) {
+    this.time += deltaTime;
+    const visibleThreshold = this.mode === "sky" ? 0.1 : 0.05;
+    if (this.intensity < visibleThreshold) {
+      for (const puff of this.puffs) {
+        puff.material.uniforms.uOpacity.value = 0;
+      }
+      return;
+    }
+
+    this.gust +=
+      (0.4 + 0.6 * (0.5 + 0.5 * Math.sin(this.time * 0.5)) - this.gust) * Math.min(1, deltaTime * 1.1);
+
+    let wx = this.windX;
+    let wz = this.windZ;
+    const mag = Math.hypot(wx, wz);
+    if (mag < 0.001) {
+      wx = this.mode === "wind" ? 1 : 0.25;
+      wz = 0;
+    } else {
+      wx /= mag;
+      wz /= mag;
+    }
+
+    const activeRatio =
+      this.mode === "sky"
+        ? 0.28 + this.intensity * 0.72
+        : this.mode === "mist"
+          ? 0.55 + this.intensity * 0.45
+          : 0.25 + this.intensity * 0.75;
+
+    // 霧は1枚を濃くせず、多数を薄く重ねてボリューム感を出す
+    const baseOpacity =
+      this.mode === "mist"
+        ? 0.12 + this.intensity * 0.22
+        : this.mode === "sky"
+          ? 0.16 + this.intensity * 0.38
+          : 0.12 + this.intensity * 0.28;
+
+    const flow =
+      this.mode === "wind"
+        ? (0.9 + this.intensity * 3.4) * (0.7 + this.gust * 0.7)
+        : this.mode === "mist"
+          ? 0.12 + this.intensity * 0.2
+          : 0.22 + this.intensity * 0.55;
+
+    for (let i = 0; i < this.puffs.length; i += 1) {
+      const puff = this.puffs[i];
+      if (i / this.puffs.length > activeRatio) {
+        puff.material.uniforms.uOpacity.value = 0;
+        puff.mesh.visible = false;
+        continue;
+      }
+      puff.mesh.visible = true;
+      const mesh = puff.mesh;
+      const wobble = Math.sin(this.time * 0.35 + puff.phase) * (this.mode === "mist" ? 0.12 : 0.22);
+      const lift = Math.sin(this.time * 0.22 + puff.phase * 1.3) * (this.mode === "mist" ? 0.06 : 0.14);
+      const move = puff.speed * flow * deltaTime;
+      mesh.position.x += (wx + -wz * wobble) * move;
+      mesh.position.z += (wz + wx * wobble) * move;
+      mesh.position.y = puff.homeY + lift;
+
+      const breathe = 1 + Math.sin(this.time * 0.2 + puff.phase) * (this.mode === "mist" ? 0.1 : 0.06);
+      mesh.scale.set(puff.baseW * breathe, puff.baseH * breathe, 1);
+
+      // Codrops デモ同様、時間はフレーム加算（秒ではないスケール）
+      puff.material.uniforms.uTime.value += deltaTime * 60;
+      puff.material.uniforms.uOpacity.value =
+        baseOpacity * (0.8 + 0.2 * Math.sin(this.time * 0.25 + puff.phase));
+
+      const limit = this.mode === "sky" ? 17 : 13;
+      if (
+        Math.abs(mesh.position.x) > limit ||
+        Math.abs(mesh.position.z) > limit ||
+        (this.mode === "wind" && (mesh.position.y < -1.5 || mesh.position.y > 9))
+      ) {
+        this.resetPuff(puff, false);
+        if (this.mode === "wind") {
+          mesh.position.x = -wx * (8 + Math.random() * 8) + (Math.random() - 0.5) * 5;
+          mesh.position.z = -wz * (8 + Math.random() * 8) + (Math.random() - 0.5) * 5;
+          puff.homeY = mesh.position.y;
+        }
+      }
+    }
+  }
+}
+
+/** 風: 流れる薄いプロシージャル雲 */
+class WeatherWindField extends ProceduralCloudLayer {
+  constructor() {
+    super("wind", 12);
+  }
+}
+
+/** 霧: 丸い房を低く重ねた霞 */
+class WeatherMistField extends ProceduralCloudLayer {
+  constructor() {
+    super("mist", 24);
+  }
+}
+
+/** 雲 / どんより: 中空のプロシージャル雲 */
+class WeatherCloudField extends ProceduralCloudLayer {
+  constructor() {
+    super("sky", 16);
+  }
+}
+
+/** 稲妻のジグザグボルト */
+class WeatherLightningBolts {
+  readonly lines: THREE.LineSegments;
+  private readonly positions: Float32Array;
+  private readonly geometry: THREE.BufferGeometry;
+  private readonly material: THREE.LineBasicMaterial;
+  private life = 0;
+  private readonly maxSegments = 18;
+  private readonly maxBolts = 2;
+
+  constructor() {
+    // bolt * segments * 2 verts * 3
+    this.positions = new Float32Array(this.maxBolts * this.maxSegments * 6);
+    this.positions.fill(0);
     this.geometry = new THREE.BufferGeometry();
     this.geometry.setAttribute("position", new THREE.BufferAttribute(this.positions, 3));
     this.material = new THREE.LineBasicMaterial({
-      color: 0xc5d0dc,
+      color: 0xe8f0ff,
       transparent: true,
       opacity: 0,
       depthWrite: false,
@@ -1398,87 +1930,68 @@ class WeatherWindField {
     });
     this.lines = new THREE.LineSegments(this.geometry, this.material);
     this.lines.frustumCulled = false;
-    this.lines.renderOrder = -2;
+    this.lines.renderOrder = -1;
     this.lines.visible = false;
   }
 
-  private resetStreak(index: number, scatter: boolean) {
-    const head = index * 6;
-    const x = (Math.random() - 0.5) * 30;
-    const y = scatter ? Math.random() * 10 - 1.2 : -1 + Math.random() * 9;
-    const z = (Math.random() - 0.5) * 30;
-    this.positions[head] = x;
-    this.positions[head + 1] = y;
-    this.positions[head + 2] = z;
-    this.positions[head + 3] = x;
-    this.positions[head + 4] = y;
-    this.positions[head + 5] = z;
-    this.speeds[index] = 4.5 + Math.random() * 7.5;
-    this.lengths[index] = 0.35 + Math.random() * 1.1;
-  }
-
-  setWeather(strength: number, windX: number, windZ: number) {
-    this.strength = Math.min(1, Math.max(0, strength));
-    this.windX = windX;
-    this.windZ = windZ;
-    this.lines.visible = this.strength > 0.08;
-    // 強風ほど少し明るく・寒色寄り
-    const cold = this.strength > 0.55 ? 0xb8c8dc : 0xc8d2de;
-    this.material.color.setHex(cold);
-  }
-
-  update(deltaTime: number) {
-    if (this.strength < 0.08) {
-      this.material.opacity = 0;
-      return;
-    }
-    let wx = this.windX;
-    let wz = this.windZ;
-    const mag = Math.hypot(wx, wz);
-    if (mag < 0.001) {
-      // 向きが無い場合はデフォルト方向
-      wx = this.strength;
-      wz = 0;
-    } else {
-      wx /= mag;
-      wz /= mag;
-    }
-    const speedBase = 3.2 + this.strength * 14;
-    const streakLenBase = 0.55 + this.strength * 2.4;
-    for (let i = 0; i < this.count; i += 1) {
-      // 弱い風では一部だけ表示
-      if (i / this.count > 0.2 + this.strength * 0.8) {
-        const head = i * 6;
-        this.positions[head + 1] = -99;
-        this.positions[head + 4] = -99;
-        continue;
-      }
-      const head = i * 6;
-      const move = this.speeds[i] * deltaTime * speedBase * (0.55 + this.strength);
-      this.positions[head] += wx * move;
-      this.positions[head + 2] += wz * move;
-      // わずかな上下の揺らぎ
-      this.positions[head + 1] += Math.sin(this.positions[head] * 0.35 + i) * deltaTime * 0.35;
-      const len = this.lengths[i] * streakLenBase;
-      this.positions[head + 3] = this.positions[head] - wx * len;
-      this.positions[head + 4] = this.positions[head + 1] + len * 0.04;
-      this.positions[head + 5] = this.positions[head + 2] - wz * len;
-
-      // 視野外へ出たら風上側に戻す
-      if (
-        Math.abs(this.positions[head]) > 16 ||
-        Math.abs(this.positions[head + 2]) > 16 ||
-        this.positions[head + 1] < -2.2 ||
-        this.positions[head + 1] > 11
-      ) {
-        this.resetStreak(i, false);
-        // 風上側に寄せて再配置
-        this.positions[i * 6] = -wx * (10 + Math.random() * 8) + (Math.random() - 0.5) * 8;
-        this.positions[i * 6 + 2] = -wz * (10 + Math.random() * 8) + (Math.random() - 0.5) * 8;
+  /** フラッシュ開始時に呼び、空から地面へボルトを生成 */
+  trigger(intensity: number) {
+    if (intensity < 0.08) return;
+    const boltCount = Math.random() < 0.35 ? 2 : 1;
+    this.positions.fill(0);
+    for (let b = 0; b < boltCount; b += 1) {
+      const az = Math.random() * Math.PI * 2;
+      const dist = 4 + Math.random() * 10;
+      let x = Math.cos(az) * dist;
+      let y = 11 + Math.random() * 4;
+      let z = Math.sin(az) * dist;
+      const targetX = x + (Math.random() - 0.5) * 3.5;
+      const targetZ = z + (Math.random() - 0.5) * 3.5;
+      const segs = 10 + Math.floor(Math.random() * 8);
+      for (let s = 0; s < this.maxSegments; s += 1) {
+        const base = (b * this.maxSegments + s) * 6;
+        if (s >= segs) {
+          this.positions[base + 1] = -99;
+          this.positions[base + 4] = -99;
+          continue;
+        }
+        const t = (s + 1) / segs;
+        const nx = THREE.MathUtils.lerp(x, targetX, t) + (Math.random() - 0.5) * (0.35 + t * 0.9);
+        const ny = THREE.MathUtils.lerp(y, -1.2, t) + (Math.random() - 0.5) * 0.25;
+        const nz = THREE.MathUtils.lerp(z, targetZ, t) + (Math.random() - 0.5) * (0.35 + t * 0.9);
+        this.positions[base] = x;
+        this.positions[base + 1] = y;
+        this.positions[base + 2] = z;
+        this.positions[base + 3] = nx;
+        this.positions[base + 4] = ny;
+        this.positions[base + 5] = nz;
+        x = nx;
+        y = ny;
+        z = nz;
+        // 分岐
+        if (s > 3 && Math.random() < 0.18 && s + 1 < segs) {
+          // 短い分岐は次セグメントのジッターで表現
+        }
       }
     }
     this.geometry.attributes.position.needsUpdate = true;
-    this.material.opacity = 0.12 + this.strength * 0.55;
+    this.life = 0.12 + Math.random() * 0.1;
+    this.lines.visible = true;
+    this.material.opacity = 0.95;
+  }
+
+  update(deltaTime: number) {
+    if (this.life <= 0) {
+      this.material.opacity = 0;
+      this.lines.visible = false;
+      return;
+    }
+    this.life = Math.max(0, this.life - deltaTime);
+    const fade = Math.min(1, this.life * 10);
+    this.material.opacity = fade * (0.65 + Math.random() * 0.35);
+    if (this.life <= 0) {
+      this.lines.visible = false;
+    }
   }
 }
 
@@ -1491,6 +2004,10 @@ export type SceneWeatherState = {
   windZ: number;
   snow: boolean;
   fogBoost: number;
+  /** 0..1 霧の見え方（地上ミスト＋ドーム霞） */
+  fogIntensity: number;
+  /** 0..1 雷フラッシュの頻度・明るさ */
+  lightningIntensity: number;
 };
 
 const DEFAULT_WEATHER_STATE: SceneWeatherState = {
@@ -1502,6 +2019,8 @@ const DEFAULT_WEATHER_STATE: SceneWeatherState = {
   windZ: 0,
   snow: false,
   fogBoost: 1,
+  fogIntensity: 0,
+  lightningIntensity: 0,
 };
 
 export class SceneBackground {
@@ -1517,6 +2036,9 @@ export class SceneBackground {
   private readonly biolumeFar: BiolumeMoteField | null;
   private readonly weatherPrecip: WeatherPrecipField;
   private readonly weatherWind: WeatherWindField;
+  private readonly weatherMist: WeatherMistField;
+  private readonly weatherClouds: WeatherCloudField;
+  private readonly weatherLightning: WeatherLightningBolts;
   private readonly cyclorama: StudioCyclorama | null;
   private readonly studioFloor: StudioFloor | null;
   readonly floor: THREE.Mesh;
@@ -1529,6 +2051,14 @@ export class SceneBackground {
   private formingColor = new THREE.Color();
   private completeColor = new THREE.Color();
   private weather: SceneWeatherState = { ...DEFAULT_WEATHER_STATE };
+  /** 次の稲妻までの待ち時間 */
+  private lightningCooldown = 2.5;
+  /** フラッシュ残時間 */
+  private lightningBurst = 0;
+  /** 連撃の残り回数 */
+  private lightningFollowUps = 0;
+  /** 現在のフラッシュ量 0..1（getLightningFlash 用） */
+  private lightningFlash = 0;
 
   constructor(sceneEnv: VisualStyleEnv, themeDark: boolean) {
     this.profile = sceneEnv.backgroundProfile;
@@ -1626,6 +2156,9 @@ export class SceneBackground {
       : null;
     this.weatherPrecip = new WeatherPrecipField();
     this.weatherWind = new WeatherWindField();
+    this.weatherMist = new WeatherMistField();
+    this.weatherClouds = new WeatherCloudField();
+    this.weatherLightning = new WeatherLightningBolts();
     this.cyclorama = this.profile?.studioSpace ? new StudioCyclorama() : null;
     this.studioFloor = this.profile?.studioSpace ? new StudioFloor() : null;
 
@@ -1696,8 +2229,11 @@ export class SceneBackground {
     if (this.biolumeFar) {
       this.parallaxRoot.add(this.biolumeFar.points);
     }
-    this.parallaxRoot.add(this.weatherPrecip.points);
-    this.parallaxRoot.add(this.weatherWind.lines);
+    this.parallaxRoot.add(this.weatherPrecip.object);
+    this.parallaxRoot.add(this.weatherWind.group);
+    this.parallaxRoot.add(this.weatherMist.group);
+    this.parallaxRoot.add(this.weatherClouds.group);
+    this.parallaxRoot.add(this.weatherLightning.lines);
     if (this.cyclorama) {
       scene.add(this.cyclorama.mesh);
     }
@@ -1797,26 +2333,99 @@ export class SceneBackground {
       state.windX,
       state.windZ,
     );
+    this.weatherMist.setWeather(
+      state.enabled ? state.fogIntensity : 0,
+      state.windX,
+      state.windZ,
+    );
+    this.weatherClouds.setWeather(
+      state.enabled ? state.cloudCover : 0,
+      state.windX * 0.45,
+      state.windZ * 0.45,
+    );
   }
 
   getWeather() {
     return this.weather;
   }
 
+  /** フレームごとの稲妻フラッシュ量（0..1）。背景・ライトに乗せる */
+  getLightningFlash() {
+    if (!this.weather.enabled || this.weather.lightningIntensity < 0.05) {
+      return 0;
+    }
+    return this.lightningFlash * this.weather.lightningIntensity;
+  }
+
+  private updateLightning(deltaTime: number) {
+    const power = this.weather.enabled ? this.weather.lightningIntensity : 0;
+    if (power < 0.05) {
+      this.lightningFlash = 0;
+      this.lightningBurst = 0;
+      this.lightningFollowUps = 0;
+      this.lightningCooldown = 2.5;
+      return;
+    }
+
+    if (this.lightningBurst > 0) {
+      this.lightningBurst = Math.max(0, this.lightningBurst - deltaTime);
+      // 鋭いピーク＋わずかなちらつき
+      const envelope = Math.min(1, this.lightningBurst * 22);
+      this.lightningFlash = envelope * (0.72 + Math.random() * 0.28);
+      if (this.lightningBurst <= 0 && this.lightningFollowUps > 0) {
+        this.lightningFollowUps -= 1;
+        this.lightningBurst = 0.04 + Math.random() * 0.07;
+        if (Math.random() < 0.45) {
+          this.weatherLightning.trigger(power * 0.75);
+        }
+      }
+      return;
+    }
+
+    this.lightningFlash = 0;
+    this.lightningCooldown -= deltaTime;
+    if (this.lightningCooldown > 0) {
+      return;
+    }
+
+    // 強いほど頻発（おおよそ 1.2〜8 秒間隔）
+    const gap = (1.4 + Math.random() * 5.5) * (1.35 - power * 0.55);
+    this.lightningCooldown = Math.max(0.7, gap);
+    this.lightningBurst = 0.06 + Math.random() * 0.1;
+    this.lightningFollowUps = Math.random() < 0.4 + power * 0.25 ? 1 + Math.floor(Math.random() * 2) : 0;
+    this.lightningFlash = 0.85 + Math.random() * 0.15;
+    // 時折ジグザグの稲妻を描く
+    if (Math.random() < 0.55 + power * 0.35) {
+      this.weatherLightning.trigger(power);
+    }
+  }
+
   getFogDensity(dark: boolean) {
+    let density: number;
     if (this.profile?.fogDensity !== undefined) {
-      return this.profile.fogDensity * this.weather.fogBoost;
+      density = this.profile.fogDensity * this.weather.fogBoost;
+    } else if (this.profile?.studioSpace) {
+      density = (dark ? 0.0078 : 0.0048) * this.weather.fogBoost;
+    } else {
+      density = (dark ? 0.0078 : 0.0058) * this.weather.fogBoost;
     }
-    if (this.profile?.studioSpace) {
-      return (dark ? 0.0078 : 0.0048) * this.weather.fogBoost;
+    // 霧天気ははっきり霞む密度を下限で保証
+    if (this.weather.enabled && this.weather.fogIntensity > 0.05) {
+      density = Math.max(density, 0.01 + this.weather.fogIntensity * 0.032);
     }
-    return (dark ? 0.0078 : 0.0058) * this.weather.fogBoost;
+    return density;
   }
 
   syncFog(scene: THREE.Scene, color: THREE.Color, dark: boolean) {
     const density = this.getFogDensity(dark);
     if (density <= 0) {
       scene.fog = null;
+      return;
+    }
+    if (this.weather.enabled && this.weather.fogIntensity > 0.2) {
+      // 霧は背景色を白寄りに溶かして「霞」として見せる
+      const fogColor = color.clone().lerp(new THREE.Color(0xb8c4d2), 0.45 + this.weather.fogIntensity * 0.35);
+      scene.fog = new THREE.FogExp2(fogColor.getHex(), density);
       return;
     }
     if (this.abyssVariant) {
@@ -1899,6 +2508,20 @@ export class SceneBackground {
     this.biolumeFar?.update(bands, deltaTime, camera.position);
     this.weatherPrecip.update(deltaTime);
     this.weatherWind.update(deltaTime);
+    this.weatherMist.update(deltaTime);
+    this.weatherClouds.update(deltaTime);
+    this.weatherLightning.update(deltaTime);
+    this.updateLightning(deltaTime);
+
+    const flash = this.getLightningFlash();
+    const cloud =
+      this.weather.enabled ? this.weather.cloudCover : 0;
+    const fogHaze =
+      this.weather.enabled
+        ? Math.max(this.weather.fogIntensity, this.weather.cloudCover * 0.35)
+        : 0;
+    this.dome.setWeatherAtmosphere(cloud, fogHaze, flash);
+    this.innerDome?.setWeatherAtmosphere(cloud * 0.55, fogHaze * 0.4, flash * 0.5);
 
     // 風で浮遊粒子を流す（はっきり分かる速度）
     if (this.weather.enabled && this.weather.windStrength > 0.05) {

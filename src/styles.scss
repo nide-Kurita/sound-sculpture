@@ -60,8 +60,150 @@ body {
 }
 
 #app.daytime-linked {
-  /* JS が --daytime-bg を流し込む。シーン背景とページ縁を揃える */
+  /* JS が --daytime-bg / --ui-ink* を流し込む（テキストは常に白系） */
   background: var(--daytime-bg, #0b0e15);
+  color: var(--ui-ink, #f6f3ea);
+  transition: background 0.7s ease, color 0.55s ease;
+}
+
+/* 時間帯リンク中は背景輝度に追従するインクを最優先（theme-dark 固定色より上） */
+#app.daytime-linked .intro-heading,
+#app.daytime-linked .intro-subtitle {
+  color: var(--ui-ink);
+}
+
+#app.daytime-linked .description,
+#app.daytime-linked .description-ja,
+#app.daytime-linked.is-complete .description,
+#app.daytime-linked.is-complete .description-ja {
+  color: var(--ui-ink-soft);
+}
+
+#app.daytime-linked .hud,
+#app.daytime-linked .hud-panel-toggle,
+#app.daytime-linked .control-group__summary,
+#app.daytime-linked .band-test-panel__summary,
+#app.daytime-linked .tuning-advanced__summary,
+#app.daytime-linked .sculpture-mode,
+#app.daytime-linked .input-device-mode,
+#app.daytime-linked .dev-audio-track,
+#app.daytime-linked label,
+#app.daytime-linked .status,
+#app.daytime-linked .growth-algorithm-hint,
+#app.daytime-linked .tuning-hint,
+#app.daytime-linked .band-test-hint,
+#app.daytime-linked .tuning-slider__value,
+#app.daytime-linked .tuning-slider__label,
+#app.daytime-linked .band-test-solo,
+#app.daytime-linked .daytime-preview,
+#app.daytime-linked .daytime-preview__label,
+#app.daytime-linked .daytime-preview__label span,
+#app.daytime-linked .daytime-bg-option,
+#app.daytime-linked .daytime-bg-option__hint,
+#app.daytime-linked .live-weather-status,
+#app.daytime-linked .weather-preview__field-label {
+  color: var(--ui-ink-soft);
+}
+
+#app.daytime-linked .hud-corner {
+  color: var(--ui-ink-faint);
+}
+
+#app.daytime-linked .tuning-hint strong,
+#app.daytime-linked .tuning-slider__help,
+#app.daytime-linked .daytime-preview__actions button {
+  color: var(--ui-ink-faint);
+}
+
+#app.daytime-linked .surface-badge {
+  border-color: var(--ui-border);
+  background: var(--ui-badge-bg);
+  color: var(--ui-ink);
+}
+
+#app.daytime-linked .control-panel,
+#app.daytime-linked .band-test-panel,
+#app.daytime-linked .tuning-export {
+  border-color: var(--ui-border);
+  background: var(--ui-panel);
+}
+
+#app.daytime-linked .control-group {
+  border-color: var(--ui-border);
+}
+
+#app.daytime-linked button,
+#app.daytime-linked .sculpture-mode__select,
+#app.daytime-linked .band-test-solo__select,
+#app.daytime-linked .weather-preview__select,
+#app.daytime-linked .tuning-export__text {
+  color: var(--ui-ink);
+  border-color: var(--ui-border);
+}
+
+#app.daytime-linked .hud-panel-toggle {
+  color: var(--ui-ink-soft);
+}
+
+/* 時間帯リンク中はテーマ固定色よりトークンを優先 */
+#app.daytime-linked.theme-dark .intro-heading,
+#app.daytime-linked.theme-dark .intro-subtitle {
+  color: var(--ui-ink);
+}
+
+#app.daytime-linked.theme-dark .description,
+#app.daytime-linked.theme-dark .description-ja,
+#app.daytime-linked.theme-dark.is-complete .description,
+#app.daytime-linked.theme-dark.is-complete .description-ja {
+  color: var(--ui-ink-soft);
+}
+
+#app.daytime-linked.theme-dark .hud,
+#app.daytime-linked.theme-dark .hud-panel-toggle,
+#app.daytime-linked.theme-dark .control-group__summary,
+#app.daytime-linked.theme-dark .band-test-panel__summary,
+#app.daytime-linked.theme-dark .tuning-advanced__summary,
+#app.daytime-linked.theme-dark .sculpture-mode,
+#app.daytime-linked.theme-dark .input-device-mode,
+#app.daytime-linked.theme-dark .dev-audio-track,
+#app.daytime-linked.theme-dark label,
+#app.daytime-linked.theme-dark .status,
+#app.daytime-linked.theme-dark .growth-algorithm-hint,
+#app.daytime-linked.theme-dark .tuning-hint,
+#app.daytime-linked.theme-dark .band-test-hint,
+#app.daytime-linked.theme-dark .tuning-slider__value,
+#app.daytime-linked.theme-dark .tuning-slider__label,
+#app.daytime-linked.theme-dark .band-test-solo,
+#app.daytime-linked.theme-dark .daytime-preview,
+#app.daytime-linked.theme-dark .daytime-preview__label,
+#app.daytime-linked.theme-dark .daytime-preview__label span,
+#app.daytime-linked.theme-dark .daytime-bg-option__hint,
+#app.daytime-linked.theme-dark .live-weather-status,
+#app.daytime-linked.theme-dark .weather-preview__field-label,
+#app.daytime-linked.theme-dark .daytime-preview__actions button {
+  color: var(--ui-ink-soft);
+}
+
+#app.daytime-linked.theme-dark .surface-badge {
+  border-color: var(--ui-border);
+  background: var(--ui-badge-bg);
+  color: var(--ui-ink);
+}
+
+#app.daytime-linked.theme-dark .control-panel,
+#app.daytime-linked.theme-dark .band-test-panel,
+#app.daytime-linked.theme-dark .tuning-export {
+  border-color: var(--ui-border);
+  background: var(--ui-panel);
+}
+
+#app.daytime-linked.theme-dark button,
+#app.daytime-linked.theme-dark .sculpture-mode__select,
+#app.daytime-linked.theme-dark .band-test-solo__select,
+#app.daytime-linked.theme-dark .weather-preview__select,
+#app.daytime-linked.theme-dark .tuning-export__text {
+  color: var(--ui-ink);
+  border-color: var(--ui-border);
 }
 
 #scene {
@@ -92,7 +234,7 @@ body {
   display: grid;
   margin: 0;
   font-family: var(--hud-mono);
-  font-size: clamp(2rem, 5.2vw, 3.6rem);
+  font-size: clamp(2.15rem, 5.6vw, 3.9rem);
   font-weight: 700;
   letter-spacing: 0.22em;
   line-height: 1.16;
@@ -116,7 +258,7 @@ body {
   right: clamp(1.5rem, 4.5vw, 3.2rem);
   margin: 0;
   font-family: var(--hud-mono);
-  font-size: clamp(2rem, 5.2vw, 3.6rem);
+  font-size: clamp(2.15rem, 5.6vw, 3.9rem);
   font-weight: 700;
   letter-spacing: 0.12em;
   line-height: 1.16;
@@ -141,7 +283,7 @@ body {
 .description-ja {
   position: fixed;
   top: clamp(1.5rem, 4.5vw, 3.2rem);
-  right: calc(clamp(1.5rem, 4.5vw, 3.2rem) + clamp(2rem, 5.2vw, 3.6rem) + 2.4rem);
+  right: calc(clamp(1.5rem, 4.5vw, 3.2rem) + clamp(2.15rem, 5.6vw, 3.9rem) + 2.4rem);
   max-height: min(400px, calc(100vh - 8rem));
   margin: 0;
   color: #58544d;
@@ -174,29 +316,29 @@ body {
 }
 
 .hud-corner--tl {
-  top: 0.95rem;
-  left: 0.95rem;
+  top: 0.72rem;
+  left: 0.72rem;
   border-top: 1.5px solid currentcolor;
   border-left: 1.5px solid currentcolor;
 }
 
 .hud-corner--tr {
-  top: 0.95rem;
-  right: 0.95rem;
+  top: 0.72rem;
+  right: 0.72rem;
   border-top: 1.5px solid currentcolor;
   border-right: 1.5px solid currentcolor;
 }
 
 .hud-corner--bl {
-  bottom: 0.95rem;
-  left: 0.95rem;
+  bottom: 0.72rem;
+  left: 0.72rem;
   border-bottom: 1.5px solid currentcolor;
   border-left: 1.5px solid currentcolor;
 }
 
 .hud-corner--br {
-  bottom: 0.95rem;
-  right: 0.95rem;
+  bottom: 0.72rem;
+  right: 0.72rem;
   border-bottom: 1.5px solid currentcolor;
   border-right: 1.5px solid currentcolor;
 }
@@ -975,6 +1117,27 @@ body {
   grid-template-columns: 1fr;
 }
 
+.actions__row--dev-audio {
+  grid-template-columns: 1fr;
+}
+
+.dev-audio-track {
+  display: grid;
+  gap: 0.35rem;
+  font-family: var(--hud-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  color: #5e594f;
+}
+
+.dev-audio-track__label {
+  opacity: 0.78;
+}
+
+.dev-audio-track .input-device__select {
+  width: 100%;
+}
+
 .actions__row--record .input-device__start {
   margin-top: 0;
 }
@@ -1274,6 +1437,7 @@ input[type="range"] {
 /* 時間帯リンク中はシーンと同じ色を優先（theme-dark の固定グラデより上書き） */
 #app.daytime-linked {
   background: var(--daytime-bg, #0b0e15);
+  color: var(--ui-ink, #ece9e1);
 }
 
 .theme-dark .intro-heading {
@@ -1336,6 +1500,7 @@ input[type="range"] {
 
 .theme-dark .sculpture-mode,
 .theme-dark .input-device-mode,
+.theme-dark .dev-audio-track,
 .theme-dark label {
   color: #96a0b2;
 }
@@ -1508,45 +1673,232 @@ input[type="range"] {
   accent-color: #9fb6dd;
 }
 
-@media (max-width: 720px) {
+/* SP: PCと同じ四隅配置を保ち、サイズだけウィンドウに追従して縮小 */
+@media (max-width: 768px) {
+  :root {
+    /* コーナーは端寄り、テキストはコーナー外側に十分な隙間を空ける */
+    --hud-pad: max(1.85rem, calc(env(safe-area-inset-top, 0px) + 1.35rem));
+    --hud-pad-right: max(1.85rem, calc(env(safe-area-inset-right, 0px) + 1.35rem));
+    --hud-pad-bottom: max(1.85rem, calc(env(safe-area-inset-bottom, 0px) + 1.35rem));
+    --hud-pad-left: max(1.85rem, calc(env(safe-area-inset-left, 0px) + 1.35rem));
+  }
+
   .intro {
-    top: 1.1rem;
-    left: 1.1rem;
+    top: var(--hud-pad);
+    left: var(--hud-pad-left);
+    max-width: min(42vw, 11rem);
+  }
+
+  .intro-heading {
+    font-size: clamp(1.1rem, 5vw, 1.75rem);
+    letter-spacing: 0.16em;
+    line-height: 1.12;
+  }
+
+  .intro-rule {
+    width: clamp(0.95rem, 4vw, 1.25rem);
+    margin-top: clamp(0.55rem, 2.2vw, 0.85rem);
+  }
+
+  .intro-subtitle {
+    top: var(--hud-pad);
+    right: var(--hud-pad-right);
+    font-size: clamp(1.1rem, 5vw, 1.75rem);
+    letter-spacing: 0.1em;
+    margin-top: 4px;
   }
 
   .description {
-    max-width: 18rem;
+    max-width: 100%;
+    margin-top: clamp(0.55rem, 2.2vw, 0.85rem);
+    font-size: clamp(0.48rem, 1.85vw, 0.62rem);
+    letter-spacing: 0.1em;
+    line-height: 1.75;
+  }
+
+  .description-ja {
+    top: var(--hud-pad);
+    right: calc(var(--hud-pad-right) + clamp(1.1rem, 5vw, 1.75rem) + 1rem);
+    max-height: min(300px, calc(100dvh - 7.5rem));
+    margin-top: 6px;
+    font-size: clamp(0.48rem, 1.85vw, 0.62rem);
+    letter-spacing: 0.08em;
+    line-height: 1.85;
   }
 
   .hud-ticks {
-    display: none;
+    right: max(0.55rem, env(safe-area-inset-right, 0px));
+    width: clamp(0.45rem, 2vw, 0.58rem);
+    height: clamp(5.5rem, 28vw, 7.5rem);
+  }
+
+  .hud-ticks .hud-tick-mark {
+    width: clamp(0.22rem, 1vw, 0.3rem);
   }
 
   .hud-ticks-x {
-    display: none;
+    top: max(0.55rem, env(safe-area-inset-top, 0px));
+    width: clamp(5.5rem, 28vw, 7.5rem);
+    height: clamp(0.45rem, 2vw, 0.58rem);
   }
 
-  .hud-left-stack {
-    bottom: 1.1rem;
-    left: 1.1rem;
+  .hud-ticks-x .hud-tick-mark {
+    height: clamp(0.22rem, 1vw, 0.3rem);
+  }
+
+  .hud-corner {
+    width: clamp(0.7rem, 3vw, 0.9rem);
+    height: clamp(0.7rem, 3vw, 0.9rem);
+  }
+
+  .hud-corner--tl,
+  .hud-corner--tr {
+    top: max(0.5rem, env(safe-area-inset-top, 0px));
+  }
+
+  .hud-corner--bl,
+  .hud-corner--br {
+    bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
+  }
+
+  .hud-corner--tl,
+  .hud-corner--bl {
+    left: max(0.5rem, env(safe-area-inset-left, 0px));
+  }
+
+  .hud-corner--tr,
+  .hud-corner--br {
+    right: max(0.5rem, env(safe-area-inset-right, 0px));
   }
 
   .hud-reticle {
-    left: 1.1rem;
+    left: var(--hud-pad-left);
+    width: clamp(2.7rem, 11.5vw, 3.6rem);
+    height: clamp(2.7rem, 11.5vw, 3.6rem);
+  }
+
+  .hud-reticle__handle {
+    gap: clamp(0.22rem, 1vw, 0.3rem);
+    padding: 0.35rem 0 0.35rem 0.1rem;
+  }
+
+  .hud-reticle__bar {
+    width: clamp(0.95rem, 4vw, 1.2rem);
+  }
+
+  .hud-reticle__plus {
+    font-size: clamp(0.85rem, 3.6vw, 1rem);
+  }
+
+  .hud-left-stack {
+    bottom: var(--hud-pad-bottom);
+    left: var(--hud-pad-left);
+    gap: clamp(0.55rem, 2.4vw, 0.95rem);
+  }
+
+  .hud-env-value {
+    font-size: clamp(0.55rem, 2.2vw, 0.72rem);
+    letter-spacing: 0.1em;
+  }
+
+  .hud-left-bottom {
+    gap: clamp(0.45rem, 2vw, 0.7rem);
+  }
+
+  .hud-meters {
+    gap: clamp(0.28rem, 1.2vw, 0.4rem);
+  }
+
+  .hud-meter {
+    grid-template-columns: 0.65rem clamp(3.2rem, 14vw, 4.4rem) clamp(1.8rem, 8vw, 2.4rem);
+    font-size: clamp(0.48rem, 1.9vw, 0.62rem);
+    letter-spacing: 0.12em;
+  }
+
+  .hud-scope {
+    max-width: clamp(6.5rem, 28vw, 9rem);
+    margin-top: 0;
+    font-size: clamp(0.48rem, 1.9vw, 0.62rem);
+    letter-spacing: 0.08em;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .hud-right-bottom {
-    right: 1.1rem;
-    bottom: 1.1rem;
+    right: var(--hud-pad-right);
+    bottom: var(--hud-pad-bottom);
+    gap: clamp(0.32rem, 1.5vw, 0.5rem);
+  }
+
+  .hud-field__label {
+    font-size: clamp(0.42rem, 1.7vw, 0.55rem);
+    letter-spacing: 0.14em;
+  }
+
+  .hud-field__value {
+    font-size: clamp(0.48rem, 1.9vw, 0.62rem);
+    letter-spacing: 0.12em;
+  }
+
+  .hud-field__value::after {
+    width: clamp(0.5rem, 2.2vw, 0.7rem);
+    margin-top: 0.2rem;
   }
 
   .control-panel-shell {
-    max-width: calc(100vw - 2rem);
-    max-height: calc(100vh - 5rem);
+    max-width: calc(100vw - 1.5rem);
+    max-height: calc(100dvh - 4.5rem - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
   }
 
   .control-panel {
+    width: calc(100vw - 1.5rem);
     max-height: inherit;
+  }
+
+  .control-group__summary {
+    padding: 0.65rem 0.85rem;
+    font-size: 0.68rem;
+  }
+
+  .control-group__body {
+    padding: 0 0.85rem 0.85rem;
+  }
+
+  .actions__row--input {
+    grid-template-columns: 1fr;
+  }
+
+  .actions__row--sculpture {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.35rem;
+  }
+
+  .actions__row button,
+  .actions__use {
+    padding: 0.62rem 0.45rem;
+    font-size: 0.66rem;
+  }
+
+  .input-device__start {
+    padding: 0.72rem 0.85rem;
+    font-size: 0.74rem;
+  }
+
+  .input-device-panel__row {
+    grid-template-columns: 1fr;
+  }
+
+  .input-device__refresh {
+    justify-self: start;
+  }
+
+  .daytime-bg-option {
+    gap: 0.5rem;
+    font-size: 0.68rem;
+  }
+
+  .daytime-bg-option__hint {
+    font-size: 0.62rem;
   }
 }
 
