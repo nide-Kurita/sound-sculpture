@@ -157,7 +157,11 @@ export class StructureTracker {
     while (this.beatTimestamps.length > 0 && this.elapsed - this.beatTimestamps[0] > 8) {
       this.beatTimestamps.shift();
     }
-    const density = clamp01((this.beatTimestamps.length / 8) * 0.62);
+    const beatRate = this.beatTimestamps.length / 8;
+    const density = clamp01(
+      smoothstep(0.18, 1.55, beatRate) * 0.78 +
+        smoothstep(0.06, 0.7, rhythm.pulseConfidence) * 0.22,
+    );
 
     const novelty =
       Math.abs(bands.centroid - this.centroidLong) * 1.4 +
@@ -273,17 +277,17 @@ export class StructureTracker {
     }
 
     const t = this.activeSeconds;
-    if (this.phase === "embryo" && t > 6 && this.energyMid > 0.04) {
+    if (this.phase === "embryo" && t > 5 && this.energyMid > 0.04) {
       this.phase = "growth";
     }
     if (
       this.phase === "growth" &&
-      (novelty > 0.42 || this.tension > 0.55 || density > 0.5) &&
-      t > 20
+      (novelty > 0.34 || this.tension > 0.48 || density > 0.42) &&
+      t > 16
     ) {
       this.phase = "metamorphosis";
     }
-    if (this.phase === "metamorphosis" && novelty < 0.22 && this.tension < 0.35 && t > 45) {
+    if (this.phase === "metamorphosis" && novelty < 0.18 && this.tension < 0.31 && t > 38) {
       this.phase = "hardening";
     }
 
@@ -307,7 +311,7 @@ export class StructureTracker {
     if (energySurge) gain += 0.45;
     if (transientBurst) gain += 0.35;
     if (novelty > 0.4) gain += deltaTime * 0.12;
-    this.organBudget = Math.min(4, this.organBudget + gain);
+    this.organBudget = Math.min(6, this.organBudget + gain);
   }
 
   getTransientRate() {

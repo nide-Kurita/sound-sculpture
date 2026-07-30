@@ -41,6 +41,12 @@ const defaultRhythm = (): RhythmEvents => ({
   pulseConfidence: 0,
   pulseEnvelope: 0,
   pulseIndex: 0,
+  kickLength: 0,
+  snareLength: 0,
+  hatLength: 0,
+  kickRing: 0,
+  snareRing: 0,
+  hatRing: 0,
   subLevel: 0,
   wavePeak: 0,
   waveEnergy: 0,
@@ -487,8 +493,18 @@ export class LumenSculpture implements SculptureExperience {
       this.breathe += dt;
     }
 
-    this.pulse = Math.max(0, this.pulse - dt * 1.5);
-    this.pulse = Math.min(1, this.pulse + r.kick * 0.5 + r.transient * 0.4 + r.snare * 0.2);
+    this.pulse = Math.max(0, this.pulse - dt * (1.1 + (1 - clamp01(r.kickLength / 0.3)) * 0.8));
+    this.pulse = Math.min(
+      1,
+      this.pulse +
+        r.kick * 0.65 +
+        r.kickRing * 0.35 +
+        r.transient * 0.45 +
+        r.snare * 0.35 +
+        r.snareRing * 0.18 +
+        r.hatRing * 0.12 +
+        (r.downbeat ? 0.25 : 0),
+    );
 
     if (loud && (r.kick > 0.5 || r.transient > 0.65) && Math.random() < 0.32) {
       this.sprayOrigin.set(-0.55, (Math.random() - 0.2) * 0.7, (Math.random() - 0.5) * 0.4);

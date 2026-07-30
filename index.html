@@ -333,6 +333,16 @@
         <details class="control-group control-group--dev" id="dev-tuning-group" hidden open>
           <summary class="control-group__summary">開発チューニング</summary>
           <div class="control-group__body">
+            <div class="daytime-preview light-rig-panel" id="light-rig-panel">
+              <p class="daytime-preview__label">
+                光源（DEV）
+                <span id="light-rig-hint">即時反映</span>
+              </p>
+              <div id="light-rig-sliders" class="light-rig-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="reset-light-rig" type="button">スタイル既定に戻す</button>
+              </div>
+            </div>
             <p class="tuning-hint">
               6項目に整理しました。<strong>LIVE・呼吸</strong>は即時反映、<strong>形成・成長</strong>はこれからの蓄積に効きます。数値スケールは選択中の成長アルゴリズムとフィボナッチ比率です。
             </p>

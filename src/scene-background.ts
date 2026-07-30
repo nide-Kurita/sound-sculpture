@@ -313,6 +313,9 @@ const domeFragmentShader = /* glsl */ `
   uniform float uCloudCover;
   uniform float uFogHaze;
   uniform float uLightningFlash;
+  uniform vec3 uSunDir;
+  uniform float uShaft;
+  uniform float uSunset;
   uniform vec3 uCameraPos;
   varying vec3 vDir;
 
@@ -352,33 +355,75 @@ const domeFragmentShader = /* glsl */ `
     float flash = clamp(uLightningFlash, 0.0, 1.0);
 
     if (uAbyss > 0.5) {
-      float vGrad = pow(h, 0.58);
-      vec3 col = mix(uBottom, uTop, smoothstep(0.02, 0.98, vGrad));
+      float vGrad = pow(h, 0.55);
+      float sunset = clamp(uSunset, 0.0, 1.0);
+      // 青みがかった海中の水塊。夕方は海水そのものに夕日の赤みを混ぜる
+      vec3 waterDeep = mix(uBottom, vec3(0.02, 0.09, 0.18), 0.4);
+      vec3 waterLit = mix(uTop, vec3(0.2, 0.52, 0.82), 0.5);
+      if (sunset > 0.001) {
+        vec3 sunsetDeep = vec3(0.18, 0.055, 0.065);
+        vec3 sunsetLit = vec3(0.58, 0.25, 0.15);
+        waterDeep = mix(waterDeep, sunsetDeep, sunset * 0.62);
+        waterLit = mix(waterLit, sunsetLit, sunset * 0.52);
+      }
+      vec3 col = mix(waterDeep, waterLit, smoothstep(0.02, 0.98, vGrad));
 
       float horizonView = 1.0 - abs(dir.y);
       float atmosHaze = horizonView * horizonView * (0.55 + noise(dir * 1.8 + vec3(uTime * 0.01)) * 0.45);
-      col = mix(col, uHalo, atmosHaze * 0.26);
+      col = mix(col, uHalo, atmosHaze * mix(0.3, 0.18, sunset));
 
       float murk = noise(dir * 2.4 + vec3(uTime * 0.018, uTime * 0.012, uTime * 0.008));
       float midHaze = smoothstep(0.12, 0.68, h) * (murk * 0.45 + 0.55);
-      col += uHalo * midHaze * 0.065;
+      col += uHalo * midHaze * 0.08;
       float shelfA = smoothstep(0.18, 0.32, h) * (1.0 - smoothstep(0.32, 0.48, h));
       float shelfB = smoothstep(0.48, 0.62, h) * (1.0 - smoothstep(0.62, 0.78, h));
-      col += uHalo * (shelfA * 0.03 + shelfB * 0.045);
+      col += uHalo * (shelfA * 0.035 + shelfB * 0.045);
       float starMist = smoothstep(0.5, 0.99, h);
       float mistNoise = noise(dir * 5.0 + vec3(0.0, uTime * 0.03, 0.0));
-      col += uTop * starMist * (mistNoise * 0.35 + 0.25) * 0.2;
-      float abyssBands = sin(dir.x * 9.0 + dir.z * 7.0 + uTime * 0.06) * 0.032;
+      col += uTop * starMist * (mistNoise * 0.35 + 0.25) * 0.24;
+      float abyssBands = sin(dir.x * 9.0 + dir.z * 7.0 + uTime * 0.06) * 0.028;
       col *= 1.0 + abyssBands * smoothstep(0.08, 0.7, h);
 
-      // 雲・霧はスプライト側。ドームは薄い下地のみ
-      col = mix(col, mix(uBottom, uHalo, 0.25), cloud * horizonView * 0.18);
-      col = mix(col, uHalo, fogH * horizonView * horizonView * 0.22);
+      // 夕日: 海水塊に控えめな赤〜琥珀を乗せる
+      if (sunset > 0.001) {
+        vec3 sunsetSea = vec3(0.72, 0.29, 0.14);
+        float seaBand =
+          smoothstep(-0.4, 0.2, dir.y) * (1.0 - smoothstep(0.5, 0.95, dir.y));
+        float seaBody = 0.42 + 0.58 * seaBand;
+        col = mix(col, mix(col, sunsetSea, 0.7), sunset * seaBody * 0.65);
+        float upperSea = smoothstep(0.0, 0.5, dir.y) * (1.0 - smoothstep(0.65, 0.98, dir.y));
+        col += sunsetSea * upperSea * sunset * 0.22;
+      }
+
+      // 海中へ差し込む光の柱（青〜銀青のまま）
+      float shaft = clamp(uShaft, 0.0, 1.0);
+      if (shaft > 0.001) {
+        vec3 sunDir = normalize(uSunDir);
+        float towardSun = max(0.0, dot(dir, sunDir));
+        float shaftCore = pow(towardSun, 11.0);
+        float shaftWide = pow(towardSun, 2.5);
+        float caustic =
+          0.55 +
+          0.45 * sin(dir.x * 26.0 + dir.z * 18.0 - uTime * 0.42 + towardSun * 6.0);
+        float rays = shaftCore * 0.8 + shaftWide * caustic * 0.3;
+        float column = exp(-pow(1.0 - towardSun, 2.0) * 3.4) * shaftWide;
+        rays = max(rays, column * 0.7);
+        float topL = dot(uTop, vec3(0.299, 0.587, 0.114));
+        float nightAmt = 1.0 - smoothstep(0.1, 0.28, topL);
+        vec3 dayShaft = vec3(0.42, 0.8, 1.0);
+        vec3 moonShaft = vec3(0.78, 0.88, 1.0);
+        vec3 shaftCol = mix(dayShaft, moonShaft, nightAmt);
+        col += shaftCol * rays * shaft * mix(1.35, 1.85, nightAmt);
+        col *= mix(0.86, 1.0, smoothstep(-0.15, 0.55, dir.y) * (0.55 + shaft * 0.45));
+      }
+
+      col = mix(col, mix(uBottom, uHalo, 0.25), cloud * horizonView * 0.12);
+      col = mix(col, uHalo, fogH * horizonView * horizonView * 0.15);
 
       vec3 behind = normalize(uCameraPos);
       float halo = smoothstep(0.5, 0.99, dot(dir, behind));
-      float haloStrength = uHaloStrength * 1.15 * (1.0 + uAudio * 0.06);
-      col = mix(col, uHalo, halo * halo * haloStrength);
+      float haloStrength = uHaloStrength * 1.08 * (1.0 + uAudio * 0.06);
+      col = mix(col, uHalo, halo * halo * haloStrength * (1.0 - sunset * 0.35));
       col = mix(col, vec3(0.86, 0.91, 1.0), flash * 0.85);
       gl_FragColor = vec4(col, 1.0);
       return;
@@ -466,6 +511,9 @@ class BackgroundDome {
         uCloudCover: { value: 0 },
         uFogHaze: { value: 0 },
         uLightningFlash: { value: 0 },
+        uSunDir: { value: new THREE.Vector3(0.15, 0.95, 0.2) },
+        uShaft: { value: 0 },
+        uSunset: { value: 0 },
         uCameraPos: { value: new THREE.Vector3(0, 0.28, 6.4) },
       },
       vertexShader: domeVertexShader,
@@ -506,11 +554,11 @@ class BackgroundDome {
     const bottom = this.material.uniforms.uBottom.value as THREE.Color;
     const halo = this.material.uniforms.uHalo.value as THREE.Color;
     if (abyss) {
-      const abyssHue = THREE.MathUtils.lerp(h, 0.58, 0.48);
-      top.setHSL(abyssHue, Math.min(1, s * 1.6 + 0.18), Math.min(0.2, l * 2.4 + 0.08));
-      bottom.setHSL(abyssHue, Math.min(1, s * 1.1 + 0.08), Math.max(0.028, l * 0.32));
-      halo.setHSL(abyssHue + 0.03, Math.min(1, s * 1.2 + 0.22), Math.min(0.18, l * 2.6 + 0.06));
-      this.baseHaloStrength = 1.05;
+      const abyssHue = THREE.MathUtils.lerp(h, 0.58, 0.8);
+      top.setHSL(abyssHue, Math.min(1, s * 1.2 + 0.22), Math.min(0.36, l * 2.8 + 0.14));
+      bottom.setHSL(abyssHue, Math.min(1, s * 1.05 + 0.1), Math.max(0.03, l * 0.35));
+      halo.setHSL(abyssHue, Math.min(1, s * 0.95 + 0.2), Math.min(0.4, l * 3.0 + 0.14));
+      this.baseHaloStrength = 1.15;
     } else if (dark) {
       top.setHSL(h, Math.min(1, s * 1.15 + 0.02), Math.min(1, l * 1.9 + 0.015));
       bottom.setHSL(h, s, Math.max(0, l * 0.45));
@@ -531,15 +579,96 @@ class BackgroundDome {
   }
 
   /** 時間帯スカイ: 天頂・地平を直接指定（朝日・夕暮れのグラデーション用） */
-  setSkyGradient(zenith: THREE.Color, horizon: THREE.Color, dark: boolean) {
+  setSkyGradient(zenith: THREE.Color, horizon: THREE.Color, dark: boolean, hour?: number) {
     const top = this.material.uniforms.uTop.value as THREE.Color;
     const bottom = this.material.uniforms.uBottom.value as THREE.Color;
     const halo = this.material.uniforms.uHalo.value as THREE.Color;
+    if (this.material.uniforms.uAbyss.value > 0.5) {
+      // 海水塊の明るさ・夕日の赤みは時刻表で制御
+      this.setAbyssSeaByHour(hour ?? 12);
+      return;
+    }
+    if (this.material.uniforms.uSunset) {
+      this.material.uniforms.uSunset.value = 0;
+    }
     top.copy(zenith);
     bottom.copy(horizon);
     halo.copy(zenith).lerp(horizon, dark ? 0.45 : 0.55);
     this.baseHaloStrength = dark ? 0.55 : 0.82;
     this.material.uniforms.uHaloStrength.value = this.baseHaloStrength;
+  }
+
+  /**
+   * 深海の海水塊を時刻で調整する（キーフレーム間を分単位で連続補間）。
+   * 0–3 暗め / 4–11 赤みなし / 12–15 明るい青・赤みなし
+   * 15–18 赤みが時間とともに出て 18 で消える / 18–24 徐々に暗く夜へ
+   */
+  setAbyssSeaByHour(hour: number) {
+    if (!(this.material.uniforms.uAbyss?.value > 0.5)) {
+      return;
+    }
+    const top = this.material.uniforms.uTop.value as THREE.Color;
+    const bottom = this.material.uniforms.uBottom.value as THREE.Color;
+    const halo = this.material.uniforms.uHalo.value as THREE.Color;
+    const h = ((hour % 24) + 24) % 24;
+
+    type SeaKey = {
+      h: number;
+      topL: number;
+      bottomL: number;
+      haloL: number;
+      haloStr: number;
+      sunset: number;
+    };
+    // 端点を揃えて境界で段差が出ないようにする
+    const keys: SeaKey[] = [
+      { h: 0, topL: 0.038, bottomL: 0.004, haloL: 0.22, haloStr: 0.7, sunset: 0 },
+      { h: 3, topL: 0.04, bottomL: 0.004, haloL: 0.22, haloStr: 0.7, sunset: 0 },
+      { h: 4, topL: 0.18, bottomL: 0.02, haloL: 0.38, haloStr: 1.15, sunset: 0 },
+      { h: 11, topL: 0.46, bottomL: 0.03, haloL: 0.58, haloStr: 1.5, sunset: 0 },
+      { h: 12, topL: 0.52, bottomL: 0.032, haloL: 0.64, haloStr: 1.55, sunset: 0 },
+      { h: 15, topL: 0.52, bottomL: 0.032, haloL: 0.64, haloStr: 1.55, sunset: 0 },
+      // 15→16:45 赤みピーク（さっき付いていた強さ）、18:00 で 0
+      { h: 16.75, topL: 0.46, bottomL: 0.026, haloL: 0.55, haloStr: 1.4, sunset: 0.72 },
+      { h: 18, topL: 0.3, bottomL: 0.016, haloL: 0.4, haloStr: 1.15, sunset: 0 },
+      { h: 24, topL: 0.038, bottomL: 0.004, haloL: 0.22, haloStr: 0.7, sunset: 0 },
+    ];
+
+    let a = keys[0];
+    let b = keys[1];
+    for (let i = 0; i < keys.length - 1; i++) {
+      if (h >= keys[i].h && h <= keys[i + 1].h) {
+        a = keys[i];
+        b = keys[i + 1];
+        break;
+      }
+    }
+    const span = Math.max(1e-6, b.h - a.h);
+    // 分単位で線形に補間（キー境界で値は連続）
+    const t = THREE.MathUtils.clamp((h - a.h) / span, 0, 1);
+    const lerp = THREE.MathUtils.lerp;
+    const topL = lerp(a.topL, b.topL, t);
+    const bottomL = lerp(a.bottomL, b.bottomL, t);
+    const haloL = lerp(a.haloL, b.haloL, t);
+    const haloStrength = lerp(a.haloStr, b.haloStr, t);
+    const sunset = lerp(a.sunset, b.sunset, t);
+
+    top.setHSL(0.58, 0.52, topL);
+    bottom.setHSL(0.62, 0.38, bottomL);
+    halo.setHSL(0.57, 0.44, haloL);
+    this.baseHaloStrength = haloStrength;
+    this.material.uniforms.uHaloStrength.value = this.baseHaloStrength;
+    if (this.material.uniforms.uSunset) {
+      this.material.uniforms.uSunset.value = sunset;
+    }
+  }
+
+  setAbyssShaft(sunDir: THREE.Vector3, strength: number) {
+    if (!this.material.uniforms.uSunDir || !this.material.uniforms.uShaft) {
+      return;
+    }
+    (this.material.uniforms.uSunDir.value as THREE.Vector3).copy(sunDir).normalize();
+    this.material.uniforms.uShaft.value = THREE.MathUtils.clamp(strength, 0, 1);
   }
 
   update(time: number, audio: number, camera?: THREE.Vector3) {
@@ -2311,13 +2440,31 @@ export class SceneBackground {
   }
 
   /** 時間帯リンク用: 天頂〜地平の空グラデーションを直接当てる */
-  setDaytimeSky(zenith: THREE.Color, horizon: THREE.Color, dark: boolean, envMix = 0) {
+  setDaytimeSky(zenith: THREE.Color, horizon: THREE.Color, dark: boolean, envMix = 0, hour?: number) {
     this.envMix = envMix;
-    this.dome.setSkyGradient(zenith, horizon, dark);
-    this.innerDome?.setSkyGradient(zenith, horizon, dark);
+    this.dome.setSkyGradient(zenith, horizon, dark, hour);
+    this.innerDome?.setSkyGradient(zenith, horizon, dark, hour);
     // 床・サイクラマは地平色寄り
     this.cyclorama?.setFromBackground(horizon, envMix);
     this.studioFloor?.setFromBackground(horizon, envMix);
+  }
+
+  /** 深海の海水塊を時刻で調整 */
+  setAbyssSeaByHour(hour: number) {
+    if (!this.abyssVariant) {
+      return;
+    }
+    this.dome.setAbyssSeaByHour(hour);
+    this.innerDome?.setAbyssSeaByHour(hour);
+  }
+
+  /** 深海ドームの差し込み光条（太陽方向・強度） */
+  setAbyssShaft(sunDir: THREE.Vector3, strength: number) {
+    if (!this.abyssVariant) {
+      this.dome.setAbyssShaft(new THREE.Vector3(0, 1, 0), 0);
+      return;
+    }
+    this.dome.setAbyssShaft(sunDir, strength);
   }
 
   setWeather(state: SceneWeatherState) {

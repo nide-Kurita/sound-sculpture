@@ -76,22 +76,59 @@ const computeAxesFromAverages = (
   avgCentroid: number,
   avgPulse: number,
   avgTransient: number,
+  avgBassFocus: number,
+  avgMelodyFocus: number,
+  avgNovelty: number,
+  avgEventRate: number,
+  avgOverall: number,
+  loudRatio: number,
+  densityVar: number,
+  tensionVar: number,
+  contrastVar: number,
+  brightnessVar: number,
+  sectionContrast: number,
 ) => {
+  // Sustained loudness separates wall-of-sound metal/prog from dynamic acoustic/soft tracks.
+  // Peak-normalized overall saturates many mixes, so only extreme loudRatio counts.
+  const loudHard = smoothstep(0.78, 0.98, loudRatio);
+  const softDyn = smoothstep(0.04, 0.45, sectionContrast) * (1 - loudHard * 0.55);
   const organic = clamp01(
-    (1 - avgDensity) * fibUnit(8, 21) +
-      (1 - avgContrast) * fibUnit(5, 21) +
-      smoothstep(fibUnit(5, 21), fibUnit(13, 21), avgCentroid) * fibUnit(8, 13) +
-      (1 - avgTransient) * fibUnit(3, 13),
+    0.44 -
+      avgDensity * 0.14 -
+      avgBassFocus * 0.06 -
+      loudHard * 0.26 +
+      softDyn * 0.38 +
+      avgMelodyFocus * 0.68 +
+      avgCentroid * 0.38 +
+      sectionContrast * 0.5 +
+      contrastVar * 0.42 -
+      avgBrightness * 0.08 -
+      avgTransient * 0.08,
   );
   const aggressive = clamp01(
-    avgContrast * fibUnit(8, 21) +
-      avgBrightness * fibUnit(5, 13) +
-      avgTension * fibUnit(5, 21) +
-      avgTransient * fibUnit(8, 13) +
-      avgDensity * fibUnit(3, 21),
+    0.12 +
+      loudHard * 0.4 +
+      avgOverall * 0.06 +
+      avgContrast * 0.16 +
+      avgBrightness * 0.22 +
+      avgTension * 0.2 +
+      avgTransient * 0.1 +
+      avgBassFocus * 0.02 +
+      avgNovelty * 0.1 +
+      avgEventRate * 0.08 +
+      brightnessVar * 0.1 -
+      avgMelodyFocus * 0.2 -
+      softDyn * 0.3,
   );
   const rhythmic = clamp01(
-    avgPulse * fibRatio(8, 13) + avgDensity * fibUnit(5, 13) + (1 - avgTransient) * fibUnit(5, 21),
+    0.02 +
+      avgPulse * 0.24 +
+      avgDensity * 0.12 +
+      densityVar * 0.34 +
+      tensionVar * 0.12 +
+      avgEventRate * 0.16 +
+      sectionContrast * 0.12 -
+      avgTransient * 0.05,
   );
   return { organic, aggressive, rhythmic };
 };
@@ -102,9 +139,12 @@ export type SpeciesSampleInput = {
   contrast: number;
   brightness: number;
   bassFocus: number;
+  melodyFocus: number;
   centroid: number;
   pulseConfidence: number;
   transientRate: number;
+  novelty: number;
+  eventRate: number;
 };
 
 export class SpeciesProfiler {
@@ -117,9 +157,26 @@ export class SpeciesProfiler {
   private sumContrast = 0;
   private sumBrightness = 0;
   private sumBassFocus = 0;
+  private sumMelodyFocus = 0;
   private sumCentroid = 0;
   private sumPulseConfidence = 0;
   private sumTransientRate = 0;
+  private sumNovelty = 0;
+  private sumEventRate = 0;
+  private sumOverall = 0;
+  private loudSampleCount = 0;
+  private sumDensitySq = 0;
+  private sumTensionSq = 0;
+  private sumContrastSq = 0;
+  private sumBrightnessSq = 0;
+  private earlyCount = 0;
+  private earlyCentroid = 0;
+  private earlyBrightness = 0;
+  private earlyMelodyFocus = 0;
+  private lateCount = 0;
+  private lateCentroid = 0;
+  private lateBrightness = 0;
+  private lateMelodyFocus = 0;
   private profile: SpeciesProfile = { ...DEFAULT_SPECIES_PROFILE };
 
   setCalibrationSeconds(seconds: number) {
@@ -138,9 +195,26 @@ export class SpeciesProfiler {
     this.sumContrast = 0;
     this.sumBrightness = 0;
     this.sumBassFocus = 0;
+    this.sumMelodyFocus = 0;
     this.sumCentroid = 0;
     this.sumPulseConfidence = 0;
     this.sumTransientRate = 0;
+    this.sumNovelty = 0;
+    this.sumEventRate = 0;
+    this.sumOverall = 0;
+    this.loudSampleCount = 0;
+    this.sumDensitySq = 0;
+    this.sumTensionSq = 0;
+    this.sumContrastSq = 0;
+    this.sumBrightnessSq = 0;
+    this.earlyCount = 0;
+    this.earlyCentroid = 0;
+    this.earlyBrightness = 0;
+    this.earlyMelodyFocus = 0;
+    this.lateCount = 0;
+    this.lateCentroid = 0;
+    this.lateBrightness = 0;
+    this.lateMelodyFocus = 0;
     this.profile = { ...DEFAULT_SPECIES_PROFILE };
   }
 
@@ -150,14 +224,53 @@ export class SpeciesProfiler {
 
   private getAverages() {
     const n = Math.max(1, this.sampleCount);
+    const avgDensity = this.sumDensity / n;
+    const avgTension = this.sumTension / n;
+    const avgContrast = this.sumContrast / n;
+    const avgBrightness = this.sumBrightness / n;
+    const avgCentroid = this.sumCentroid / n;
+    const avgPulse = this.sumPulseConfidence / n;
+    const avgTransient = this.sumTransientRate / n;
+    const avgBassFocus = this.sumBassFocus / n;
+    const avgMelodyFocus = this.sumMelodyFocus / n;
+    const avgNovelty = this.sumNovelty / n;
+    const avgEventRate = this.sumEventRate / n;
+    const avgOverall = this.sumOverall / n;
+    const loudRatio = this.loudSampleCount / n;
+    const densityVar = Math.max(0, this.sumDensitySq / n - avgDensity * avgDensity);
+    const tensionVar = Math.max(0, this.sumTensionSq / n - avgTension * avgTension);
+    const contrastVar = Math.max(0, this.sumContrastSq / n - avgContrast * avgContrast);
+    const brightnessVar = Math.max(0, this.sumBrightnessSq / n - avgBrightness * avgBrightness);
+    const earlyCentroid = this.earlyCount > 0 ? this.earlyCentroid / this.earlyCount : avgCentroid;
+    const earlyBrightness = this.earlyCount > 0 ? this.earlyBrightness / this.earlyCount : avgBrightness;
+    const earlyMelodyFocus = this.earlyCount > 0 ? this.earlyMelodyFocus / this.earlyCount : avgMelodyFocus;
+    const lateCentroid = this.lateCount > 0 ? this.lateCentroid / this.lateCount : avgCentroid;
+    const lateBrightness = this.lateCount > 0 ? this.lateBrightness / this.lateCount : avgBrightness;
+    const lateMelodyFocus = this.lateCount > 0 ? this.lateMelodyFocus / this.lateCount : avgMelodyFocus;
+    const sectionContrast = clamp01(
+      Math.abs(lateCentroid - earlyCentroid) * 0.9 +
+        Math.abs(lateBrightness - earlyBrightness) * 0.75 +
+        Math.abs(lateMelodyFocus - earlyMelodyFocus) * 1.2,
+    );
     return {
-      avgDensity: this.sumDensity / n,
-      avgTension: this.sumTension / n,
-      avgContrast: this.sumContrast / n,
-      avgBrightness: this.sumBrightness / n,
-      avgCentroid: this.sumCentroid / n,
-      avgPulse: this.sumPulseConfidence / n,
-      avgTransient: this.sumTransientRate / n,
+      avgDensity,
+      avgTension,
+      avgContrast,
+      avgBrightness,
+      avgCentroid,
+      avgPulse,
+      avgTransient,
+      avgBassFocus,
+      avgMelodyFocus,
+      avgNovelty,
+      avgEventRate,
+      avgOverall,
+      loudRatio,
+      densityVar,
+      tensionVar,
+      contrastVar,
+      brightnessVar,
+      sectionContrast,
     };
   }
 
@@ -186,9 +299,32 @@ export class SpeciesProfiler {
     this.sumContrast += bands.contrast;
     this.sumBrightness += bands.brightness;
     this.sumBassFocus += bands.bassFocus;
+    this.sumMelodyFocus += input.melodyFocus;
     this.sumCentroid += bands.centroid;
     this.sumPulseConfidence += input.pulseConfidence;
     this.sumTransientRate += input.transientRate;
+    this.sumNovelty += input.novelty;
+    this.sumEventRate += input.eventRate;
+    this.sumOverall += bands.overall;
+    if (bands.overall > 0.66) {
+      this.loudSampleCount += 1;
+    }
+    this.sumDensitySq += input.density * input.density;
+    this.sumTensionSq += input.tension * input.tension;
+    this.sumContrastSq += bands.contrast * bands.contrast;
+    this.sumBrightnessSq += bands.brightness * bands.brightness;
+
+    if (this.activeSeconds <= 12) {
+      this.earlyCount += 1;
+      this.earlyCentroid += bands.centroid;
+      this.earlyBrightness += bands.brightness;
+      this.earlyMelodyFocus += input.melodyFocus;
+    } else if (this.activeSeconds >= 24) {
+      this.lateCount += 1;
+      this.lateCentroid += bands.centroid;
+      this.lateBrightness += bands.brightness;
+      this.lateMelodyFocus += input.melodyFocus;
+    }
 
     if (this.activeSeconds < this.warmupSeconds) {
       this.profile = { ...DEFAULT_SPECIES_PROFILE, confidence: this.getConfidence() };
@@ -204,6 +340,17 @@ export class SpeciesProfiler {
       avgs.avgCentroid,
       avgs.avgPulse,
       avgs.avgTransient,
+      avgs.avgBassFocus,
+      avgs.avgMelodyFocus,
+      avgs.avgNovelty,
+      avgs.avgEventRate,
+      avgs.avgOverall,
+      avgs.loudRatio,
+      avgs.densityVar,
+      avgs.tensionVar,
+      avgs.contrastVar,
+      avgs.brightnessVar,
+      avgs.sectionContrast,
     );
     this.applyTargets(organic, aggressive, rhythmic, deltaTime);
   }
@@ -231,6 +378,17 @@ export class SpeciesProfiler {
       avgs.avgCentroid,
       avgs.avgPulse,
       avgs.avgTransient,
+      avgs.avgBassFocus,
+      avgs.avgMelodyFocus,
+      avgs.avgNovelty,
+      avgs.avgEventRate,
+      avgs.avgOverall,
+      avgs.loudRatio,
+      avgs.densityVar,
+      avgs.tensionVar,
+      avgs.contrastVar,
+      avgs.brightnessVar,
+      avgs.sectionContrast,
     );
     this.profile = applyGains(organic, aggressive, rhythmic, true, 1);
     return this.profile;
@@ -244,11 +402,24 @@ export const speciesMorphTargets = (
   const o = sp.organic;
   const a = sp.aggressive;
   const r = sp.rhythmic;
+  const hardness = clamp01(0.5 + (a - o) * 0.7);
+  const softness = 1 - hardness;
+  // soft: 高 organic → coral（膜）、中 soft → diabolo（曲線の芯）
+  const coralGate = smoothstep(0.38, 0.62, o);
+  const coralWeight = softness * coralGate;
+  const diaboloWeight = softness * (1 - coralGate * 0.65);
+  // hard: 攻撃の尖り → spindle、塊 → monolith
+  const tipGate = smoothstep(0.4, 0.7, a) * (0.45 + smoothstep(0.3, 0.5, r) * 0.55);
+  const spindleWeight = hardness * tipGate;
+  const monolithWeight = hardness * (1 - tipGate * 0.75);
+  // pulse / ループ感 → torus（硬柔どちらからも拾う）
+  const torusWeight = r * (0.6 + hardness * 0.25 + softness * 0.2);
+
   return {
-    diabolo: fibUnit(3, 21) + o * fibUnit(13, 21) + r * fibUnit(5, 21),
-    torus: fibUnit(2, 21) + r * fibUnit(8, 21) + (1 - a) * fibUnit(5, 21),
-    monolith: fibUnit(5, 21) + a * fibUnit(13, 21),
-    coral: fibUnit(5, 21) + o * fibUnit(21, 21),
-    spindle: fibUnit(3, 21) + a * fibUnit(13, 21) + (1 - o) * fibUnit(5, 21),
+    diabolo: fibUnit(3, 21) + diaboloWeight * fibUnit(13, 21) + r * fibUnit(3, 34),
+    coral: fibUnit(1, 34) + coralWeight * fibUnit(13, 21) + o * fibUnit(5, 21),
+    monolith: fibUnit(2, 21) + monolithWeight * fibUnit(13, 21) + (1 - o) * fibUnit(3, 21),
+    spindle: fibUnit(1, 34) + spindleWeight * fibUnit(13, 21) + a * fibUnit(5, 21),
+    torus: fibUnit(2, 21) + torusWeight * fibUnit(13, 21),
   };
 };

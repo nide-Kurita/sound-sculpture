@@ -48,6 +48,17 @@ export type RhythmEvents = {
   pulseEnvelope: number;
   /** kick/transient 等で記録された離散パルス回数 */
   pulseIndex: number;
+  /**
+   * ヒット後に帯域エネルギーが残っている時間（秒）。
+   * 音程ではなく「鳴り長さ」— クローズドハット短／オープンハット長、キック胴の残響など。
+   */
+  kickLength: number;
+  snareLength: number;
+  hatLength: number;
+  /** 長さに応じて残るリング（0–1）。見た目の押し込み持続に使う */
+  kickRing: number;
+  snareRing: number;
+  hatRing: number;
   /** オシロ表示用 */
   subLevel: number;
   wavePeak: number;

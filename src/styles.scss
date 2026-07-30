@@ -970,6 +970,19 @@ body {
   accent-color: #5a6e8c;
 }
 
+.light-rig-panel {
+  margin: 0 0 1rem;
+}
+
+.light-rig-sliders {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.light-rig-sliders .tuning-slider {
+  grid-template-columns: minmax(4.5rem, 0.9fr) minmax(0, 1.4fr) 2.6rem;
+}
+
 .daytime-preview__actions {
   display: flex;
   justify-content: flex-end;

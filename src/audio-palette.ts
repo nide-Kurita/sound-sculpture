@@ -12,9 +12,11 @@ export type AudioProfileSummary = {
   midRatio: number;
   highRatio: number;
   bassDominance: number;
+  melodyFocus: number;
   brightness: number;
   contrast: number;
   centroid: number;
+  sectionContrast: number;
   variation: number;
   attackRate: number;
   quietRatio: number;
@@ -54,49 +56,99 @@ export const deriveSculpturePalette = (
   const brightness = hasSignal ? profile.brightness : 0.12;
   const contrast = hasSignal ? profile.contrast : 0.2;
   const bassDominance = hasSignal ? profile.bassDominance : 0.4;
+  const melodyFocus = hasSignal ? profile.melodyFocus : 0.18;
+  const sectionContrast = hasSignal ? profile.sectionContrast : 0.08;
+  const midRatio = hasSignal ? profile.midRatio : 0.34;
+  const highRatio = hasSignal ? profile.highRatio : 0.22;
   const variation = hasSignal ? profile.variation : 0.1;
   const attackRate = hasSignal ? profile.attackRate : 0.5;
   const loudRatio = hasSignal ? profile.loudRatio : 0.05;
   const overallAverage = hasSignal ? profile.overallAverage : 0.2;
+  const quietRatio = hasSignal ? profile.quietRatio : 0.2;
 
-  const spectralT = smoothstep(0.12, 0.6, centroid);
+  // 質感の硬柔: bass 単独では決めない（ジャズ・ベースが金属化するため）
+  const loudHard = smoothstep(0.7, 0.96, loudRatio);
+  const softDyn = clamp01(
+    sectionContrast * 0.42 +
+      variation * 0.38 +
+      melodyFocus * 0.36 +
+      quietRatio * 0.22 +
+      (1 - loudHard) * 0.28 -
+      brightness * 0.08,
+  );
+  const hardMat = clamp01(
+    loudHard * 0.52 +
+      smoothstep(0.1, 0.22, brightness) * 0.28 +
+      contrast * 0.14 +
+      smoothstep(5, 13, attackRate) * 0.12 -
+      softDyn * 0.4,
+  );
+
+  const spectralColor = clamp01(
+    centroid * 0.3 +
+      brightness * 0.24 +
+      highRatio * 0.22 +
+      midRatio * 0.12 +
+      melodyFocus * 0.32 +
+      sectionContrast * 0.22 -
+      softDyn * 0.12 -
+      bassDominance * 0.06 +
+      variation * 0.1,
+  );
+  const spectralT = smoothstep(0.04, 0.58, spectralColor);
   const pos = spectralT * (HUE_STOPS.length - 1);
   const seg = Math.min(HUE_STOPS.length - 2, Math.floor(pos));
+  // soft → 暖色寄り（既に暖色帯なら追加引きを弱め、wrap で菫へ飛ばないようにする）
+  const warmPull =
+    (softDyn * 0.1 + (1 - loudHard) * 0.03) * smoothstep(0.18, 0.55, spectralT);
   const hue = wrapHue(
     lerp(HUE_STOPS[seg], HUE_STOPS[seg + 1], pos - seg) -
-      bassDominance * 0.035 +
-      variation * 0.04,
+      warmPull -
+      bassDominance * 0.015 +
+      hardMat * 0.06 +
+      variation * 0.025 +
+      melodyFocus * 0.02,
   );
 
-  const saturation = clampRange(0.24 + contrast * 1.05 + variation * 0.7, 0.22, 0.85);
-  const lightness = clampRange(0.34 + brightness * 0.55 + loudRatio * 0.12, 0.3, 0.72);
-  const roughness = clampRange(
-    0.74 - brightness * 0.5 + bassDominance * 0.18 - Math.min(0.2, attackRate * 0.02),
-    0.16,
+  const saturation = clampRange(
+    0.26 + contrast * 0.55 + softDyn * 0.32 + variation * 0.28 - hardMat * 0.14,
+    0.18,
     0.92,
   );
-  const metalness = clampRange(
-    bassDominance * 0.85 + contrast * 0.25 - brightness * 0.3,
-    0.02,
+  const lightness = clampRange(
+    0.34 + brightness * 0.38 + softDyn * 0.1 + loudHard * 0.08 + melodyFocus * 0.06,
+    0.28,
+    0.76,
+  );
+  // soft: マット／有機、hard: 滑らかな鉱物
+  const roughness = clampRange(
+    0.38 + softDyn * 0.42 + (1 - hardMat) * 0.22 - brightness * 0.18 - loudHard * 0.16,
+    0.14,
     0.92,
+  );
+  // soft: 低金属、hard: 高金属（bass は補助のみ）
+  const metalness = clampRange(
+    0.06 + hardMat * 0.72 + contrast * 0.08 + bassDominance * 0.08 - softDyn * 0.38 - melodyFocus * 0.12,
+    0.02,
+    0.9,
   );
   const emissiveStrength = clampRange(
-    0.18 + brightness * 0.85 + loudRatio * 0.55 + overallAverage * 0.3,
-    0.15,
+    0.12 + hardMat * 0.28 + loudRatio * 0.38 + brightness * 0.42 + overallAverage * 0.16 + sectionContrast * 0.12,
+    0.12,
     1,
   );
-  const energy = clamp01(overallAverage * 1.4 + loudRatio * 0.9);
+  const energy = clamp01(overallAverage * 1.2 + loudRatio * 0.85 + hardMat * 0.25);
 
   const baseColor = new THREE.Color().setHSL(hue, saturation, lightness);
   const accentColor = new THREE.Color().setHSL(
-    wrapHue(hue + 0.09 + brightness * 0.08),
-    Math.min(0.95, saturation * 1.15),
-    Math.min(0.75, lightness + 0.14),
+    wrapHue(hue + 0.08 + brightness * 0.06 + hardMat * 0.03),
+    Math.min(0.95, saturation * (1.08 + softDyn * 0.08)),
+    Math.min(0.75, lightness + 0.12 + softDyn * 0.04),
   );
   const emissiveColor = new THREE.Color().setHSL(
-    wrapHue(hue - 0.05),
-    Math.min(0.9, saturation * 1.1),
-    0.5,
+    wrapHue(hue - 0.04 + hardMat * 0.03),
+    Math.min(0.9, saturation * 1.08),
+    clampRange(0.42 + hardMat * 0.12, 0.35, 0.62),
   );
 
   return {

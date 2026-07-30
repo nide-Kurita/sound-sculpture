@@ -148,6 +148,8 @@ type WaveformMetrics = {
 
 type DeterministicSimStep = {
   bands: AudioBands;
+  /** ピーク正規化前 — ドラム／オンセット検出用（曲と同期させる） */
+  rhythmBands: AudioBands;
   waveform: WaveformMetrics;
   deltaTime: number;
 };
@@ -174,6 +176,8 @@ type AudioProfile = {
   brightness: number;
   contrast: number;
   centroid: number;
+  melodyFocus: number;
+  sectionContrast: number;
   variation: number;
   attackAmount: number;
   attackRate: number;
@@ -199,6 +203,12 @@ let latestRhythm: RhythmEvents = {
   pulseConfidence: 0,
   pulseEnvelope: 0,
   pulseIndex: 0,
+  kickLength: 0,
+  snareLength: 0,
+  hatLength: 0,
+  kickRing: 0,
+  snareRing: 0,
+  hatRing: 0,
   subLevel: 0,
   wavePeak: 0,
   waveEnergy: 0,
@@ -235,10 +245,20 @@ let latestStructure: StructureSnapshot = defaultStructureSnapshot();
 
 /**
  * audio-scope 右端の水色バーと、オブジェクト周りの glow dust / sparkle が共有する駆動量 (0–1)。
- * waveEnergy（RMS）を主、wavePeak で瞬間の立ち上がりを足す。
+ * 拍＋キック／スネアを主に、ハット／シンバルも軽く乗せる。
  */
 const scopeCyanDrive = (rhythm: RhythmEvents) =>
-  clamp01(rhythm.waveEnergy * 0.82 + rhythm.wavePeak * 0.28);
+  clamp01(
+    rhythm.pulseConfidence * rhythm.pulseEnvelope * 0.4 +
+      (1 - clamp01(rhythm.pulsePhase / 0.5)) * rhythm.pulseConfidence * 0.22 +
+      rhythm.kick * 0.45 +
+      rhythm.kickRing * 0.28 +
+      rhythm.snare * 0.3 +
+      rhythm.snareRing * 0.2 +
+      rhythm.hat * 0.22 +
+      rhythm.hatRing * 0.12 +
+      rhythm.transient * 0.45,
+  );
 
 const emptyBands = (): AudioBands => ({
   sub: 0,
@@ -275,6 +295,8 @@ const createEmptyAudioProfile = (): AudioProfile => ({
   brightness: 0,
   contrast: 0,
   centroid: 0,
+  melodyFocus: 0,
+  sectionContrast: 0,
   variation: 0,
   attackAmount: 0,
   attackRate: 0,
@@ -285,6 +307,7 @@ const createEmptyAudioProfile = (): AudioProfile => ({
 /**
  * オンセット/ビート検出。
  * kick は「サブ低域 + 波形ピーク/エネルギー」の両方が揃った瞬間のみ（mid/high の誤検出を抑える）。
+ * あわせて各ヒットの「鳴り長さ」（帯域が落ちるまでの時間）を測り、見た目の持続に渡す。
  */
 class RhythmTracker {
   private envSub = 0;
@@ -320,6 +343,22 @@ class RhythmTracker {
   private pulseIntervals: number[] = [];
   private expectedPulseInterval = fibUnit(7, 8);
   private pulseIndex = 0;
+  // --- 鳴り長さ（音程ではなくゲート長）---
+  private kickGateOpen = false;
+  private snareGateOpen = false;
+  private hatGateOpen = false;
+  private kickGateStart = 0;
+  private snareGateStart = 0;
+  private hatGateStart = 0;
+  private kickGatePeak = 0;
+  private snareGatePeak = 0;
+  private hatGatePeak = 0;
+  private kickLength = 0;
+  private snareLength = 0;
+  private hatLength = 0;
+  private kickRing = 0;
+  private snareRing = 0;
+  private hatRing = 0;
 
   reset() {
     this.envSub = 0;
@@ -355,6 +394,21 @@ class RhythmTracker {
     this.pulseIntervals = [];
     this.expectedPulseInterval = fibUnit(7, 8);
     this.pulseIndex = 0;
+    this.kickGateOpen = false;
+    this.snareGateOpen = false;
+    this.hatGateOpen = false;
+    this.kickGateStart = 0;
+    this.snareGateStart = 0;
+    this.hatGateStart = 0;
+    this.kickGatePeak = 0;
+    this.snareGatePeak = 0;
+    this.hatGatePeak = 0;
+    this.kickLength = 0;
+    this.snareLength = 0;
+    this.hatLength = 0;
+    this.kickRing = 0;
+    this.snareRing = 0;
+    this.hatRing = 0;
   }
 
   private registerPulse(strength: number) {
@@ -362,31 +416,36 @@ class RhythmTracker {
     if (this.lastPulseTime > 0) {
       const interval = now - this.lastPulseTime;
       if (interval > fibUnit(3, 21) && interval < fibRatio(8, 3)) {
-        this.pulseIntervals.push(interval);
-        if (this.pulseIntervals.length > fib(5)) {
-          this.pulseIntervals.shift();
-        }
-        const sortedIntervals = [...this.pulseIntervals].sort((a, b) => a - b);
-        const middle = Math.floor(sortedIntervals.length / 2);
-        const median =
-          sortedIntervals.length % 2 === 0
-            ? (sortedIntervals[middle - 1] + sortedIntervals[middle]) * 0.5
-            : sortedIntervals[middle];
-        const variance =
-          this.pulseIntervals.reduce((sum, value) => sum + (value - median) ** 2, 0) /
-          this.pulseIntervals.length;
-        const cv = Math.sqrt(variance) / Math.max(fibUnit(2, 21), median);
-        const sampleConfidence = clamp01((this.pulseIntervals.length - 1) / 3);
-        this.pulseConfidence = clamp01(1 - cv * fibRatio(5, 3)) * sampleConfidence;
-        this.expectedPulseInterval = median;
+        // 外れ IOI はテンポ推定に入れない（倍テン・連続キックでグリッドが壊れるのを防ぐ）
+        const expected = this.expectedPulseInterval;
+        const ratio = interval / Math.max(fibUnit(3, 21), expected);
+        const plausible =
+          this.pulseIntervals.length < 3 || (ratio > 0.55 && ratio < 1.75);
+        if (plausible) {
+          this.pulseIntervals.push(interval);
+          if (this.pulseIntervals.length > fib(5)) {
+            this.pulseIntervals.shift();
+          }
+          const sortedIntervals = [...this.pulseIntervals].sort((a, b) => a - b);
+          const middle = Math.floor(sortedIntervals.length / 2);
+          const median =
+            sortedIntervals.length % 2 === 0
+              ? (sortedIntervals[middle - 1] + sortedIntervals[middle]) * 0.5
+              : sortedIntervals[middle];
+          const variance =
+            this.pulseIntervals.reduce((sum, value) => sum + (value - median) ** 2, 0) /
+            this.pulseIntervals.length;
+          const cv = Math.sqrt(variance) / Math.max(fibUnit(2, 21), median);
+          const sampleConfidence = clamp01((this.pulseIntervals.length - 1) / 3);
+          this.pulseConfidence = clamp01(1 - cv * fibRatio(5, 3)) * sampleConfidence;
+          this.expectedPulseInterval = median;
 
-        // 倍テン・半テンを一般的な表示域へ正規化し、イベント単位で安定追従させる。
-        // deltaTime を係数にすると0から延々と増え続けて見えるため使わない。
-        if (this.pulseIntervals.length >= 3) {
-          let estimatedBpm = 60 / median;
-          while (estimatedBpm < 70) estimatedBpm *= 2;
-          while (estimatedBpm > 180) estimatedBpm *= 0.5;
-          this.bpm += (estimatedBpm - this.bpm) * (this.bpm <= 0 ? 1 : 0.22);
+          if (this.pulseIntervals.length >= 3) {
+            let estimatedBpm = 60 / median;
+            while (estimatedBpm < 70) estimatedBpm *= 2;
+            while (estimatedBpm > 180) estimatedBpm *= 0.5;
+            this.bpm += (estimatedBpm - this.bpm) * (this.bpm <= 0 ? 1 : 0.22);
+          }
         }
       }
     }
@@ -394,6 +453,29 @@ class RhythmTracker {
     this.pulsePhase = 0;
     this.pulseIndex += 1;
     this.pulseEnvelope = Math.min(1, fibUnit(8, 9) + strength * fibRatio(8, 5));
+  }
+
+  /** オンセット後、帯域が落ちるまでを「長さ」として測る（共有ルール） */
+  private trackHitLength(
+    open: boolean,
+    start: number,
+    peak: number,
+    level: number,
+    floor: number,
+    maxSec: number,
+  ): { open: boolean; start: number; peak: number; length: number; ring: number } {
+    if (!open) {
+      return { open: false, start, peak, length: 0, ring: 0 };
+    }
+    const nextPeak = Math.max(peak, level);
+    const liveLen = Math.min(maxSec, Math.max(0, this.elapsed - start));
+    // ピーク比 or 絶対床を下回ったらゲート閉じる
+    const stillRinging = level > nextPeak * 0.28 || level > floor;
+    if (stillRinging && liveLen < maxSec) {
+      const ring = clamp01(0.35 + liveLen / Math.max(0.04, maxSec) * 0.65);
+      return { open: true, start, peak: nextPeak, length: liveLen, ring };
+    }
+    return { open: false, start, peak: nextPeak, length: liveLen, ring: 0 };
   }
 
   update(bands: AudioBands, waveform: WaveformMetrics | null, deltaTime: number): RhythmEvents {
@@ -446,114 +528,220 @@ class RhythmTracker {
     const strongWave =
       peak > fibUnit(8, 13) || peakDelta > fibUnit(8, 34) || energyDelta > fibUnit(5, 34);
 
-    // --- kick: 低音域 + 波形パルス（バスドラムの鼓動）---
-    const bassGate = fibUnit(2, 34) + Math.max(this.deltaSub, this.deltaLow) * fibUnit(8, 13);
+    // --- kick: アタック比で胴鳴り／ウォーキングベースを弾き、テンポに応じたリフラクトリ ---
+    const bassGate = fibUnit(2, 34) + Math.max(this.deltaSub, this.deltaLow) * fibUnit(5, 13);
     const bassLevel = Math.max(bands.sub, bands.low * fibUnit(8, 13));
-    const bassHit = bassOnset > bassGate && bassLevel > fibUnit(5, 34);
-    const bassForward =
-      bassLevel > bands.mid * fibUnit(8, 13) &&
-      bassLevel > bands.high * fibUnit(8, 13);
-    const denseMix = bands.mid > fibUnit(5, 21) && bands.high > fibUnit(5, 34);
-    const metalKickFallback =
-      bassHit &&
-      bassLevel > fibUnit(8, 34) &&
-      (bassOnset > bassGate * fibUnit(8, 13) || strongWave || peakDelta > fibUnit(5, 34) || denseMix);
-    const notHatOnly = onsetHigh < bassOnset * fibRatio(8, 5) || bands.high < fibUnit(8, 13);
-
+    const kickClarity = bassOnset / (bassLevel + 0.08);
+    const bassHit =
+      bassOnset > bassGate &&
+      bassLevel > fibUnit(3, 34) &&
+      (kickClarity > 0.32 || peakDelta > fibUnit(5, 21) || energyDelta > fibUnit(3, 21));
+    const kickTransient =
+      peakDelta > fibUnit(3, 34) + this.deltaPeak * fibUnit(3, 13) ||
+      energyDelta > fibUnit(2, 21) + this.deltaEnergy * fibUnit(2, 13);
+    // グリッド学習後は拍間隔の半分前後で連打を間引く（修羅場などの崩れ軽減）
+    const minKickGap =
+      this.pulseConfidence > 0.35
+        ? Math.max(0.052, this.expectedPulseInterval * 0.48)
+        : Math.max(0.04, fibUnit(5, 34));
     let kick = 0;
     if (
-      this.lastKick > fibUnit(3, 34) &&
+      this.lastKick > minKickGap &&
       bassHit &&
-      (waveHit || metalKickFallback || peakDelta > fibUnit(8, 34)) &&
-      (bassForward || metalKickFallback || strongWave || denseMix) &&
-      notHatOnly
+      kickTransient &&
+      bassOnset > onsetHigh * 0.4 &&
+      bassLevel > bands.high * fibUnit(3, 13)
     ) {
-      kick = Math.max(bassOnset, peakDelta * fibRatio(8, 5), energyDelta * fibRatio(8, 5));
+      kick = Math.min(
+        1,
+        Math.max(bassOnset * 1.55, peakDelta * fibRatio(8, 3), energyDelta * fibRatio(5, 3)),
+      );
     }
 
-    // --- snare: 中域 + メロディ帯域 (700–1500 Hz) の立ち上がり ---
-    const snareGate = 0.04 + this.deltaMid * 0.95;
-    const melodySnareGate = 0.024 + this.deltaMelody * 1.1;
+    // --- snare: 中域立ち上がり + トランジェント（キック直後は抑える）---
+    const snareGate = 0.028 + this.deltaMid * 0.65;
+    const melodySnareGate = 0.018 + this.deltaMelody * 0.8;
+    const snareTransient = peakDelta > fibUnit(3, 34) || energyDelta > fibUnit(2, 34);
     const snareFromMid =
-      this.lastSnare > 0.08 && onsetMid > snareGate && bands.mid > 0.1 && kick < 0.03 ? onsetMid : 0;
+      this.lastSnare > 0.055 &&
+      onsetMid > snareGate &&
+      bands.mid > 0.06 &&
+      kick < 0.05 &&
+      snareTransient
+        ? onsetMid
+        : 0;
     const snareFromMelody =
-      this.lastSnare > 0.06 && onsetMelody > melodySnareGate && bands.melody > 0.12 && kick < 0.03
-        ? onsetMelody * 1.25
+      this.lastSnare > 0.045 &&
+      onsetMelody > melodySnareGate &&
+      bands.melody > 0.08 &&
+      kick < 0.05 &&
+      snareTransient
+        ? onsetMelody * 1.15
         : 0;
     const snare = Math.max(snareFromMid, snareFromMelody);
+    const snareLevel = Math.max(bands.mid, bands.melody * 0.85);
 
-    // --- hat: 高域の立ち上がり（ハイハット・シンバル・アタック）---
-    const hatGate = 0.01 + this.deltaHigh * 0.52;
+    // --- hat: 拾いすぎない（ノイズ化を防ぐ）---
+    const hatGate = 0.014 + this.deltaHigh * 0.45;
     const hat =
-      this.lastHat > 0.022 && onsetHigh > hatGate && bands.high > 0.024 && kick < 0.05 ? onsetHigh * 1.15 : 0;
+      this.lastHat > 0.028 &&
+      onsetHigh > hatGate &&
+      bands.high > 0.028 &&
+      kick < 0.08 &&
+      snare < 0.08 &&
+      onsetHigh > onsetMid * 0.9 &&
+      (peakDelta > fibUnit(3, 34) || energyDelta > fibUnit(2, 34))
+        ? onsetHigh * 1.1
+        : 0;
 
-    // --- transient: シンバル・大きな波形スパイク（ハイハット単体でも反応）---
-    const transientGate = 0.01 + this.deltaHigh * 0.48;
-    const brightSpike = onsetHigh > transientGate || onsetMelody > transientGate * 1.05;
+    // --- transient: シンバル／クラッシュ（強めの高域＋波形だけ）---
+    const transientGate = 0.014 + this.deltaHigh * 0.42;
+    const brightSpike = onsetHigh > transientGate && bands.high > 0.03;
     let transient = 0;
-    if (this.lastTransient > 0.022 && waveHit && brightSpike && bands.high > 0.018) {
-      transient = Math.max(onsetHigh * 1.2, onsetMelody * 0.75, peakDelta * 1.1, energyDelta * 0.9);
-    } else if (this.lastTransient > 0.045 && strongWave && peakDelta > 0.07) {
-      transient = Math.max(peakDelta * 1.15, energyDelta * 0.95);
+    if (
+      this.lastTransient > 0.05 &&
+      waveHit &&
+      brightSpike &&
+      (peakDelta > 0.04 || energyDelta > 0.03) &&
+      kick < 0.1
+    ) {
+      transient = Math.max(onsetHigh * 1.15, peakDelta * 1.05, energyDelta * 0.9);
+    } else if (this.lastTransient > 0.08 && strongWave && peakDelta > 0.09 && bands.high > 0.04) {
+      transient = Math.max(peakDelta * 1.1, energyDelta * 0.95);
     }
 
     if (kick > 0) {
       this.lastKick = 0;
       this.kickIndex += 1;
+      this.kickGateOpen = true;
+      this.kickGateStart = this.elapsed;
+      this.kickGatePeak = bassLevel;
     }
     if (snare > 0) {
       this.lastSnare = 0;
       this.snareIndex += 1;
+      this.snareGateOpen = true;
+      this.snareGateStart = this.elapsed;
+      this.snareGatePeak = snareLevel;
     }
     if (hat > 0) {
       this.lastHat = 0;
       this.hatIndex += 1;
+      this.hatGateOpen = true;
+      this.hatGateStart = this.elapsed;
+      this.hatGatePeak = bands.high;
     }
     if (transient > 0) {
       this.lastTransient = 0;
       this.transientIndex += 1;
     }
 
+    // 帯域が残っているあいだを長さとして確定（キック長め／ハット短めの上限）
+    const kickTrack = this.trackHitLength(
+      this.kickGateOpen,
+      this.kickGateStart,
+      this.kickGatePeak,
+      bassLevel,
+      0.045,
+      0.42,
+    );
+    this.kickGateOpen = kickTrack.open;
+    this.kickGateStart = kickTrack.start;
+    this.kickGatePeak = kickTrack.peak;
+    if (kickTrack.length > 0) {
+      this.kickLength += (kickTrack.length - this.kickLength) * Math.min(1, deltaTime * 8);
+    }
+    this.kickRing = Math.max(kickTrack.ring, this.kickRing * Math.exp(-deltaTime * (2.8 + (1 - this.kickLength / 0.42) * 4)));
+
+    const snareTrack = this.trackHitLength(
+      this.snareGateOpen,
+      this.snareGateStart,
+      this.snareGatePeak,
+      snareLevel,
+      0.05,
+      0.28,
+    );
+    this.snareGateOpen = snareTrack.open;
+    this.snareGateStart = snareTrack.start;
+    this.snareGatePeak = snareTrack.peak;
+    if (snareTrack.length > 0) {
+      this.snareLength += (snareTrack.length - this.snareLength) * Math.min(1, deltaTime * 9);
+    }
+    this.snareRing = Math.max(
+      snareTrack.ring,
+      this.snareRing * Math.exp(-deltaTime * (3.6 + (1 - this.snareLength / 0.28) * 5)),
+    );
+
+    const hatTrack = this.trackHitLength(
+      this.hatGateOpen,
+      this.hatGateStart,
+      this.hatGatePeak,
+      bands.high,
+      0.028,
+      0.35,
+    );
+    this.hatGateOpen = hatTrack.open;
+    this.hatGateStart = hatTrack.start;
+    this.hatGatePeak = hatTrack.peak;
+    if (hatTrack.length > 0) {
+      this.hatLength += (hatTrack.length - this.hatLength) * Math.min(1, deltaTime * 10);
+    }
+    this.hatRing = Math.max(
+      hatTrack.ring,
+      this.hatRing * Math.exp(-deltaTime * (5.5 + (1 - this.hatLength / 0.35) * 8)),
+    );
+
+    // pulse: キック主・スネア副。グリッド確立後は拍付近だけ同期（ででで連打でBPMを壊さない）
     let beat = 0;
     if (kick > 0) beat = Math.min(1, kick * fibRatio(8, 3));
     else if (snare > 0) beat = Math.min(1, snare * fibRatio(5, 3));
-    else if (hat > 0) beat = Math.min(1, hat * fibRatio(8, 5));
-    else if (transient > 0) beat = Math.min(1, transient * fibRatio(5, 3));
-    else if (
-      this.lastBeat > fibUnit(8, 21) &&
-      waveHit &&
-      (energyDelta > fibUnit(5, 34) || peakDelta > fibUnit(8, 34) || peak > fibUnit(8, 13))
-    ) {
-      beat = Math.min(
-        1,
-        Math.max(energyDelta * fibRatio(8, 2), peakDelta * fibRatio(8, 2), (peak - fibUnit(8, 21)) * fibRatio(5, 3)),
-      );
-    }
 
-    const fallbackPulseStrength =
-      kick <= 0
-        ? Math.max(
-            transient > fibUnit(3, 21) ? transient * fibUnit(8, 13) : 0,
-            snare > fibUnit(5, 21) && peakDelta > fibUnit(5, 34) ? snare * fibUnit(8, 13) : 0,
-            beat > fibUnit(8, 13) && peakDelta > fibUnit(3, 21) ? beat * fibUnit(5, 13) : 0,
-            peakDelta > fibUnit(8, 21) ? peakDelta * fibUnit(8, 13) : 0,
-            energyDelta > fibUnit(5, 21) ? energyDelta * fibUnit(8, 13) : 0,
-          )
-        : 0;
-    const pulseStrength = kick > 0 ? kick : fallbackPulseStrength;
+    const onGrid =
+      this.pulseConfidence < 0.45
+        ? this.pulsePhase < 0.26 || this.pulsePhase > 0.74
+        : this.pulsePhase < 0.18 || this.pulsePhase > 0.82;
+    let pulseStrength = 0;
+    if (kick > 0) {
+      if (this.pulseConfidence < 0.4 || onGrid) {
+        pulseStrength = kick;
+      } else {
+        // グリッド外連打は位相を触らない（崩れの主因）
+        this.pulseEnvelope = Math.max(this.pulseEnvelope, kick * 0.18);
+      }
+    } else if (snare > fibUnit(5, 21)) {
+      const kickSparse = this.lastKick > this.expectedPulseInterval * 0.75;
+      if (
+        kickSparse &&
+        (this.pulseConfidence < 0.48 || onGrid) &&
+        snare > 0.06
+      ) {
+        pulseStrength = snare * fibUnit(8, 13);
+      }
+    }
     if (pulseStrength > fibUnit(3, 21)) {
       this.registerPulse(pulseStrength);
     } else if (this.expectedPulseInterval > fibUnit(3, 21)) {
-      this.pulsePhase = Math.min(1, this.pulsePhase + deltaTime / this.expectedPulseInterval);
+      this.pulsePhase += deltaTime / this.expectedPulseInterval;
+      if (this.pulsePhase >= 1) {
+        this.pulsePhase -= Math.floor(this.pulsePhase);
+        if (this.pulseConfidence > 0.38) {
+          this.pulseEnvelope = Math.max(
+            this.pulseEnvelope,
+            0.26 + this.pulseConfidence * 0.4,
+          );
+          this.pulseIndex += 1;
+        }
+      }
     }
     const pulseInterval = Math.max(fibUnit(3, 21), this.expectedPulseInterval);
-    const decayRate = fib(5) / (pulseInterval * runtimeTuning.pulseHold);
-    this.pulseEnvelope *= Math.exp(-deltaTime * (decayRate + (1 - this.pulseConfidence) * fibUnit(5, 8)));
+    const decayRate =
+      fib(5) / (pulseInterval * runtimeTuning.pulseHold * (0.75 + this.pulseConfidence * 0.9));
+    this.pulseEnvelope *= Math.exp(-deltaTime * (decayRate + (1 - this.pulseConfidence) * fibUnit(5, 13)));
     if (
       this.lastPulseTime > 0 &&
-      this.elapsed - this.lastPulseTime > this.expectedPulseInterval * 2.5
+      this.elapsed - this.lastPulseTime > this.expectedPulseInterval * 3.2
     ) {
-      this.pulseConfidence *= Math.exp(-deltaTime * 1.2);
+      this.pulseConfidence *= Math.exp(-deltaTime * 0.85);
     }
 
     if (beat > 0) {
@@ -580,6 +768,12 @@ class RhythmTracker {
       pulseConfidence: this.pulseConfidence,
       pulseEnvelope: this.pulseEnvelope,
       pulseIndex: this.pulseIndex,
+      kickLength: this.kickLength,
+      snareLength: this.snareLength,
+      hatLength: this.hatLength,
+      kickRing: this.kickRing,
+      snareRing: this.snareRing,
+      hatRing: this.hatRing,
       subLevel: bands.sub,
       wavePeak: peak,
       waveEnergy: rms,
@@ -648,17 +842,21 @@ const buildFragmentBasis = (
 
 const surfaceVertexShader = /* glsl */ `
   varying vec3 vNormal;
+  varying vec3 vViewPosition;
   varying vec3 vWorldPosition;
+  varying vec3 vLocalPosition;
   varying vec2 vUv;
 
   void main() {
     vUv = uv;
+    vLocalPosition = position;
+    // normalMatrix は非均一スケール（キックの縦潰れ）込みの正しいビュー空間法線
     vNormal = normalize(normalMatrix * normal);
-
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    vViewPosition = mvPosition.xyz;
     vec4 worldPosition = modelMatrix * vec4(position, 1.0);
     vWorldPosition = worldPosition.xyz;
-
-    gl_Position = projectionMatrix * viewMatrix * worldPosition;
+    gl_Position = projectionMatrix * mvPosition;
   }
 `;
 
@@ -682,7 +880,9 @@ const surfaceFragmentShader = /* glsl */ `
   uniform vec3 uPaletteAccent;
 
   varying vec3 vNormal;
+  varying vec3 vViewPosition;
   varying vec3 vWorldPosition;
+  varying vec3 vLocalPosition;
   varying vec2 vUv;
 
   float hash(vec3 p) {
@@ -712,49 +912,55 @@ const surfaceFragmentShader = /* glsl */ `
   }
 
   void main() {
-    vec3 viewDirection = normalize(cameraPosition - vWorldPosition);
-    float fresnel = pow(1.0 - max(dot(normalize(vNormal), viewDirection), 0.0), 2.45);
+    vec3 normal = normalize(vNormal);
+    vec3 viewDirection = normalize(-vViewPosition);
+    float NdotV = clamp(dot(normal, viewDirection), 0.0, 1.0);
+    // リムと正面の差を小さくして、回転で色味が飛びにくくする
+    float fresnel = pow(1.0 - NdotV, 1.45);
+    float softSheen = pow(NdotV, 1.15) * 0.52;
+    float pearl = clamp(fresnel * 0.58 + softSheen, 0.0, 1.0);
     float frozen = smoothstep(0.0, 1.0, uCompleted);
     float flowTime = uTime * (1.0 - frozen) * (1.0 + uLive * uMelodyFlowAnim);
 
-    float surfaceNoise = noise(vWorldPosition * 4.2 + vec3(0.0, flowTime * 0.34, 0.0));
-    float fineNoise = noise(vWorldPosition * 18.0 - vec3(flowTime * 0.22));
-    float latitude = sin((vUv.y * 34.0) + flowTime * 2.8 + surfaceNoise * 2.2);
-    float meridian = sin((vUv.x * 58.0) - flowTime * 3.6 + fineNoise * 1.6);
+    float surfaceNoise = noise(vLocalPosition * 4.2 + vec3(0.0, flowTime * 0.34, 0.0));
+    float fineNoise = noise(vLocalPosition * 18.0 - vec3(flowTime * 0.22));
+    // オブジェクト局所座標のノイズ（ワールド固定だと回転で模様が滑って飛ぶ）
+    float latitude = sin(vLocalPosition.y * 11.5 + flowTime * 2.8 + surfaceNoise * 2.2);
+    float meridian = sin(dot(vLocalPosition, vec3(9.5, 0.7, 8.2)) - flowTime * 3.6 + fineNoise * 1.6);
     float lineDrive = uLive * (0.62 + uHigh * 0.95);
     float melodyLines = smoothstep(0.72, 0.98, latitude) * lineDrive * uMelodyLine;
     float dataLines = 0.0;
-    float microSignals = smoothstep(0.8, 0.995, meridian) * uHigh * lineDrive * 1.2;
+    float microSignals = smoothstep(0.8, 0.995, meridian) * uHigh * lineDrive * 0.4;
 
     vec3 baseColor = uPaletteColor;
     vec3 electricBlue = uPaletteAccent;
     vec3 melodyGold = vec3(1.0, 0.82, 0.52);
-    vec3 color = baseColor * 0.18;
-    float idleDim = 0.4 + uLive * 0.6;
-    color += electricBlue * (fresnel * (0.95 + uHigh * 1.35)) * idleDim;
+    vec3 color = baseColor * 0.26;
+    float idleDim = 0.48 + uLive * 0.52;
+    color += electricBlue * (pearl * (0.72 + uHigh * 0.75)) * idleDim;
     color += melodyGold * melodyLines;
-    color += melodyGold * fresnel * uMelodyFresnel * lineDrive;
-    color += vec3(0.72, 0.94, 1.0) * microSignals * 0.48;
+    color += melodyGold * pearl * uMelodyFresnel * lineDrive;
+    color += vec3(0.72, 0.94, 1.0) * microSignals * 0.28;
     color += vec3(0.2, 0.42, 0.72) * surfaceNoise * uLive * 0.22;
     color += vec3(0.55, 0.38, 0.22) * surfaceNoise * uMelodyNoise * lineDrive * 0.35;
 
-    float hotVeins = pow(noise(vWorldPosition * 9.5 + vec3(flowTime * 0.5)), 2.8);
-    float ember = pow(noise(vWorldPosition * 22.0 - vec3(flowTime * 0.8)), 4.2);
-    color += vec3(0.45, 0.78, 1.0) * hotVeins * uGlow * (0.35 + uHigh * 0.55);
-    color += vec3(0.92, 0.96, 1.0) * ember * uGlow * uHigh * 0.65;
+    float hotVeins = pow(noise(vLocalPosition * 9.5 + vec3(flowTime * 0.5)), 2.8);
+    float ember = pow(noise(vLocalPosition * 22.0 - vec3(flowTime * 0.8)), 4.2);
+    color += vec3(0.45, 0.78, 1.0) * hotVeins * uGlow * (0.35 + uHigh * 0.55) * mix(0.55, 1.0, pearl);
+    color += vec3(0.92, 0.96, 1.0) * ember * uGlow * uHigh * 0.55 * mix(0.5, 1.0, pearl);
 
     // 透明外殻が強いと「中身が空っぽ」に見えやすいので、fresnel/ラインの寄与を抑える
-    float alpha = uOpacity + fresnel * 0.11 * idleDim + melodyLines * 0.05 + microSignals * 0.05;
-    alpha += hotVeins * uGlow * 0.08 + ember * uGlow * uHigh * 0.06;
-    alpha += lineDrive * fresnel * uMelodyFresnel * 0.06;
+    float alpha = uOpacity + pearl * 0.1 * idleDim + melodyLines * 0.05 + microSignals * 0.03;
+    alpha += hotVeins * uGlow * 0.07 + ember * uGlow * uHigh * 0.05;
+    alpha += lineDrive * pearl * uMelodyFresnel * 0.05;
     alpha *= mix(1.0, 0.58, frozen);
 
-    // vita: 真珠光沢のイリデッセンス（生命スタイル）
+    // vita: 真珠光沢 — 回転で色相が飛ばないよう緩やかに
     if (uVita > 0.5) {
-      vec3 irid = 0.5 + 0.5 * cos(6.28318 * (fresnel * 1.35 + vec3(0.02, 0.18, 0.52)) + flowTime * 0.3);
-      vec3 pearl = irid * mix(vec3(1.0), uPaletteColor * 1.7, 0.55);
-      color = mix(color, color * 0.35 + pearl * (0.4 + uBreath * 0.5), 0.68 * idleDim);
-      alpha += (0.03 + fresnel * 0.11 + uBreath * fresnel * 0.09) * idleDim;
+      vec3 irid = 0.5 + 0.5 * cos(6.28318 * (pearl * 0.55 + vec3(0.02, 0.18, 0.52)) + flowTime * 0.18);
+      vec3 pearlColor = irid * mix(vec3(1.0), uPaletteColor * 1.7, 0.55);
+      color = mix(color, color * 0.45 + pearlColor * (0.35 + uBreath * 0.4), 0.48 * idleDim);
+      alpha += (0.03 + pearl * 0.09 + uBreath * pearl * 0.07) * idleDim;
     }
 
     // petrify: 下から上へ結晶化が進む（変容スタイル）
@@ -762,19 +968,18 @@ const surfaceFragmentShader = /* glsl */ `
       float h = clamp(vWorldPosition.y / 1.9, -1.0, 1.0);
       float front = uPetrify * 2.9 - 1.45;
       float crystal = smoothstep(h - 0.34, h + 0.1, front + surfaceNoise * 0.4);
-      float facets = pow(noise(vWorldPosition * 12.5), 2.2);
+      float facets = pow(noise(vLocalPosition * 12.5), 2.2);
       vec3 crystalColor =
         uPaletteColor * (0.35 + facets * 1.05) +
-        uPaletteAccent * fresnel * 1.35 +
+        uPaletteAccent * pearl * 1.35 +
         vec3(1.0) * pow(facets, 3.0) * 0.65;
       color = mix(color, crystalColor, crystal);
-      alpha = mix(alpha, 0.16 + fresnel * 0.3 + facets * 0.12, crystal);
+      alpha = mix(alpha, 0.16 + pearl * 0.3 + facets * 0.12, crystal);
     }
 
     gl_FragColor = vec4(color, alpha);
   }
 `;
-
 class AudioInput {
   private context: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
@@ -804,6 +1009,20 @@ class AudioInput {
     brightness: 0,
     contrast: 0,
   };
+  /** 曲内ピーク正規化前の帯域。リズム検出はこちらを使う（誤反応防止） */
+  private rhythmBands: AudioBands = {
+    sub: 0,
+    low: 0,
+    mid: 0,
+    melody: 0,
+    high: 0,
+    overall: 0,
+    centroid: 0,
+    bassFocus: 0,
+    melodyFocus: 0,
+    brightness: 0,
+    contrast: 0,
+  };
   private prevWaveRms = 0;
   private prevWavePeak = 0;
   /**
@@ -821,11 +1040,15 @@ class AudioInput {
     overall: 0,
   };
   /** これ未満のピークでは割らない（無音・微小ノイズの増幅を防ぐ下限） */
-  private static readonly BAND_NORM_FLOOR = 0.22;
+  private static readonly BAND_NORM_FLOOR = 0.34;
   /** ピーク追従（速い）— 持続的な大音量に ~1 秒で追いつく */
   private static readonly BAND_NORM_ATTACK = 2.4;
   /** ピーク減衰（非常に遅い; 時定数 ~55 秒）— 曲全体のスケール感を保持する */
   private static readonly BAND_NORM_RELEASE = 1 / 55;
+  /** ピーク正規化の混ぜ具合（1=フルAGC／0=絶対値のみ）。下げると静かな所の過剰反応を抑える */
+  private static readonly BAND_NORM_AMOUNT = 0.52;
+  /** >1 で中域を落としピークを残す（コンプを弱めてダイナミクスを広げる） */
+  private static readonly BAND_NORM_CURVE = 1.28;
   private profile = createEmptyAudioProfile();
   private previousProfileBands: AudioBands | null = null;
   private lowProfileTotal = 0;
@@ -834,6 +1057,7 @@ class AudioInput {
   private overallProfileTotal = 0;
   private centroidProfileTotal = 0;
   private bassFocusProfileTotal = 0;
+  private melodyFocusProfileTotal = 0;
   private brightnessProfileTotal = 0;
   private contrastProfileTotal = 0;
   private variationProfileTotal = 0;
@@ -841,6 +1065,14 @@ class AudioInput {
   private attackEventCount = 0;
   private quietProfileDuration = 0;
   private loudProfileDuration = 0;
+  private earlyProfileSamples = 0;
+  private earlyCentroidProfileTotal = 0;
+  private earlyBrightnessProfileTotal = 0;
+  private earlyMelodyFocusProfileTotal = 0;
+  private lateProfileSamples = 0;
+  private lateCentroidProfileTotal = 0;
+  private lateBrightnessProfileTotal = 0;
+  private lateMelodyFocusProfileTotal = 0;
 
   private connectStream(stream: MediaStream) {
     this.devAudioUrl = null;
@@ -992,8 +1224,10 @@ class AudioInput {
     while (this.simTime + hop <= target + 1e-9 && steps.length < maxSteps) {
       this.simTime += hop;
       const frame = sampleDeterministicFrame(this.timeline, this.simTime);
+      const bands = this.bandsFromDeterministicFrame(frame, hop);
       steps.push({
-        bands: this.bandsFromDeterministicFrame(frame, hop),
+        bands,
+        rhythmBands: { ...this.rhythmBands },
         waveform: this.waveformFromDeterministicFrame(frame),
         deltaTime: hop,
       });
@@ -1181,15 +1415,36 @@ class AudioInput {
         Math.abs(mid - high)) /
       spectralTotal;
 
-    // 帯域ごとのノイズゲート（絶対値）→ 曲内相対正規化（曲のオブジェクト化）
-    // centroid/bassFocus/brightness/contrast は元々スペクトル比率（相対値）なので正規化しない
+    // 帯域ごとのノイズゲート（絶対値）— 少し厳しめにして弱い常時信号を落とす
+    // centroid/bassFocus/brightness/contrast はスペクトル比率（相対値）
+    const gatedSub = smoothstep(0.035, 0.42, sub);
+    const gatedLow = smoothstep(0.04, 0.46, low);
+    const gatedMid = smoothstep(0.03, 0.38, mid);
+    const gatedMelody = smoothstep(0.012, 0.24, melody);
+    const gatedHigh = smoothstep(0.01, 0.18, high);
+    const gatedOverall = smoothstep(0.025, 0.4, overall);
+    // リズム検出は絶対ゲートのみ（曲内ピーク正規化すると静かな所も「大」になり曲とずれる）
+    this.rhythmBands = {
+      sub: gatedSub,
+      low: gatedLow,
+      mid: gatedMid,
+      melody: gatedMelody,
+      high: gatedHigh,
+      overall: gatedOverall,
+      centroid,
+      bassFocus,
+      melodyFocus,
+      brightness: clamp01(brightness),
+      contrast: clamp01(contrast),
+    };
+    // 造形・パレット用は曲内相対正規化
     this.bands = {
-      sub: this.normalizeBandBySongPeak("sub", smoothstep(0.02, 0.38, sub), deltaTime),
-      low: this.normalizeBandBySongPeak("low", smoothstep(0.025, 0.42, low), deltaTime),
-      mid: this.normalizeBandBySongPeak("mid", smoothstep(0.018, 0.34, mid), deltaTime),
-      melody: this.normalizeBandBySongPeak("melody", smoothstep(0.006, 0.2, melody), deltaTime),
-      high: this.normalizeBandBySongPeak("high", smoothstep(0.005, 0.14, high), deltaTime),
-      overall: this.normalizeBandBySongPeak("overall", smoothstep(0.014, 0.36, overall), deltaTime),
+      sub: this.normalizeBandBySongPeak("sub", gatedSub, deltaTime),
+      low: this.normalizeBandBySongPeak("low", gatedLow, deltaTime),
+      mid: this.normalizeBandBySongPeak("mid", gatedMid, deltaTime),
+      melody: this.normalizeBandBySongPeak("melody", gatedMelody, deltaTime),
+      high: this.normalizeBandBySongPeak("high", gatedHigh, deltaTime),
+      overall: this.normalizeBandBySongPeak("overall", gatedOverall, deltaTime),
       centroid,
       bassFocus,
       melodyFocus,
@@ -1202,18 +1457,41 @@ class AudioInput {
     return this.bands;
   }
 
+  getRhythmBands(): AudioBands {
+    return this.rhythmBands;
+  }
+
   getProfile() {
     return this.profile;
   }
 
   private bandsFromDeterministicFrame(frame: DeterministicSpectralFrame, deltaTime: number): AudioBands {
+    const gatedSub = smoothstep(0.035, 0.42, frame.sub);
+    const gatedLow = smoothstep(0.04, 0.46, frame.low);
+    const gatedMid = smoothstep(0.03, 0.38, frame.mid);
+    const gatedMelody = smoothstep(0.012, 0.24, frame.melody);
+    const gatedHigh = smoothstep(0.01, 0.18, frame.high);
+    const gatedOverall = smoothstep(0.025, 0.4, frame.overall);
+    this.rhythmBands = {
+      sub: gatedSub,
+      low: gatedLow,
+      mid: gatedMid,
+      melody: gatedMelody,
+      high: gatedHigh,
+      overall: gatedOverall,
+      centroid: frame.centroid,
+      bassFocus: frame.bassFocus,
+      melodyFocus: frame.melodyFocus,
+      brightness: clamp01(frame.brightness),
+      contrast: clamp01(frame.contrast),
+    };
     this.bands = {
-      sub: this.normalizeBandBySongPeak("sub", smoothstep(0.02, 0.38, frame.sub), deltaTime),
-      low: this.normalizeBandBySongPeak("low", smoothstep(0.025, 0.42, frame.low), deltaTime),
-      mid: this.normalizeBandBySongPeak("mid", smoothstep(0.018, 0.34, frame.mid), deltaTime),
-      melody: this.normalizeBandBySongPeak("melody", smoothstep(0.006, 0.2, frame.melody), deltaTime),
-      high: this.normalizeBandBySongPeak("high", smoothstep(0.005, 0.14, frame.high), deltaTime),
-      overall: this.normalizeBandBySongPeak("overall", smoothstep(0.014, 0.36, frame.overall), deltaTime),
+      sub: this.normalizeBandBySongPeak("sub", gatedSub, deltaTime),
+      low: this.normalizeBandBySongPeak("low", gatedLow, deltaTime),
+      mid: this.normalizeBandBySongPeak("mid", gatedMid, deltaTime),
+      melody: this.normalizeBandBySongPeak("melody", gatedMelody, deltaTime),
+      high: this.normalizeBandBySongPeak("high", gatedHigh, deltaTime),
+      overall: this.normalizeBandBySongPeak("overall", gatedOverall, deltaTime),
       centroid: frame.centroid,
       bassFocus: frame.bassFocus,
       melodyFocus: frame.melodyFocus,
@@ -1240,13 +1518,17 @@ class AudioInput {
    *   曲の静かなパートは静かなまま、帯域間のスケール差だけが吸収される
    * - ピークが下限 (BAND_NORM_FLOOR) 未満の帯域はほぼ素通し — 存在しない帯域を
    *   ノイズから増幅してしまうことを防ぐ
+   * - フルAGCだと常に反応しすぎるため、絶対値を混ぜてコンプを弱める
    */
   private normalizeBandBySongPeak(key: BandNormKey, value: number, deltaTime: number) {
     const peak = this.bandPeakEma[key];
     const rate = value > peak ? AudioInput.BAND_NORM_ATTACK : AudioInput.BAND_NORM_RELEASE;
     this.bandPeakEma[key] = peak + (value - peak) * Math.min(1, deltaTime * rate);
     const denom = Math.max(AudioInput.BAND_NORM_FLOOR, this.bandPeakEma[key]);
-    return clamp01(value / denom);
+    const compressed = clamp01(value / denom);
+    const amount = AudioInput.BAND_NORM_AMOUNT;
+    const blended = compressed * amount + value * (1 - amount);
+    return clamp01(Math.pow(blended, AudioInput.BAND_NORM_CURVE));
   }
 
   private resetBandNormalization() {
@@ -1268,6 +1550,7 @@ class AudioInput {
     this.overallProfileTotal = 0;
     this.centroidProfileTotal = 0;
     this.bassFocusProfileTotal = 0;
+    this.melodyFocusProfileTotal = 0;
     this.brightnessProfileTotal = 0;
     this.contrastProfileTotal = 0;
     this.variationProfileTotal = 0;
@@ -1275,6 +1558,14 @@ class AudioInput {
     this.attackEventCount = 0;
     this.quietProfileDuration = 0;
     this.loudProfileDuration = 0;
+    this.earlyProfileSamples = 0;
+    this.earlyCentroidProfileTotal = 0;
+    this.earlyBrightnessProfileTotal = 0;
+    this.earlyMelodyFocusProfileTotal = 0;
+    this.lateProfileSamples = 0;
+    this.lateCentroidProfileTotal = 0;
+    this.lateBrightnessProfileTotal = 0;
+    this.lateMelodyFocusProfileTotal = 0;
   }
 
   private updateProfile(bands: AudioBands, deltaTime: number) {
@@ -1302,8 +1593,21 @@ class AudioInput {
       this.overallProfileTotal += bands.overall * sampleDuration;
       this.centroidProfileTotal += bands.centroid * sampleDuration;
       this.bassFocusProfileTotal += bands.bassFocus * sampleDuration;
+      this.melodyFocusProfileTotal += bands.melodyFocus * sampleDuration;
       this.brightnessProfileTotal += bands.brightness * sampleDuration;
       this.contrastProfileTotal += bands.contrast * sampleDuration;
+
+      if (this.profile.activeDuration <= 12) {
+        this.earlyProfileSamples += sampleDuration;
+        this.earlyCentroidProfileTotal += bands.centroid * sampleDuration;
+        this.earlyBrightnessProfileTotal += bands.brightness * sampleDuration;
+        this.earlyMelodyFocusProfileTotal += bands.melodyFocus * sampleDuration;
+      } else if (this.profile.activeDuration >= 24) {
+        this.lateProfileSamples += sampleDuration;
+        this.lateCentroidProfileTotal += bands.centroid * sampleDuration;
+        this.lateBrightnessProfileTotal += bands.brightness * sampleDuration;
+        this.lateMelodyFocusProfileTotal += bands.melodyFocus * sampleDuration;
+      }
 
       if (this.previousProfileBands) {
         const spectralShift =
@@ -1342,9 +1646,23 @@ class AudioInput {
     this.profile.midRatio = this.midProfileTotal / bandEnergyTotal;
     this.profile.highRatio = this.highProfileTotal / bandEnergyTotal;
     this.profile.bassDominance = this.bassFocusProfileTotal / activeDuration;
+    this.profile.melodyFocus = this.melodyFocusProfileTotal / activeDuration;
     this.profile.brightness = this.brightnessProfileTotal / activeDuration;
     this.profile.contrast = this.contrastProfileTotal / activeDuration;
     this.profile.centroid = this.centroidProfileTotal / activeDuration;
+    const earlyCentroid = this.earlyCentroidProfileTotal / Math.max(0.0001, this.earlyProfileSamples);
+    const earlyBrightness = this.earlyBrightnessProfileTotal / Math.max(0.0001, this.earlyProfileSamples);
+    const earlyMelodyFocus =
+      this.earlyMelodyFocusProfileTotal / Math.max(0.0001, this.earlyProfileSamples);
+    const lateCentroid = this.lateCentroidProfileTotal / Math.max(0.0001, this.lateProfileSamples);
+    const lateBrightness = this.lateBrightnessProfileTotal / Math.max(0.0001, this.lateProfileSamples);
+    const lateMelodyFocus =
+      this.lateMelodyFocusProfileTotal / Math.max(0.0001, this.lateProfileSamples);
+    this.profile.sectionContrast = clamp01(
+      Math.abs(lateCentroid - earlyCentroid) * 0.9 +
+        Math.abs(lateBrightness - earlyBrightness) * 0.75 +
+        Math.abs(lateMelodyFocus - earlyMelodyFocus) * 1.2,
+    );
     this.profile.variation = this.variationProfileTotal / activeDuration;
     this.profile.attackAmount = this.attackProfileTotal / activeDuration;
     this.profile.attackRate = this.attackEventCount / activeDuration;
@@ -1631,6 +1949,17 @@ class SoundSculpture {
   private snareImpulse = 0;
   private hatImpulse = 0;
   private waveImpulse = 0;
+  /** 「だ！ダダダ！」用の瞬間ピーク押し込み（速いアタック・速い戻り） */
+  private peakPunch = 0;
+  /** スネア専用：表面の横割れフラッシュ */
+  private snareFlash = 0;
+  /** ハット専用：表面のチカチカ */
+  private hatFlash = 0;
+  /** ギター／中域メロディのうねり */
+  private guitarImpulse = 0;
+  private guitarFlash = 0;
+  /** ドラム起点 LIVE ゲート（キック／スネアが鳴っているときだけ大きく動かす） */
+  private drumLiveGate = 0;
   private lastBands: AudioBands | null = null;
   private readonly baseScale = new THREE.Vector3(1, 1, 1);
   /** 周囲 FX をワールド固定にするための逆クォータニオン */
@@ -1678,15 +2007,15 @@ class SoundSculpture {
     if (styleCore.sheen > 0) {
       this.coreMaterial.sheen = styleCore.sheen;
       this.coreMaterial.sheenColor.set(styleCore.sheenColor);
-      this.coreMaterial.sheenRoughness = 0.55;
+      this.coreMaterial.sheenRoughness = 0.82;
     }
     if (styleCore.iridescence > 0) {
       this.coreMaterial.iridescence = styleCore.iridescence;
-      this.coreMaterial.iridescenceIOR = 1.5;
+      this.coreMaterial.iridescenceIOR = 1.35;
     }
     if (styleCore.clearcoat > 0) {
       this.coreMaterial.clearcoat = styleCore.clearcoat;
-      this.coreMaterial.clearcoatRoughness = 0.35;
+      this.coreMaterial.clearcoatRoughness = 0.55;
     }
     if (this.style.membrane.vita) {
       this.installCorePierceShader(this.coreMaterial);
@@ -1729,18 +2058,24 @@ class SoundSculpture {
       vertexShader: surfaceVertexShader,
       fragmentShader: surfaceFragmentShader,
       transparent: true,
-      side: THREE.DoubleSide,
+      // 膜は常にコアの上に乗せる（透明キュー内でも renderOrder で後ろに）
+      side: THREE.FrontSide,
       depthWrite: false,
+      depthTest: true,
       // core と競合しないよう前に出す
       polygonOffset: true,
       polygonOffsetFactor: -2,
       polygonOffsetUnits: -2,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
     });
 
     this.core = new THREE.Mesh(this.geometry, this.coreMaterial);
     this.innerCore = new THREE.Mesh(this.geometry, this.innerCoreMaterial);
     this.surface = new THREE.Mesh(this.surfaceGeometry, this.surfaceMaterial);
+    // 不透明コア → 透明膜の順を固定（回転で前後が入れ替わらないようにする）
+    this.innerCore.renderOrder = 0;
+    this.core.renderOrder = 1;
+    this.surface.renderOrder = 3;
     this.core.castShadow = true;
     // 自己影を受けない（回転で影が張り付いて急に暗くなるのを防ぐ）
     this.core.receiveShadow = false;
@@ -2211,25 +2546,32 @@ class SoundSculpture {
   private pickAnchorKindFromStructure(_bands: AudioBands): GrowthAnchorKind {
     const s = this.currentStructure;
     const sp = this.getSpecies();
-    if (s.events.energyDrop || s.energyLong < 0.12) {
+    const crystalLead = sp.crystalGain - sp.tentacleGain;
+    const tentacleLead = sp.tentacleGain - sp.crystalGain;
+    const aggressiveBias = sp.aggressive - sp.organic;
+    if (s.events.energyDrop || (s.energyLong < 0.1 && s.mineralScore > 0.34)) {
       return "erosion";
     }
-    if (s.events.transientBurst || sp.aggressive > 0.55) {
+    if (
+      s.events.transientBurst ||
+      crystalLead > 0.12 ||
+      (aggressiveBias > 0.08 && s.mineralScore > s.organicScore * 0.9)
+    ) {
       return "crystal";
     }
-    if (sp.organic > 0.55) {
+    if (tentacleLead > 0.08 || (sp.organic > 0.36 && s.organicScore > s.mineralScore * 0.92)) {
       return "tentacle";
     }
-    if (s.events.energySurge && sp.aggressive > 0.45) {
+    if (s.events.energySurge && crystalLead > -0.04) {
       return sp.crystalGain > sp.tentacleGain ? "crystal" : "tentacle";
     }
-    if (s.events.pulseStable) {
+    if (s.events.pulseStable && sp.rhythmic > 0.28) {
       return "lobe";
     }
-    if (sp.aggressive > 0.5) {
+    if (sp.aggressive > 0.38) {
       return "crystal";
     }
-    if (sp.organic > 0.5) {
+    if (sp.organic > 0.34) {
       return "tentacle";
     }
     return "lobe";
@@ -2258,17 +2600,41 @@ class SoundSculpture {
     const organic = sp.organic;
     const mineral = sp.aggressive;
     const rhythmic = sp.rhythmic;
+    const hardBias = clamp01(0.5 + (mineral - organic) * 0.7);
+    const softBias = 1 - hardBias;
     const overallBlend = bands.overall;
     const bandWeights: MorphWeights = {
-      diabolo: fibUnit(3, 21) + overallBlend * fibUnit(5, 21) + organic * fibUnit(8, 21),
-      torus: fibUnit(2, 21) + overallBlend * fibUnit(5, 21) + mineral * fibUnit(5, 21) + rhythmic * fibUnit(8, 21),
-      monolith: fibUnit(5, 21) + overallBlend * fibUnit(8, 21) + mineral * fibUnit(8, 21),
-      coral: fibUnit(5, 21) + organic * fibUnit(13, 21) + bands.contrast * fibUnit(5, 21),
-      spindle: fibUnit(3, 21) + bands.brightness * fibUnit(8, 21) + mineral * fibUnit(8, 21) + s.tension * fibUnit(5, 21),
+      diabolo:
+        fibUnit(3, 21) +
+        overallBlend * fibUnit(5, 21) +
+        softBias * fibUnit(8, 21) +
+        bands.bassFocus * softBias * fibUnit(8, 21),
+      torus:
+        fibUnit(2, 21) +
+        overallBlend * fibUnit(3, 21) +
+        rhythmic * fibUnit(13, 21) +
+        latestRhythm.pulseConfidence * fibUnit(5, 21),
+      monolith:
+        fibUnit(3, 21) +
+        overallBlend * fibUnit(8, 21) +
+        hardBias * fibUnit(8, 21) +
+        bands.bassFocus * hardBias * fibUnit(8, 21) * (1 - bands.brightness),
+      coral:
+        fibUnit(1, 34) +
+        organic * fibUnit(13, 21) +
+        softBias * fibUnit(5, 21) +
+        bands.melodyFocus * fibUnit(8, 21) +
+        bands.contrast * fibUnit(3, 21),
+      spindle:
+        fibUnit(1, 34) +
+        bands.brightness * fibUnit(13, 21) +
+        hardBias * fibUnit(5, 21) +
+        s.tension * fibUnit(8, 21) +
+        latestRhythm.transient * fibUnit(3, 21),
     };
 
     const speciesTarget = speciesMorphTargets(sp);
-    const bandBlend = fibUnit(3, 13);
+    const bandBlend = fibUnit(2, 13);
     const liveOverallBlend = bands.overall * bandBlend;
     const speciesWeights: MorphWeights = {
       diabolo:
@@ -2296,18 +2662,51 @@ class SoundSculpture {
       coral: speciesWeights.coral * c + bandWeights.coral * (1 - c),
       spindle: speciesWeights.spindle * c + bandWeights.spindle * (1 - c),
     };
-    const targetSum =
-      targetWeights.diabolo +
-      targetWeights.torus +
-      targetWeights.monolith +
-      targetWeights.coral +
-      targetWeights.spindle;
-    const inv = 1 / Math.max(0.0001, targetSum);
-    targetWeights.diabolo *= inv;
-    targetWeights.torus *= inv;
-    targetWeights.monolith *= inv;
-    targetWeights.coral *= inv;
-    targetWeights.spindle *= inv;
+
+    // soft は coral/diabolo、hard は monolith/spindle、pulse は torus へ分岐（共有ルール）
+    const mineralLead = clamp01(s.mineralScore - s.organicScore + 0.5);
+    const softRatio = organic / Math.max(0.001, organic + mineral);
+    const softLead = Math.max(0, softRatio - 0.38);
+    const hardLead = Math.max(0, 0.5 - softRatio);
+    const liveHard = clamp01(
+      hardLead * 0.55 +
+        mineralLead * 0.16 +
+        bands.brightness * 0.24 +
+        bands.bassFocus * hardBias * 0.08 +
+        s.tension * 0.12 +
+        latestRhythm.transient * 0.08 -
+        softLead * 0.55 -
+        bands.melodyFocus * 0.3 -
+        softBias * 0.12,
+    );
+    const liveSoft = 1 - liveHard;
+    const coralCue = clamp01(
+      organic * 0.48 + bands.melodyFocus * 0.32 + bands.contrast * 0.22 + softLead * 0.35,
+    );
+    const brightGate = smoothstep(0.1, 0.22, bands.brightness);
+    const tipGateLive = clamp01(
+      brightGate * 0.45 + latestRhythm.transient * 0.4 + s.tension * 0.2,
+    );
+    const spindleCue = clamp01(tipGateLive * liveHard);
+    const massCue = clamp01(
+      liveHard * 0.55 +
+        bands.bassFocus * hardBias * 0.5 * (1 - tipGateLive * 0.65) +
+        (1 - brightGate) * 0.2,
+    );
+    const torusCue = clamp01(
+      rhythmic * 0.58 +
+        latestRhythm.pulseConfidence * 0.35 -
+        Math.max(massCue, spindleCue) * 0.3,
+    );
+    const diaboloCue = clamp01(
+      liveSoft * 0.4 + bands.bassFocus * softBias * 0.35 + (1 - coralCue) * softBias * 0.35,
+    );
+
+    targetWeights.monolith *= 0.5 + liveHard * 0.65 + massCue * 1.08;
+    targetWeights.spindle *= 0.34 + liveHard * 0.38 + spindleCue * 2.0;
+    targetWeights.diabolo *= 0.5 + liveSoft * 0.7 + diaboloCue * 0.95;
+    targetWeights.coral *= 0.42 + liveSoft * 0.65 + coralCue * 1.25;
+    targetWeights.torus *= 0.38 + torusCue * 1.35 + rhythmic * 0.32;
 
     // アルゴリズム差を大域シルエットにも残す
     const algoBias = getGrowthAlgoSilhouetteBias();
@@ -2316,6 +2715,11 @@ class SoundSculpture {
     targetWeights.monolith *= algoBias.monolith;
     targetWeights.coral *= algoBias.coral;
     targetWeights.spindle *= algoBias.spindle;
+    targetWeights.diabolo = Math.pow(targetWeights.diabolo, 1.12);
+    targetWeights.torus = Math.pow(targetWeights.torus, 1.12);
+    targetWeights.monolith = Math.pow(targetWeights.monolith, 1.12);
+    targetWeights.coral = Math.pow(targetWeights.coral, 1.12);
+    targetWeights.spindle = Math.pow(targetWeights.spindle, 1.12);
     const biasedSum =
       targetWeights.diabolo +
       targetWeights.torus +
@@ -2486,13 +2890,17 @@ class SoundSculpture {
 
     const innerBase = this.style.membrane.vita ? 0.9 : 1;
     if (!this.completed) {
-      const pulseFloor = runtimeTuning.pulseConfidenceFloor;
-      const syncPulse =
-        latestRhythm.pulseEnvelope * (pulseFloor + latestRhythm.pulseConfidence * (1 - pulseFloor));
-      const kickPulse =
-        1 + Math.max(this.kickImpulse, syncPulse) * fibUnit(8, 13) * runtimeTuning.liveLow;
-      this.innerCore.scale.setScalar(innerBase * kickPulse);
+      // ヒットを先に反映してから芯を膨らませる（同フレームで「だ！」を見せる）
       this.applyRhythmImpulses(deltaTime, bands);
+      // 大きな芯の膨らみはビートうなずき + キック／スネア
+      const groove = this.getGrooveBob();
+      const kickPulse =
+        1 +
+        (groove * 0.28 + this.kickImpulse * 0.4 + this.peakPunch * 0.18 + this.snareImpulse * 0.08) *
+          fibUnit(8, 13) *
+          runtimeTuning.liveLow *
+          SoundSculpture.LIVE_MOTION;
+      this.innerCore.scale.setScalar(innerBase * kickPulse);
     } else {
       this.updateAfterlife(deltaTime);
     }
@@ -2592,116 +3000,245 @@ class SoundSculpture {
     }
   }
 
-  /** イベントを「必ず」見せるための直結トリガ。 */
-  private applyRhythmImpulses(deltaTime: number, bands: AudioBands) {
-    this.kickImpulse *= Math.exp(-7.2 * deltaTime);
-    this.snareImpulse *= Math.exp(-8 * deltaTime);
-    this.hatImpulse *= Math.exp(-13 * deltaTime);
-    this.waveImpulse *= Math.exp(-10 * deltaTime);
+  /**
+   * 人がのれるビート表現:
+   * - 土台 = BPMパルスのうなずき（で、で、で…）
+   * - アクセント = キック縦／スネア横
+   * 帯域の常時ゆらぎやハットで起点を濁さない。
+   */
+  private refreshGrooveDrive() {
+    const r = latestRhythm;
+    const grooveBob = this.getGrooveBob();
+    this.drumLiveGate = clamp01(
+      r.pulseConfidence * 0.7 +
+        grooveBob * 0.55 +
+        this.kickImpulse * 0.55 +
+        this.snareImpulse * 0.4 +
+        this.peakPunch * 0.35 +
+        r.pulseEnvelope * 0.25,
+    );
+  }
 
+  /** パルス位相から「うなずき」量。phase=0 が拍、その後回復 → で、で、で */
+  private getGrooveBob() {
+    const r = latestRhythm;
+    if (r.pulseConfidence < 0.12) {
+      return 0;
+    }
+    const recover = 0.52;
+    const bob = Math.pow(Math.max(0, 1 - r.pulsePhase / recover), 1.35);
+    return clamp01(bob * (0.22 + r.pulseConfidence * 0.4) * (0.28 + r.pulseEnvelope * 0.45));
+  }
+
+  /** LIVE 全体の動きゲイン（強弱の天井） */
+  private static readonly LIVE_MOTION = 0.68;
+
+  /** ビート／ギター／ハイがいるほど LIVE を開く */
+  private getDrumLiveMul(floor = 0.12) {
+    const conf = latestRhythm.pulseConfidence;
+    const color =
+      this.guitarImpulse * 0.5 +
+      this.waveImpulse * 0.35 +
+      this.hatFlash * 0.12 +
+      this.snareFlash * 0.18;
+    return floor + clamp01(conf * 0.5 + this.drumLiveGate * 0.22 + color * 0.55) * (1 - floor);
+  }
+
+  /** ヒット強度 0–1 → 弱い音は小さく、強い音だけ大きく */
+  private hitDynamics(strength: number, downbeat = false) {
+    const s = clamp01(strength);
+    const shaped = Math.pow(s, 1.35);
+    return clamp01(shaped * (downbeat ? 1.15 : 1) * 0.55 + shaped * 0.45);
+  }
+
+  private applyRhythmImpulses(deltaTime: number, bands: AudioBands) {
     const r = latestRhythm;
     const s = this.currentStructure;
+    const M = SoundSculpture.LIVE_MOTION;
+    const kickDecay = 5.2 + (1 - clamp01(r.kickLength / 0.35)) * 6.8;
+    const snareDecay = 4.4 + (1 - clamp01(r.snareLength / 0.22)) * 6.2;
+    const hatDecay = 8.0 + (1 - clamp01(r.hatLength / 0.28)) * 9.0;
+    this.kickImpulse *= Math.exp(-kickDecay * deltaTime);
+    this.snareImpulse *= Math.exp(-snareDecay * deltaTime);
+    this.hatImpulse *= Math.exp(-hatDecay * deltaTime);
+    this.waveImpulse *= Math.exp(-8.5 * deltaTime);
+    this.peakPunch *= Math.exp(-12 * deltaTime);
+    this.snareFlash *= Math.exp(-11 * deltaTime);
+    this.hatFlash *= Math.exp(-14 * deltaTime);
+    this.guitarImpulse *= Math.exp(-3.2 * deltaTime);
+    this.guitarFlash *= Math.exp(-6.5 * deltaTime);
+    // ring の継続は弱め（常時フルスイングに見えないように）
+    this.kickImpulse = Math.max(this.kickImpulse, r.kickRing * 0.06);
+    this.snareImpulse = Math.max(this.snareImpulse, r.snareRing * 0.1);
+    this.snareFlash = Math.max(this.snareFlash, r.snareRing * 0.08);
+    this.hatImpulse = Math.max(this.hatImpulse, r.hatRing * 0.08);
+    this.hatFlash = Math.max(this.hatFlash, r.hatRing * 0.1);
 
+    // --- kick: 強弱つきの「で」---
     if (r.kickIndex !== this.lastKickIndexApplied) {
       this.lastKickIndexApplied = r.kickIndex;
       if (r.kick > 0) {
-        this.kickImpulse = Math.min(1, this.kickImpulse + r.kick * 5.5);
-        if (s.phase !== "embryo" && r.kick > 0.08) {
-          this.trySpawnStructureAnchor("lobe", bands, 0.85);
+        const dyn = this.hitDynamics(r.kick, r.downbeat);
+        const lengthBoost = 0.7 + clamp01(r.kickLength / 0.28) * 0.7;
+        this.kickImpulse = Math.min(1, this.kickImpulse + dyn * 4.2 * lengthBoost * M);
+        this.peakPunch = Math.min(0.75, this.peakPunch + dyn * (0.28 + (r.downbeat ? 0.18 : 0)));
+        if (s.phase !== "embryo" && dyn > 0.35) {
+          this.trySpawnStructureAnchor("lobe", bands, 0.7);
         }
       }
     }
 
+    // --- snare ---
     if (r.snareIndex !== this.lastSnareIndexApplied) {
       this.lastSnareIndexApplied = r.snareIndex;
       if (r.snare > 0) {
-        this.snareImpulse = Math.min(1, this.snareImpulse + r.snare * 3.6);
+        const dyn = this.hitDynamics(r.snare);
+        const lengthBoost = 0.6 + clamp01(r.snareLength / 0.18) * 0.65;
+        this.snareImpulse = Math.min(1, this.snareImpulse + dyn * 3.2 * lengthBoost * M);
+        this.snareFlash = Math.min(1, this.snareFlash + dyn * 0.55);
+        this.peakPunch = Math.min(0.6, this.peakPunch + dyn * 0.12);
         this.fragmentSpawnCooldown = 0;
-        this.separationTendency = Math.min(1, this.separationTendency + 0.18 + r.snare * 0.45);
-        if (s.tension > 0.35) {
-          this.trySpawnStructureAnchor(this.pickAnchorKindFromStructure(bands), bands, 1.1);
+        this.separationTendency = Math.min(1, this.separationTendency + dyn * 0.35);
+        if (s.phase !== "embryo" && dyn > 0.4) {
+          this.trySpawnStructureAnchor(this.pickAnchorKindFromStructure(bands), bands, 0.75);
         }
       }
     }
 
+    // --- hat: スパークルは弱めに戻す（連打は維持）---
     if (r.hatIndex !== this.lastHatIndexApplied) {
       this.lastHatIndexApplied = r.hatIndex;
-      if (r.hat > 0 && s.detailRamp > 0.35) {
-        this.hatImpulse = Math.min(1, this.hatImpulse + r.hat * 5.5);
-        const burst = Math.min(8, 2 + Math.floor(r.hat * 12 * s.detailRamp));
+      if (r.hat > 0) {
+        const dyn = this.hitDynamics(r.hat);
+        const lengthBoost = 0.7 + clamp01(r.hatLength / 0.22) * 0.85;
+        this.hatImpulse = Math.min(1, this.hatImpulse + dyn * 2.8 * lengthBoost * M);
+        this.hatFlash = Math.min(1, this.hatFlash + dyn * 0.48);
+        const burst = Math.min(
+          6,
+          1 +
+            Math.floor(
+              r.hat * 5 * (0.65 + clamp01(r.hatLength / 0.2) * 0.85) * (0.45 + s.detailRamp * 0.45),
+            ),
+        );
         for (let i = 0; i < burst; i += 1) {
           this.spawnSparkle({
             ...bands,
-            high: Math.min(1, bands.high + 0.35),
-            brightness: Math.min(1, bands.brightness + 0.28),
+            high: Math.min(1, bands.high + 0.3),
+            brightness: Math.min(1, bands.brightness + 0.22),
           });
         }
       }
     }
 
+    // --- cymbal: 一閃＋スパークル（ハットより少なめ）---
     if (r.transientIndex !== this.lastTransientIndexApplied) {
       this.lastTransientIndexApplied = r.transientIndex;
-      if (r.transient > 0 && s.detailRamp > fibUnit(8, 21)) {
-        this.waveImpulse = Math.min(1, this.waveImpulse + r.transient * fibRatio(8, 3));
-        this.hatImpulse = Math.min(1, this.hatImpulse + r.transient * fibRatio(5, 3));
-        if (s.mineralScore > fibUnit(8, 21)) {
-          this.trySpawnStructureAnchor("crystal", bands, fibUnit(8, 13));
+      if (r.transient > 0) {
+        const dyn = this.hitDynamics(r.transient);
+        this.waveImpulse = Math.min(1, this.waveImpulse + dyn * 0.85);
+        this.hatFlash = Math.min(1, this.hatFlash + dyn * 0.28);
+        const burst = Math.min(5, 1 + Math.floor(dyn * 5));
+        for (let i = 0; i < burst; i += 1) {
+          this.spawnSparkle({
+            ...bands,
+            high: Math.min(1, bands.high + 0.45),
+            brightness: Math.min(1, bands.brightness + 0.4),
+          });
         }
+        if (s.mineralScore > fibUnit(8, 21) && dyn > 0.55) {
+          this.trySpawnStructureAnchor("crystal", bands, fibUnit(5, 13));
+        }
+      }
+    }
+
+    // --- guitar: ソロ時（中域優位・キック疎）ははっきりうねる ---
+    if (bandSoloAllows("mid") || bandSoloAllows("high")) {
+      const midLead = Math.max(bands.mid, bands.melody * 1.2);
+      const soloBias = clamp01(
+        midLead * 1.15 +
+          bands.melodyFocus * 0.9 -
+          bands.bassFocus * 0.75 -
+          this.kickImpulse * 0.85 -
+          r.kickRing * 0.5,
+      );
+      const guitarBody = clamp01(midLead * (0.25 + bands.melodyFocus * 0.45 + soloBias * 0.85));
+      const kickMute = 1 - clamp01(this.kickImpulse * 0.85 + r.kickRing * 0.4);
+      const soloGain = 0.55 + soloBias * 1.35;
+      this.guitarImpulse = Math.max(
+        this.guitarImpulse,
+        guitarBody * kickMute * soloGain * 0.85,
+      );
+      if (guitarBody > 0.1 && (soloBias > 0.35 || (r.kick < 0.03 && r.snare < 0.04))) {
+        this.guitarFlash = Math.min(1, this.guitarFlash + guitarBody * (0.18 + soloBias * 0.4));
+      }
+      if (r.snare > 0.05 && bands.melodyFocus > 0.22) {
+        this.guitarFlash = Math.min(1, this.guitarFlash + r.snare * 0.28);
+        this.guitarImpulse = Math.min(1, this.guitarImpulse + r.snare * 0.2);
       }
     }
 
     if (r.pulseIndex !== this.lastPulseIndexApplied) {
       this.lastPulseIndexApplied = r.pulseIndex;
-      this.kickImpulse = Math.min(1, this.kickImpulse + fibUnit(8, 13));
     }
 
-    // 離散パルス型の呼吸 — 連続 low 成分は使わない
-    if (bandSoloAllows("low")) {
-      const t = runtimeTuning;
-      const pulseFloor = t.pulseConfidenceFloor;
-      const pulseSync =
-        latestRhythm.pulseEnvelope * (pulseFloor + latestRhythm.pulseConfidence * (1 - pulseFloor));
-      const kickBoost = this.kickImpulse;
-      const transientBoost =
-        Math.max(r.transient, this.waveImpulse * fibUnit(5, 8)) *
-        fibUnit(8, 13) *
-        (fibUnit(5, 8) + this.getSpecies().aggressive * fibUnit(8, 13));
-      const rhythmSqueeze = (pulseSync + kickBoost * fibUnit(8, 13) + transientBoost) * t.liveLow * t.pulseSqueeze;
-      if (rhythmSqueeze > fibUnit(2, 21)) {
-        const k = rhythmSqueeze;
-        const targetXz = 1 + k * fibUnit(8, 21);
-        const targetY = 1 - k * fibUnit(5, 21);
-        const follow = Math.min(1, deltaTime * fib(8));
+    this.refreshGrooveDrive();
+
+    // スケール: 全体控えめ＋強弱。ハットはスケールに乗せない
+    if (bandSoloAllows("low") || bandSoloAllows("mid") || bandSoloAllows("high")) {
+      const groove = this.getGrooveBob() * M;
+      const conf = r.pulseConfidence;
+      const kickAccent = (this.kickImpulse * 0.65 + this.peakPunch * 0.28) * M;
+      const snareCrack = (this.snareImpulse * 0.55 + this.snareFlash * 0.35) * M;
+      const guitarWobble = (this.guitarImpulse * 0.4 + this.guitarFlash * 0.3) * M;
+      const grooveAmp = 0.045 + conf * 0.028;
+      const targetY = 1 - Math.min(0.12, groove * grooveAmp * 1.35 + kickAccent * 0.085);
+      const targetXz =
+        1 + Math.min(0.09, snareCrack * 0.07 + groove * 0.015 + guitarWobble * 0.04);
+      const onBeat = groove > 0.18 || kickAccent > 0.2 || snareCrack > 0.2;
+      const attack = onBeat ? 26 : this.guitarFlash > 0.25 ? 12 : 9;
+      const follow = Math.min(1, deltaTime * attack);
+      if (bandSoloAllows("low")) {
+        this.group.scale.y += (this.baseScale.y * targetY - this.group.scale.y) * follow;
+      }
+      if (bandSoloAllows("mid") || bandSoloAllows("low")) {
         this.group.scale.x += (this.baseScale.x * targetXz - this.group.scale.x) * follow;
         this.group.scale.z += (this.baseScale.z * targetXz - this.group.scale.z) * follow;
-        this.group.scale.y += (this.baseScale.y * targetY - this.group.scale.y) * follow;
-      } else if (getBandSoloMode() !== "low") {
-        this.group.scale.lerp(this.baseScale, Math.min(1, deltaTime * fib(5)));
+      }
+      if (!bandSoloAllows("low") && !bandSoloAllows("mid")) {
+        this.group.scale.lerp(this.baseScale, Math.min(1, deltaTime * 8));
       }
     } else {
       this.group.scale.lerp(this.baseScale, Math.min(1, deltaTime * 7));
     }
 
-    const shake = Math.max(this.hatImpulse, this.waveImpulse * 0.5) * s.detailRamp;
-    if (
-      shake > 0.001 &&
-      s.phase === "metamorphosis" &&
-      latestRhythm.pulseConfidence > 0.45
-    ) {
-      const amount = shake * deltaTime * 0.1;
+    // 表面: ギター／シンバル／スネア中心。ハットはごく弱く
+    const surfaceShake =
+      this.snareFlash * 0.28 +
+      this.snareImpulse * 0.14 +
+      this.waveImpulse * 0.45 +
+      this.guitarImpulse * 0.5 +
+      this.guitarFlash * 0.4 +
+      this.hatFlash * 0.12 +
+      this.hatImpulse * 0.08 +
+      this.getGrooveBob() * 0.04;
+    if (surfaceShake > 0.055 && !this.completed && !this.shapeHold) {
+      const amount = surfaceShake * deltaTime * 0.055 * M;
       const salt = this.formingTime * 3.2 + this.morphologySeed;
       const flowStride = getHeavyGrowthFlowStride();
       const flowPhase = Math.floor(this.formingTime * 20) % flowStride;
       for (let i = 0; i < this.accumulated.length; i += 1) {
-        if ((i + flowPhase) % flowStride !== 0) {
-          continue;
-        }
+        if ((i + flowPhase) % flowStride !== 0) continue;
         const idx = i * 3;
-        const bx = this.basePositions[idx];
-        const by = this.basePositions[idx + 1];
-        const bz = this.basePositions[idx + 2];
-        growthFlow(bx * 2.8, by * 2.8, bz * 2.8, salt, this._curlOut);
-        const boost = flowStride;
+        growthFlow(
+          this.basePositions[idx] * 2.8,
+          this.basePositions[idx + 1] * 2.8,
+          this.basePositions[idx + 2] * 2.8,
+          salt,
+          this._curlOut,
+        );
+        const boost =
+          flowStride *
+          (0.45 + this.guitarFlash * 0.4 + this.waveImpulse * 0.35 + this.snareFlash * 0.22);
         this.flowField[idx] += this._curlOut.x * amount * boost;
         this.flowField[idx + 1] += this._curlOut.y * amount * boost;
         this.flowField[idx + 2] += this._curlOut.z * amount * boost;
@@ -2754,6 +3291,12 @@ class SoundSculpture {
     this.snareImpulse = 0;
     this.hatImpulse = 0;
     this.waveImpulse = 0;
+    this.peakPunch = 0;
+    this.snareFlash = 0;
+    this.hatFlash = 0;
+    this.guitarImpulse = 0;
+    this.guitarFlash = 0;
+    this.drumLiveGate = 0;
     this.membranePressureImpulse = 0;
     const palette = this.completionPalette ?? NEUTRAL_SCULPTURE_PALETTE;
     const uniforms = this.surfaceMaterial.uniforms;
@@ -2965,6 +3508,12 @@ class SoundSculpture {
     this.snareImpulse = 0;
     this.hatImpulse = 0;
     this.waveImpulse = 0;
+    this.peakPunch = 0;
+    this.snareFlash = 0;
+    this.hatFlash = 0;
+    this.guitarImpulse = 0;
+    this.guitarFlash = 0;
+    this.drumLiveGate = 0;
     this.previousBandsForSeparation = null;
 
     this.accumulated.fill(0);
@@ -3450,19 +3999,28 @@ class SoundSculpture {
     }
 
     // 膜の質感が粘土へ移るのは控えめに（全体が発光体に見えない範囲）
+    // 回転で色が飛ぶ原因になる clearcoat / sheen / iridescence は、既定が 0 のときは足さない
     const membraneBleed = this.membranePressureImpulse * 0.35;
-    this.coreMaterial.clearcoat = Math.min(
-      1,
-      this.baseCoreClearcoat + membraneBleed * 0.25,
-    );
-    this.coreMaterial.clearcoatRoughness = Math.max(0.2, 0.35 - membraneBleed * 0.08);
-    if (this.baseCoreSheen > 0 || membraneBleed > 0.08) {
-      this.coreMaterial.sheen = Math.min(1, this.baseCoreSheen + membraneBleed * 0.2);
-      this.coreMaterial.sheenRoughness = Math.max(0.35, 0.55 - membraneBleed * 0.08);
+    if (this.baseCoreClearcoat > 0) {
+      this.coreMaterial.clearcoat = Math.min(
+        1,
+        this.baseCoreClearcoat + membraneBleed * 0.25,
+      );
+      this.coreMaterial.clearcoatRoughness = Math.max(0.2, 0.55 - membraneBleed * 0.08);
+    } else {
+      this.coreMaterial.clearcoat = 0;
     }
-    if (this.baseCoreIridescence > 0 || membraneBleed > 0.12) {
+    if (this.baseCoreSheen > 0) {
+      this.coreMaterial.sheen = Math.min(1, this.baseCoreSheen + membraneBleed * 0.2);
+      this.coreMaterial.sheenRoughness = Math.max(0.55, 0.82 - membraneBleed * 0.08);
+    } else {
+      this.coreMaterial.sheen = 0;
+    }
+    if (this.baseCoreIridescence > 0) {
       this.coreMaterial.iridescence = Math.min(1, this.baseCoreIridescence + membraneBleed * 0.15);
-      this.coreMaterial.iridescenceIOR = 1.5;
+      this.coreMaterial.iridescenceIOR = 1.35;
+    } else {
+      this.coreMaterial.iridescence = 0;
     }
     const baseRoughness =
       fibRatio(11, 12) +
@@ -3498,10 +4056,18 @@ class SoundSculpture {
       return this.hasActiveClickWobble() ? this.idleWobbleAmp * 5 : 0;
     }
     return (
-      w.high * t.liveHigh * fibRatio(8, 5) * audioPart +
-      this.getSpecies().membraneGain * fibUnit(5, 13) * audioPart +
-      (this.hatImpulse * fibUnit(8, 13) + this.waveImpulse * fibUnit(5, 13)) * t.liveHigh +
-      // アイドル時も膜が微かに生きて見えるように（vita）
+      this.getGrooveBob() * 0.35 +
+      this.kickImpulse * 0.22 +
+      this.peakPunch * 0.15 +
+      this.snareImpulse * 0.12 +
+      this.snareFlash * 0.08 +
+      this.hatImpulse * 0.22 +
+      this.hatFlash * 0.2 +
+      this.waveImpulse * 0.55 +
+      this.guitarImpulse * 0.45 +
+      this.guitarFlash * 0.35 +
+      w.high * t.liveHigh * fibRatio(3, 13) * audioPart * this.getDrumLiveMul(0.12) +
+      this.getSpecies().membraneGain * fibUnit(2, 21) * audioPart +
       this.idleWobbleAmp * 5
     );
   }
@@ -3519,9 +4085,18 @@ class SoundSculpture {
     }
     return (
       (this.completed ? 0.35 : 0.2) +
-      bands.overall * t.liveHigh * 1.1 * audioPart +
-      this.separationTendency * 0.25 * audioPart +
-      (this.hatImpulse * 0.5 + this.waveImpulse * 0.28) * t.liveHigh +
+      this.getGrooveBob() * 0.2 +
+      this.kickImpulse * 0.16 +
+      this.peakPunch * 0.1 +
+      this.snareImpulse * 0.12 +
+      this.snareFlash * 0.1 +
+      this.hatImpulse * 0.18 +
+      this.hatFlash * 0.16 +
+      this.waveImpulse * 0.5 +
+      this.guitarImpulse * 0.35 +
+      this.guitarFlash * 0.28 +
+      bands.overall * t.liveHigh * 0.08 * audioPart * this.getDrumLiveMul(0.12) +
+      this.separationTendency * 0.06 * audioPart +
       this.idleWobbleAmp * (3.2 + Math.sin(this.idleTime * 0.55) * 1.2)
     );
   }
@@ -3567,11 +4142,8 @@ class SoundSculpture {
     uniforms.uLive.value = this.getMembraneLiveTarget(bands);
     uniforms.uGlow.value = this.getMembraneGlowTarget(bands);
 
-    const r = latestRhythm;
-    const pulseFloor = t.pulseConfidenceFloor;
-    const pulseSync = r.pulseEnvelope * (pulseFloor + r.pulseConfidence * (1 - pulseFloor));
     const impulsePart =
-      (this.kickImpulse + pulseSync * fibUnit(8, 13) + r.transient * fibUnit(5, 21)) *
+      (this.getGrooveBob() * 0.5 + this.kickImpulse * 0.55 + this.snareImpulse * 0.18 + this.peakPunch * 0.22) *
       t.liveLow *
       fibUnit(8, 21) *
       t.pulseSqueeze;
@@ -3747,9 +4319,9 @@ class SoundSculpture {
       growthPattern(px * 1.15, py * 1.08, pz * 1.12, this.morphologySeed + this.formingTime * 0.16) *
       this.formDevelopment;
     const coralBump = 1 + coralNoise * 0.26 * (0.45 + this.formTwist * 0.08);
-    sx *= blendScale(coralBump - 1, Math.max(w.coral, 0.35));
-    sy *= blendScale(coralBump - 1, Math.max(w.coral, 0.35));
-    sz *= blendScale(coralBump - 1, Math.max(w.coral, 0.35));
+    sx *= blendScale(coralBump - 1, Math.max(w.coral, 0.18));
+    sy *= blendScale(coralBump - 1, Math.max(w.coral, 0.18));
+    sz *= blendScale(coralBump - 1, Math.max(w.coral, 0.18));
 
     // アルゴリズム固有の半径うねり（coral 以外でも常に薄く効かせる）
     const algoWarp =
@@ -3799,10 +4371,11 @@ class SoundSculpture {
     const formation = this.getFormationScale();
     const detail = this.getDetailScale();
     const liveW = this.getBandLiveWeights(bands);
+    const drumMul = this.getDrumLiveMul(0.1);
     const liveGainK = 0.38;
-    const liveGainLow = 0.48 + liveW.low * t.liveLow * liveGainK;
-    const liveGainMid = 0.48 + liveW.mid * t.liveMid * liveGainK;
-    const liveGainHigh = 0.48 + liveW.high * t.liveHigh * liveGainK;
+    const liveGainLow = (0.48 + liveW.low * t.liveLow * liveGainK) * drumMul;
+    const liveGainMid = (0.48 + liveW.mid * t.liveMid * liveGainK) * drumMul;
+    const liveGainHigh = (0.48 + liveW.high * t.liveHigh * liveGainK) * (0.2 + drumMul * 0.8);
     const lowPressure = Math.max(0, Math.max(bands.sub, bands.low) - 0.025);
     const midPressure = Math.max(0, Math.max(bands.mid, bands.melody) - 0.025);
     const highPressure = Math.max(0, bands.high - 0.025);
@@ -4112,7 +4685,7 @@ class SoundSculpture {
       seed,
     );
     const randomDir = new THREE.Vector3(placed.x, placed.y, placed.z);
-    const axisBlend = 0.35 + s.density * 0.25;
+    const axisBlend = 0.14 + s.density * 0.16 + s.mineralScore * 0.08;
     const position = randomDir.lerp(this.morphAxis, axisBlend).normalize();
 
     let direction: THREE.Vector3;
@@ -4417,7 +4990,7 @@ class SoundSculpture {
       const deformSalt = this.vertexDeformSalt(i);
 
       const lowBleed = growthModulateScalar(
-        this.liveOffset[i] * w.low * t.liveLow * rate * bleedRate,
+        this.liveOffset[i] * w.low * t.liveLow * rate * bleedRate * this.getDrumLiveMul(0.15),
         nx,
         ny,
         nz,
@@ -4429,7 +5002,13 @@ class SoundSculpture {
       }
 
       const midBleed = growthModulateScalar(
-        this.surfaceLiveOffset[i] * w.mid * t.liveMid * rate * bleedRate,
+        (this.surfaceLiveOffset[i] * w.mid * t.liveMid +
+          this.snareFlash * 0.45 +
+          this.snareImpulse * 0.22 +
+          this.guitarImpulse * 0.55 +
+          this.guitarFlash * 0.4) *
+          rate *
+          bleedRate,
         nx,
         ny,
         nz,
@@ -4440,7 +5019,11 @@ class SoundSculpture {
         this.midBumps[i] = this.accumulateWithMemory(this.midBumps[i], midBleed, -0.42, 0.26);
       }
 
-      const highDrive = w.high * t.liveHigh + this.hatImpulse * 0.42;
+      const highDrive =
+        w.high * t.liveHigh * 0.85 +
+        this.hatImpulse * 0.5 +
+        this.hatFlash * 0.55 +
+        this.waveImpulse * 0.6;
       const highBleed = growthModulateScalar(
         highDrive * rate * bleedRate * growthPattern(nx, ny, nz, this.formingTime * 2.1 + i * 0.03),
         nx,
@@ -4579,7 +5162,12 @@ class SoundSculpture {
       const nz = z / radius;
       const pulseRaw =
         this.completed ? 0 : growthPattern(nx, ny, nz, this.formingTime * 1.6) * (
-          (this.kickImpulse * 0.42 + latestRhythm.pulseEnvelope * latestRhythm.pulseConfidence * 0.38) * t.liveLow
+          (this.getGrooveBob() * 0.45 +
+            this.kickImpulse * 0.45 +
+            this.peakPunch * 0.25 +
+            this.snareImpulse * 0.18 +
+            this.snareFlash * 0.08) *
+          t.liveLow
         );
       const pulse = growthModulateScalar(
         pulseRaw,
@@ -4592,7 +5180,8 @@ class SoundSculpture {
 
       // 完成／ホールド中は liveOffset を動かさない（最終形を維持）
       if (!this.completed && !this.shapeHold) {
-        this.liveOffset[i] += (pulse - this.liveOffset[i]) * Math.min(1, deltaTime * 8);
+        const liveFollow = 6 + this.drumLiveGate * 10;
+        this.liveOffset[i] += (pulse - this.liveOffset[i]) * Math.min(1, deltaTime * liveFollow);
       }
 
       const carve = this.detachmentCarve[i];
@@ -4702,14 +5291,14 @@ class SoundSculpture {
   }
 
   /**
-   * 突き抜け頂点だけ半透明＋発光するためのコアシェーダ拡張（誇張版）。
-   * core / innerCore の両方に入れる（同一ジオメトリのため片方だけだと隠れる）。
+   * 突き抜け先端の発光だけを足す。透明にすると膜と同じ透明キューに入り、
+   * 回転で描画順が入れ替わってフレネルを上書きし「レイヤーが変わった」ように見える。
    */
   private installCorePierceShader(material: THREE.MeshPhysicalMaterial) {
-    material.transparent = true;
+    material.transparent = false;
     material.opacity = 1;
-    // 膜内の粘土は通常の不透明感を保ち、突き抜け先端だけ透過＋発光
     material.depthWrite = true;
+    material.depthTest = true;
     material.vertexColors = true;
     material.color.set(0xffffff);
     material.onBeforeCompile = (shader) => {
@@ -4741,10 +5330,10 @@ class SoundSculpture {
         .replace(
           "vec4 diffuseColor = vec4( diffuse, opacity );",
           /* glsl */ `
-          // 真の突き抜けだけ弱い発光。膜内は頂点色の粘土質のまま
+          // 透明度は変えない（膜とのソート競合を避ける）。色味だけ僅かに寄せる
           float pierceMask = smoothstep(0.4, 0.9, vPierce);
-          vec3 pierceTint = mix(diffuse, vec3(0.82, 0.52, 0.72), pierceMask * 0.12);
-          vec4 diffuseColor = vec4( pierceTint, opacity * mix(1.0, 0.72, pierceMask) );
+          vec3 pierceTint = mix(diffuse, vec3(0.82, 0.52, 0.72), pierceMask * 0.1);
+          vec4 diffuseColor = vec4( pierceTint, opacity );
           `,
         )
         .replace(
@@ -4752,12 +5341,12 @@ class SoundSculpture {
           /* glsl */ `
           #include <emissivemap_fragment>
           float pierceGlow = smoothstep(0.45, 0.95, vPierce);
-          totalEmissiveRadiance += vec3(0.7, 0.4, 0.65) * pierceGlow * 0.45;
-          totalEmissiveRadiance += vec3(0.35, 0.55, 0.75) * pierceGlow * pierceGlow * 0.22;
+          totalEmissiveRadiance += vec3(0.7, 0.4, 0.65) * pierceGlow * 0.4;
+          totalEmissiveRadiance += vec3(0.35, 0.55, 0.75) * pierceGlow * pierceGlow * 0.18;
           `,
         );
     };
-    material.customProgramCacheKey = () => "vita-core-pierce-tips-soft-v6";
+    material.customProgramCacheKey = () => "vita-core-pierce-opaque-v7";
     material.needsUpdate = true;
   }
 
@@ -5135,8 +5724,10 @@ class SoundSculpture {
       const ny = cy / coreRadius;
       const nz = cz / coreRadius;
 
-      // 突き抜けを消さないよう、引き戻しは弱め
+      // 突き抜けを消さないよう、引き戻しは弱め。ただし膜を大きく突き破ると
+      // 回転でフレネル外殻の前後が入れ替わって見えるので、突き出し量に上限を置く
       const membraneInner = Math.max(0.15, surfaceRadius - 0.025);
+      const membraneOuterCap = surfaceRadius + (pierce > 0.35 ? 0.045 : 0.012);
       if (assimil > 1e-4 && pierce < 0.35 && coreRadius > membraneInner) {
         const pull = Math.min(
           0.35,
@@ -5146,6 +5737,11 @@ class SoundSculpture {
         corePositions[index] = nx * newRadius;
         corePositions[index + 1] = ny * newRadius;
         corePositions[index + 2] = nz * newRadius;
+        geomChanged = true;
+      } else if (coreRadius > membraneOuterCap) {
+        corePositions[index] = nx * membraneOuterCap;
+        corePositions[index + 1] = ny * membraneOuterCap;
+        corePositions[index + 2] = nz * membraneOuterCap;
         geomChanged = true;
       }
 
@@ -5250,7 +5846,10 @@ class SoundSculpture {
       const flow = growthPattern(nx, ny, nz, this.formingTime * 2.8);
       const ripple = growthPattern(nx, ny, nz, this.formingTime * 3.6 + this.carvingPhase * 0.7);
       const surfacePattern = flow * 0.22 + ripple * 0.09;
-      const targetSurfaceLive = midDrive * surfacePattern;
+      const targetSurfaceLive =
+        midDrive * surfacePattern * (0.55 + this.getDrumLiveMul(0.25)) +
+        (this.guitarImpulse * 0.55 + this.guitarFlash * 0.4 + this.snareFlash * 0.2) *
+          surfacePattern;
       if (!this.completed && !this.shapeHold) {
         this.surfaceLiveOffset[i] +=
           (targetSurfaceLive - this.surfaceLiveOffset[i]) * Math.min(1, deltaTime * 9);
@@ -5587,11 +6186,26 @@ class SoundSculpture {
   private spawnSparkle(bands: AudioBands, drive = scopeCyanDrive(latestRhythm)) {
     const index = this.sparkleCursor();
     const idx = index * 3;
-    const origin = new THREE.Vector3();
-    this.pickDetachmentOrigin(origin);
+    const vertCount = Math.max(1, this.accumulated.length);
+    // 最も変形した1点に寄せると「反対側だけ膜が点滅」に見えるので、表面全体へ散らす
+    const vert =
+      Math.floor(
+        seededUnit(index, this.formingTime * 0.41 + bands.high * 3.1 + 1.7) * vertCount,
+      ) % vertCount;
+    const pIdx = vert * 3;
+    const positions = this.geometry.attributes.position.array;
+    const bx = this.basePositions[pIdx];
+    const by = this.basePositions[pIdx + 1];
+    const bz = this.basePositions[pIdx + 2];
+    const br = Math.hypot(bx, by, bz) || 1;
+    const outward = 0.03 + drive * 0.05;
+    const origin = new THREE.Vector3(
+      positions[pIdx] + (bx / br) * outward,
+      positions[pIdx + 1] + (by / br) * outward,
+      positions[pIdx + 2] + (bz / br) * outward,
+    );
     this.toAmbientFxWorldPoint(origin);
-    const jitter = 0.06 + drive * 0.1;
-    // 見た目のジッターのみ — 形態決定論には影響しない
+    const jitter = 0.05 + drive * 0.08;
     this.sparklePositions[idx] = origin.x + (seededUnit(index, this.formingTime + 1.1) - 0.5) * jitter;
     this.sparklePositions[idx + 1] = origin.y + (seededUnit(index, this.formingTime + 2.2) - 0.5) * jitter;
     this.sparklePositions[idx + 2] = origin.z + (seededUnit(index, this.formingTime + 3.3) - 0.5) * jitter;
@@ -5614,9 +6228,9 @@ class SoundSculpture {
   private updateSparkles(bands: AudioBands, deltaTime: number) {
     const drive = this.completed ? 0 : scopeCyanDrive(latestRhythm);
     if (!this.completed) {
-      this.sparkleEmission += drive * deltaTime * 36;
+      this.sparkleEmission += drive * deltaTime * 22;
       let spawned = 0;
-      while (this.sparkleEmission >= 1 && spawned < 10) {
+      while (this.sparkleEmission >= 1 && spawned < 6) {
         this.spawnSparkle(bands, drive);
         this.sparkleEmission -= 1;
         spawned += 1;
@@ -5909,6 +6523,22 @@ if (devSurface && daytimePreviewRoot) {
 }
 if (devSurface && weatherPreviewRoot) {
   weatherPreviewRoot.hidden = false;
+}
+// vita: DEV 既定を「晴れ・昼〜夕方」に寄せて差し込み光を確認しやすくする
+if (devSurface && visualStyleId === "vita") {
+  weatherPreviewPreset = "clear";
+  daytimePreviewHour = 15.5;
+  if (weatherPreviewPresetSelect) {
+    weatherPreviewPresetSelect.value = "clear";
+  }
+  if (daytimePreviewHourInput) {
+    daytimePreviewHourInput.value = "15.5";
+  }
+  if (daytimeBackgroundInput && !daytimeBackgroundEnabled) {
+    daytimeBackgroundEnabled = true;
+    daytimeBackgroundInput.checked = true;
+    writeDaytimeBackgroundEnabled(true);
+  }
 }
 let growthAlgorithmId: GrowthAlgorithmId = parseGrowthAlgorithmId();
 setGrowthAlgorithmId(growthAlgorithmId);
@@ -6477,6 +7107,7 @@ syncSceneFog();
 
 const ditherStyle = visualStyleId === "dither";
 const lumenStyle = visualStyleId === "lumen";
+const vitaStyle = visualStyleId === "vita";
 const cameraAspect = window.innerWidth / Math.max(1, window.innerHeight);
 const orthoHalf = 3.15;
 const BASE_CAMERA_FOV = 36;
@@ -7148,7 +7779,7 @@ scene.add(lightRig);
 
 const keyLight = new THREE.DirectionalLight(0xffffff, sceneEnv.key);
 keyLight.position.set(1.6, 6.4, 2.4);
-keyLight.castShadow = true;
+keyLight.castShadow = !!(sceneEnv.pedestal || sceneEnv.spotlight);
 keyLight.shadow.mapSize.set(1024, 1024);
 keyLight.shadow.camera.near = 1;
 keyLight.shadow.camera.far = 22;
@@ -7156,8 +7787,8 @@ keyLight.shadow.camera.left = -9;
 keyLight.shadow.camera.right = 9;
 keyLight.shadow.camera.top = 9;
 keyLight.shadow.camera.bottom = -9;
-keyLight.shadow.radius = 4;
-keyLight.shadow.blurSamples = 8;
+keyLight.shadow.radius = 8;
+keyLight.shadow.blurSamples = 12;
 keyLight.shadow.bias = -0.0002;
 keyLight.shadow.normalBias = 0.035;
 lightRig.add(keyLight);
@@ -7168,7 +7799,7 @@ fillLight.position.set(-3.2, 4.8, 2.6);
 lightRig.add(fillLight);
 
 // 反対側からの弱いフィルで陰影を広げ、全体に広がりを出す
-const softFillLight = new THREE.DirectionalLight(sceneEnv.fillColor ?? 0xe8f0ff, sceneEnv.fill * 0.55);
+const softFillLight = new THREE.DirectionalLight(sceneEnv.fillColor ?? 0xe8f0ff, sceneEnv.fill * 0.85);
 softFillLight.position.set(2.4, 3.8, -3.6);
 lightRig.add(softFillLight);
 
@@ -7179,14 +7810,31 @@ const ambientLight = new THREE.HemisphereLight(
 );
 lightRig.add(ambientLight);
 
-if (sceneEnv.rimLightIntensity) {
-  const rimLight = new THREE.DirectionalLight(
-    sceneEnv.rimLightColor ?? 0x6ec8ff,
-    sceneEnv.rimLightIntensity,
-  );
-  rimLight.position.set(-1.2, 2.8, -5.5);
-  lightRig.add(rimLight);
-}
+const rimLight = new THREE.DirectionalLight(
+  sceneEnv.rimLightColor ?? 0x6ec8ff,
+  sceneEnv.rimLightIntensity ?? 0,
+);
+rimLight.position.set(-1.2, 2.8, -5.5);
+lightRig.add(rimLight);
+
+/** DEV パネルで上書きする光源パラメータ（初期値はスタイル env） */
+const createLightDevFromStyle = () => ({
+  key: sceneEnv.key,
+  keyComplete: sceneEnv.keyComplete,
+  fill: sceneEnv.fill,
+  fillComplete: sceneEnv.fillComplete,
+  softFill: sceneEnv.fill * 0.85,
+  softFillComplete: sceneEnv.fillComplete * 0.85,
+  ambient: sceneEnv.ambient,
+  ambientComplete: sceneEnv.ambientComplete,
+  rim: sceneEnv.rimLightIntensity ?? 0,
+  rimComplete: (sceneEnv.rimLightIntensity ?? 0) * 0.85,
+  exposure: sceneEnv.exposure,
+  elevationDeg: vitaStyle ? 68 : 72,
+  sideDeg: vitaStyle ? 12 : 18,
+});
+let lightDev = createLightDevFromStyle();
+const abyssShaftDir = new THREE.Vector3(0.12, 0.96, 0.18);
 
 // dither: 陰影はマットシェーダ側。シーンライトは消して 3D 感を出さない
 if (ditherStyle) {
@@ -7388,9 +8036,12 @@ const updateHudScope = (bands: AudioBands, rhythmEvents: RhythmEvents, deltaTime
   }
   const envelope = Math.min(
     1,
-    rhythmEvents.pulseEnvelope * 0.7 +
-      rhythmEvents.waveEnergy * 0.55 +
-      bands.overall * 0.45,
+    rhythmEvents.pulseEnvelope * 0.55 +
+      rhythmEvents.kickRing * 0.45 +
+      rhythmEvents.snareRing * 0.28 +
+      rhythmEvents.hatRing * 0.22 +
+      rhythmEvents.waveEnergy * 0.35 +
+      bands.overall * 0.3,
   );
   const follow = Math.min(1, deltaTime * (envelope > hudSlashLevel ? 18 : 8));
   hudSlashLevel += (envelope - hudSlashLevel) * follow;
@@ -7529,13 +8180,26 @@ const drawAudioScope = (
     cyanLevel * (scopeH - 12),
   );
 
-  if (rhythmEvents.kick > 0) {
+  if (rhythmEvents.kick > 0 || rhythmEvents.kickRing > 0.08) {
     ctx.fillStyle = "rgba(61,124,255,0.62)";
-    ctx.fillRect(0, 0, Math.min(w, 18 + rhythmEvents.kick * 140), scopeH);
+    const kickW = Math.min(
+      w,
+      18 + Math.max(rhythmEvents.kick, rhythmEvents.kickRing) * 140 * (0.7 + clamp01(rhythmEvents.kickLength / 0.3) * 0.6),
+    );
+    ctx.fillRect(0, 0, kickW, scopeH);
   }
-  if (rhythmEvents.hat > 0) {
+  if (rhythmEvents.snare > 0 || rhythmEvents.snareRing > 0.08) {
+    ctx.fillStyle = "rgba(255,140,90,0.4)";
+    const snareW = Math.min(w * 0.45, 10 + Math.max(rhythmEvents.snare, rhythmEvents.snareRing) * 90);
+    ctx.fillRect(w * 0.5 - snareW * 0.5, 0, snareW, scopeH);
+  }
+  if (rhythmEvents.hat > 0 || rhythmEvents.hatRing > 0.08) {
     ctx.fillStyle = "rgba(136,204,255,0.45)";
-    ctx.fillRect(w - Math.min(w, 12 + rhythmEvents.hat * 90), 0, Math.min(w, 12 + rhythmEvents.hat * 90), scopeH);
+    const hatW = Math.min(
+      w,
+      12 + Math.max(rhythmEvents.hat, rhythmEvents.hatRing) * 90 * (0.65 + clamp01(rhythmEvents.hatLength / 0.25) * 0.7),
+    );
+    ctx.fillRect(w - hatW, 0, hatW, scopeH);
   }
   if (rhythmEvents.transient > 0) {
     ctx.fillStyle = "rgba(255,220,120,0.35)";
@@ -7549,7 +8213,7 @@ const drawAudioScope = (
     const pulseBarW = Math.max(2, rhythmEvents.pulseConfidence * 42);
     const envBarW = Math.max(2, rhythmEvents.pulseEnvelope * 42);
     ctx.fillText(
-      `pulse #${rhythmEvents.pulseIndex} ${rhythmEvents.pulsePhase.toFixed(2)} conf ${rhythmEvents.pulseConfidence.toFixed(2)} env ${rhythmEvents.pulseEnvelope.toFixed(2)}`,
+      `pulse #${rhythmEvents.pulseIndex} ${rhythmEvents.pulsePhase.toFixed(2)} conf ${rhythmEvents.pulseConfidence.toFixed(2)} env ${rhythmEvents.pulseEnvelope.toFixed(2)} | k${rhythmEvents.kickLength.toFixed(2)}s s${rhythmEvents.snareLength.toFixed(2)}s h${rhythmEvents.hatLength.toFixed(2)}s`,
       4,
       y + 9,
     );
@@ -7910,8 +8574,14 @@ const syncDaytimeEnvironmentTargets = () => {
     const atmosphere = sampleActiveDaytimeAtmosphere();
     activeDaytimeLook = atmosphere;
     const sky = applyCloudCoverToSky(atmosphere.zenith, atmosphere.horizon, cloudCover);
-    const forming = tintHexWithClouds(atmosphere.forming, cloudCover);
-    const complete = tintHexWithClouds(atmosphere.complete, cloudCover);
+    // vita: 夕焼けの forming（フォグ／クリア色）はオブジェクトを赤くするので使わない。
+    // 夕日は abyss ドームの色味だけに載せる。
+    const forming = vitaStyle
+      ? tintHexWithClouds(sceneEnv.background, cloudCover)
+      : tintHexWithClouds(atmosphere.forming, cloudCover);
+    const complete = vitaStyle
+      ? tintHexWithClouds(sceneEnv.backgroundComplete, cloudCover)
+      : tintHexWithClouds(atmosphere.complete, cloudCover);
     envBackgroundForming.setHex(forming);
     envBackgroundComplete.setHex(complete);
     daytimeZenithColor.setHex(sky.zenith);
@@ -8198,9 +8868,18 @@ requestAnimationFrame(() => {
 (scene.background as THREE.Color).copy(envBackgroundForming);
 renderer.setClearColor(scene.background as THREE.Color);
 if (daytimeSkyActive) {
-  sceneBackground.setDaytimeSky(daytimeZenithColor, daytimeHorizonColor, themeDarkActive, 0);
+  sceneBackground.setDaytimeSky(
+    daytimeZenithColor,
+    daytimeHorizonColor,
+    themeDarkActive,
+    0,
+    getActiveDaytimeHour(),
+  );
 } else {
   sceneBackground.setFromBackground(scene.background as THREE.Color, themeDarkActive, 0);
+  if (vitaStyle) {
+    sceneBackground.setAbyssSeaByHour(getActiveDaytimeHour());
+  }
 }
 syncSceneFog();
 applyLiveWeatherToScene();
@@ -8219,15 +8898,20 @@ const updateEnvironmentCrossfade = (deltaTime: number) => {
     (scene.background as THREE.Color).lerp(lightningFlashColor, Math.min(1, lightningFlash * 0.92));
   }
   renderer.setClearColor(scene.background as THREE.Color);
+  const seaHour = getActiveDaytimeHour();
   if (daytimeSkyActive) {
     sceneBackground.setDaytimeSky(
       daytimeZenithColor,
       daytimeHorizonColor,
       themeDarkActive,
       envMix,
+      seaHour,
     );
   } else {
     sceneBackground.setFromBackground(scene.background as THREE.Color, themeDarkActive, envMix);
+    if (vitaStyle) {
+      sceneBackground.setAbyssSeaByHour(seaHour);
+    }
   }
   // 雷の瞬間はドーム側もフラッシュ色を重ねる
   if (lightningFlash > 0.01 && daytimeSkyActive) {
@@ -8238,72 +8922,191 @@ const updateEnvironmentCrossfade = (deltaTime: number) => {
       daytimeHorizonFlashColor,
       themeDarkActive,
       envMix,
+      seaHour,
     );
   }
   syncSceneFog();
-  const baseKey = envLerp(sceneEnv.key, sceneEnv.keyComplete);
-  const baseFill = envLerp(sceneEnv.fill, sceneEnv.fillComplete);
-  const baseAmbient = envLerp(sceneEnv.ambient, sceneEnv.ambientComplete);
+  const baseKey = envLerp(lightDev.key, lightDev.keyComplete);
+  const baseFill = envLerp(lightDev.fill, lightDev.fillComplete);
+  const baseAmbient = envLerp(lightDev.ambient, lightDev.ambientComplete);
+  const baseSoftFill = envLerp(lightDev.softFill, lightDev.softFillComplete);
+  const baseRim = envLerp(lightDev.rim, lightDev.rimComplete);
 
   if (daytimeSkyActive && activeDaytimeLook) {
     const li = activeDaytimeLook.lightIntensity;
-    // 正午で最大、日の出・日没・夜は光量を落とす
-    keyLight.intensity = baseKey * (0.2 + li * 0.95) + lightningFlash * 2.4;
-    fillLight.intensity = baseFill * (0.28 + li * 0.78) + lightningFlash * 1.1;
-    softFillLight.intensity = baseFill * 0.55 * (0.3 + li * 0.75) + lightningFlash * 0.7;
-    ambientLight.intensity = baseAmbient * (0.32 + li * 0.72) + lightningFlash * 1.6;
-    keyLight.color.setHex(activeDaytimeLook.sunColor);
-    fillLight.color.setHex(activeDaytimeLook.fillColor);
-    softFillLight.color.copy(fillLight.color);
-    ambientLight.color.setHex(activeDaytimeLook.sunColor);
-    ambientLight.groundColor.setHex(activeDaytimeLook.horizon);
-  } else {
-    keyLight.intensity = baseKey + lightningFlash * 2.4;
-    fillLight.intensity = baseFill + lightningFlash * 1.1;
-    softFillLight.intensity = baseFill * 0.55 + lightningFlash * 0.7;
-    ambientLight.intensity = baseAmbient + lightningFlash * 1.6;
-    keyLight.color.setHex(0xffffff);
-    if (lumenStyle) {
-      fillLight.color.setHex(0xb04888);
-      softFillLight.color.setHex(0xb04888);
+    const weather = getActiveWeatherSnapshot();
+    const cloud = weather?.cloudCover ?? 0;
+    const clearFactor = THREE.MathUtils.clamp(1 - cloud * 1.15, 0.15, 1);
+    const hour = activeDaytimeLook.hour;
+    // 昼〜夕方（概ね 11〜18時）で差し込みを強める
+    const dayWindow =
+      THREE.MathUtils.smoothstep(9.5, 12.5, hour) *
+      (1 - THREE.MathUtils.smoothstep(17.8, 20.2, hour));
+
+    if (vitaStyle) {
+      const moonlit = activeDaytimeLook.usingMoonlight || hour >= 20.5 || hour < 4.2;
+      if (moonlit) {
+        // 月明かり: 背景の銀青差し込み柱向け（彫刻ライトは控えめ）
+        const moonAmt = THREE.MathUtils.clamp(0.5 + li * 2.4, 0.45, 0.95) * clearFactor;
+        keyLight.intensity = baseKey * (0.45 + moonAmt * 0.45) + lightningFlash * 0.7;
+        fillLight.intensity = baseFill * (0.42 + (1 - clearFactor) * 0.2);
+        softFillLight.intensity = baseSoftFill * 0.4;
+        ambientLight.intensity = baseAmbient * (0.5 + moonAmt * 0.15);
+        rimLight.intensity = baseRim * (0.45 + moonAmt * 0.4);
+        keyLight.color.setHex(0xd0e4ff);
+        fillLight.color.setHex(0x243a58);
+        softFillLight.color.copy(fillLight.color);
+        ambientLight.color.setHex(0x5a7898);
+        ambientLight.groundColor.setHex(0x010408);
+      } else {
+        // 彫刻ライトは安定させ、背景の青明るさに任せる
+        const shaft = (0.28 + li * 0.65) * clearFactor * (0.4 + dayWindow * 0.55);
+        keyLight.intensity = baseKey * (0.55 + shaft * 0.75) + lightningFlash * 1.0;
+        fillLight.intensity = baseFill * (0.55 + (1 - clearFactor) * 0.3) * (0.7 + li * 0.2);
+        softFillLight.intensity = baseSoftFill * (0.5 + (1 - clearFactor) * 0.28);
+        ambientLight.intensity = baseAmbient * (0.68 + (1 - clearFactor) * 0.2 + li * 0.08);
+        rimLight.intensity = baseRim * (0.45 + clearFactor * 0.45 * dayWindow);
+        keyLight.color.setHex(0xc4e8ff);
+        fillLight.color.setHex(sceneEnv.fillColor ?? 0x2a5a78);
+        softFillLight.color.copy(fillLight.color);
+        ambientLight.color.setHex(0x6a98b8);
+        ambientLight.groundColor.setHex(sceneEnv.hemisphereGround ?? 0x010408);
+      }
     } else {
-      fillLight.color.setHex(sceneEnv.fillColor ?? 0xe8f0ff);
+      // 背景の昼夜は残しつつ、彫刻ライトは潰さない。
+      const softKey = 0.62 + li * 0.38;
+      const softFill = 0.78 + li * 0.22;
+      const softAmbient = 0.88 + li * 0.12;
+      keyLight.intensity = baseKey * softKey + lightningFlash * 1.2;
+      fillLight.intensity = baseFill * softFill + lightningFlash * 0.7;
+      softFillLight.intensity = baseSoftFill * softFill + lightningFlash * 0.45;
+      ambientLight.intensity = baseAmbient * softAmbient + lightningFlash * 0.9;
+      rimLight.intensity = baseRim;
+      keyLight.color.setHex(0xffffff).lerp(new THREE.Color(activeDaytimeLook.sunColor), 0.22);
+      fillLight.color
+        .setHex(sceneEnv.fillColor ?? 0xe8f0ff)
+        .lerp(new THREE.Color(activeDaytimeLook.fillColor), 0.28);
       softFillLight.color.copy(fillLight.color);
+      ambientLight.color.setHex(0xffffff).lerp(new THREE.Color(activeDaytimeLook.sunColor), 0.18);
+      ambientLight.groundColor
+        .setHex(sceneEnv.hemisphereGround ?? 0xd6d0c6)
+        .lerp(new THREE.Color(activeDaytimeLook.horizon), 0.35);
     }
-    ambientLight.color.setHex(0xffffff);
-    ambientLight.groundColor.setHex(sceneEnv.hemisphereGround ?? 0xd6d0c6);
+  } else {
+    if (vitaStyle) {
+      keyLight.intensity = baseKey + lightningFlash * 1.0;
+      fillLight.intensity = baseFill + lightningFlash * 0.5;
+      softFillLight.intensity = baseSoftFill + lightningFlash * 0.35;
+      ambientLight.intensity = baseAmbient + lightningFlash * 0.7;
+      rimLight.intensity = baseRim;
+      keyLight.color.setHex(0xc8ecff);
+      fillLight.color.setHex(sceneEnv.fillColor ?? 0x2a5a78);
+      softFillLight.color.copy(fillLight.color);
+      ambientLight.color.setHex(0x7eb4d8);
+      ambientLight.groundColor.setHex(sceneEnv.hemisphereGround ?? 0x010408);
+    } else {
+      keyLight.intensity = baseKey + lightningFlash * 2.4;
+      fillLight.intensity = baseFill + lightningFlash * 1.1;
+      softFillLight.intensity = baseSoftFill + lightningFlash * 0.7;
+      ambientLight.intensity = baseAmbient + lightningFlash * 1.6;
+      rimLight.intensity = baseRim;
+      keyLight.color.setHex(0xffffff);
+      if (lumenStyle) {
+        fillLight.color.setHex(0xb04888);
+        softFillLight.color.setHex(0xb04888);
+      } else {
+        fillLight.color.setHex(sceneEnv.fillColor ?? 0xe8f0ff);
+        softFillLight.color.copy(fillLight.color);
+      }
+      ambientLight.color.setHex(0xffffff);
+      ambientLight.groundColor.setHex(sceneEnv.hemisphereGround ?? 0xd6d0c6);
+    }
+  }
+  if (!ditherStyle) {
+    renderer.toneMappingExposure = lightDev.exposure;
   }
   if (spotLight) {
     spotLight.intensity = sceneEnv.spotlightIntensity * envMix;
   }
   updateKeyLight();
+
+  if (vitaStyle) {
+    const weather = getActiveWeatherSnapshot();
+    const cloud = weather?.cloudCover ?? (daytimeSkyActive ? 0.35 : 0.55);
+    const clearFactor = THREE.MathUtils.clamp(1 - cloud * 1.15, 0.1, 1);
+    const look = daytimeSkyActive ? activeDaytimeLook : null;
+    const li = look?.lightIntensity ?? 0.45;
+    const hour = look?.hour ?? 15;
+    const moonlit = !!(look?.usingMoonlight || hour >= 20.5 || hour < 4.2);
+    const dayWindow =
+      THREE.MathUtils.smoothstep(9.5, 12.5, hour) *
+      (1 - THREE.MathUtils.smoothstep(17.8, 20.2, hour));
+    let shaft: number;
+    if (moonlit) {
+      // 夜〜深夜帯: 水塊は暗いが、月明かりの差し込みは常に出す
+      const moonElev = look?.usingMoonlight ? (look.lightElevationDeg ?? 28) : 28;
+      const moonAmt = THREE.MathUtils.clamp(0.55 + moonElev / 55, 0.55, 1);
+      shaft = (0.65 + li * 1.5) * clearFactor * moonAmt;
+      shaft = THREE.MathUtils.clamp(shaft, 0.55, 1);
+    } else {
+      // 日中: 青白い差し込み
+      shaft =
+        (daytimeSkyActive ? 0.62 + li * 0.65 : 0.38) * clearFactor * (0.55 + dayWindow * 0.5);
+      shaft = THREE.MathUtils.clamp(shaft, 0.35, 1);
+    }
+    abyssShaftDir.copy(keyLight.position).normalize();
+    if (abyssShaftDir.lengthSq() < 1e-6) {
+      abyssShaftDir.set(0.12, 0.96, 0.18);
+    }
+    sceneBackground.setAbyssShaft(abyssShaftDir, shaft);
+  } else {
+    sceneBackground.setAbyssShaft(abyssShaftDir.set(0, 1, 0), 0);
+  }
 };
 
 /** 左下（朝）→ 正午真上 → 右下（夕〜夜）の弧でキーライトを置く */
 const updateKeyLight = () => {
   const look = daytimeSkyActive ? activeDaytimeLook : null;
-  let elevationDeg = 72;
-  let sideDeg = 18; // -左 / +右（画面左右）
+  let elevationDeg = lightDev.elevationDeg;
+  let sideDeg = lightDev.sideDeg;
   if (look) {
     const h = look.hour;
-    // 3:30〜20:30 で左下→右下へ大きく振る。夜は右下に固定
-    if (look.usingMoonlight || h >= 20.5 || h < 3.5) {
-      sideDeg = 68;
-      elevationDeg = 8;
+    if (vitaStyle) {
+      // 深海の差し込み: 昼は上寄り、夜は月の高度・方位を反映
+      if (look.usingMoonlight || h >= 20.5 || h < 3.5) {
+        const moonElev = THREE.MathUtils.clamp(look.lightElevationDeg, 12, 72);
+        elevationDeg = THREE.MathUtils.lerp(42, 70, THREE.MathUtils.clamp(moonElev / 60, 0, 1));
+        // 方位: 南寄りを0、東西に振る（深海では控えめ）
+        const az = ((look.lightAzimuthDeg % 360) + 360) % 360;
+        const eastWest = Math.sin(((az - 180) * Math.PI) / 180);
+        sideDeg = eastWest * 28;
+      } else if (h <= 12) {
+        const t = THREE.MathUtils.smoothstep(3.5, 12, h);
+        sideDeg = THREE.MathUtils.lerp(-22, 0, t);
+        elevationDeg = THREE.MathUtils.lerp(55, 78, t);
+      } else {
+        const t = THREE.MathUtils.smoothstep(12, 19.5, h);
+        sideDeg = THREE.MathUtils.lerp(0, 26, t);
+        elevationDeg = THREE.MathUtils.lerp(78, 52, t);
+      }
+    } else if (look.usingMoonlight || h >= 20.5 || h < 3.5) {
+      sideDeg = 28;
+      elevationDeg = 52;
     } else if (h <= 12) {
       const t = THREE.MathUtils.smoothstep(3.5, 12, h);
-      sideDeg = THREE.MathUtils.lerp(-70, 0, t);
-      elevationDeg = THREE.MathUtils.lerp(6, 78, t);
+      sideDeg = THREE.MathUtils.lerp(-32, 0, t);
+      elevationDeg = THREE.MathUtils.lerp(48, 72, t);
     } else {
       const t = THREE.MathUtils.smoothstep(12, 20.5, h);
-      sideDeg = THREE.MathUtils.lerp(0, 70, t);
-      elevationDeg = THREE.MathUtils.lerp(78, 6, t);
+      sideDeg = THREE.MathUtils.lerp(0, 32, t);
+      elevationDeg = THREE.MathUtils.lerp(72, 48, t);
     }
-    // 実太陽高度で上下を少し補正（季節の明るさ開始を反映）
     if (!look.usingMoonlight && look.sunElevationDeg > -8) {
-      const solarLift = THREE.MathUtils.clamp(look.sunElevationDeg * 0.18, -3, 8);
-      elevationDeg = THREE.MathUtils.clamp(elevationDeg + solarLift, 5, 82);
+      const solarLift = THREE.MathUtils.clamp(look.sunElevationDeg * 0.12, -2, 6);
+      elevationDeg = THREE.MathUtils.clamp(elevationDeg + solarLift, vitaStyle ? 48 : 45, 78);
     }
+  } else if (vitaStyle) {
+    elevationDeg = Math.max(elevationDeg, 62);
   }
   const side = THREE.MathUtils.degToRad(sideDeg);
   const elevation = THREE.MathUtils.degToRad(elevationDeg);
@@ -8434,6 +9237,12 @@ const resetSculptureSession = () => {
     pulseConfidence: 0,
     pulseEnvelope: 0,
     pulseIndex: 0,
+    kickLength: 0,
+    snareLength: 0,
+    hatLength: 0,
+    kickRing: 0,
+    snareRing: 0,
+    hatRing: 0,
     subLevel: 0,
     wavePeak: 0,
     waveEnergy: 0,
@@ -8637,32 +9446,27 @@ const applyWaveGate = (rawBands: AudioBands, waveformMetrics: WaveformMetrics | 
 };
 
 const injectRhythmIntoBands = (bands: AudioBands, rhythmEvents: RhythmEvents) => {
-  if (bandSoloAllows("low") && rhythmEvents.kick > 0) {
-    bands.sub = Math.min(1, bands.sub + rhythmEvents.kick * 0.85);
-    bands.low = Math.min(1, bands.low + rhythmEvents.kick * 0.55);
-    bands.overall = Math.min(1, bands.overall + rhythmEvents.kick * 0.38);
+  if (bandSoloAllows("low") && rhythmEvents.kick > 0.03) {
+    const k = rhythmEvents.kick;
+    bands.sub = Math.min(1, bands.sub + k * 1.2);
+    bands.low = Math.min(1, bands.low + k * 0.8);
+    bands.overall = Math.min(1, bands.overall + k * 0.42);
   }
-  if (bandSoloAllows("mid") && rhythmEvents.snare > 0) {
-    bands.contrast = Math.min(1, bands.contrast + rhythmEvents.snare * 0.25);
-    bands.mid = Math.min(1, bands.mid + rhythmEvents.snare * 0.35);
-    bands.melody = Math.min(1, bands.melody + rhythmEvents.snare * 0.55);
-    bands.overall = Math.min(1, bands.overall + rhythmEvents.snare * 0.12);
+  if (bandSoloAllows("mid") && rhythmEvents.snare > 0.04) {
+    const s = rhythmEvents.snare;
+    bands.contrast = Math.min(1, bands.contrast + s * 0.35);
+    bands.mid = Math.min(1, bands.mid + s * 0.45);
+    bands.melody = Math.min(1, bands.melody + s * 0.55);
+    bands.overall = Math.min(1, bands.overall + s * 0.14);
   }
-  if (bandSoloAllows("high") && rhythmEvents.hat > 0) {
-    bands.high = Math.min(1, bands.high + rhythmEvents.hat * 1.05);
-    bands.brightness = Math.min(1, bands.brightness + rhythmEvents.hat * 0.75);
-    bands.overall = Math.min(1, bands.overall + rhythmEvents.hat * 0.12);
+  if (bandSoloAllows("high") && rhythmEvents.hat > 0.05) {
+    const h = rhythmEvents.hat;
+    bands.high = Math.min(1, bands.high + h * 0.45);
+    bands.brightness = Math.min(1, bands.brightness + h * 0.35);
   }
-  if (bandSoloAllows("high") && rhythmEvents.transient > 0) {
-    bands.high = Math.min(1, bands.high + rhythmEvents.transient * 1.1);
-    bands.brightness = Math.min(1, bands.brightness + rhythmEvents.transient * 0.85);
-    bands.overall = Math.min(1, bands.overall + rhythmEvents.transient * 0.32);
-  }
-  if (bandSoloAllows("high") && rhythmEvents.kick > 0) {
-    bands.high = Math.min(1, bands.high + rhythmEvents.kick * 0.18);
-  }
-  if (bandSoloAllows("mid") && rhythmEvents.transient > 0) {
-    bands.melody = Math.min(1, bands.melody + rhythmEvents.transient * 0.35);
+  if (bandSoloAllows("high") && rhythmEvents.transient > 0.06) {
+    bands.high = Math.min(1, bands.high + rhythmEvents.transient * 0.7);
+    bands.brightness = Math.min(1, bands.brightness + rhythmEvents.transient * 0.55);
   }
 };
 
@@ -8714,14 +9518,16 @@ const trackSilenceForCompletion = (
 };
 
 const advanceSculptureSimulation = (
-  rawBands: AudioBands,
+  sculptureBands: AudioBands,
   waveformMetrics: WaveformMetrics | null,
   deltaTime: number,
+  rhythmBands: AudioBands = sculptureBands,
 ) => {
-  const rhythmEvents = rhythm.update(rawBands, waveformMetrics, deltaTime);
+  // リズムはピーク正規化前の帯域で検出（曲の実際のアタックと揃える）
+  const rhythmEvents = rhythm.update(rhythmBands, waveformMetrics, deltaTime);
   latestRhythm = rhythmEvents;
 
-  const bands = applyWaveGate(rawBands, waveformMetrics);
+  const bands = applyWaveGate(sculptureBands, waveformMetrics);
   const playbackEnded = audioInput.hasPlaybackEnded();
 
   // バッファ曲が終わったら形を止め、短く待って完成
@@ -8778,9 +9584,16 @@ const advanceSculptureSimulation = (
       contrast: bands.contrast,
       brightness: bands.brightness,
       bassFocus: bands.bassFocus,
+      melodyFocus: bands.melodyFocus,
       centroid: bands.centroid,
       pulseConfidence: rhythmEvents.pulseConfidence,
       transientRate: structureTracker.getTransientRate(),
+      novelty: latestStructure.novelty,
+      eventRate:
+        (latestStructure.events.noveltyPeak ? 1 : 0) +
+        (latestStructure.events.energySurge ? 1 : 0) +
+        (latestStructure.events.transientBurst ? 1 : 0) +
+        (latestStructure.events.pulseStable ? 0.5 : 0),
     },
     bands,
     deltaTime,
@@ -8788,9 +9601,9 @@ const advanceSculptureSimulation = (
   );
 
   const speciesProfile = speciesProfiler.getProfile();
-  const sculptureBands = bandSoloMode === "off" ? bands : applyBandSolo(bands, bandSoloMode);
+  const soloBands = bandSoloMode === "off" ? bands : applyBandSolo(bands, bandSoloMode);
   sculpture.update(
-    sculptureBands,
+    soloBands,
     deltaTime,
     isViewInteracting,
     rhythmEvents,
@@ -8814,7 +9627,12 @@ const render = () => {
   if (isAudioReady && !isComplete && audioInput.isDeterministic()) {
     const steps = audioInput.drainSimulationSteps();
     for (const step of steps) {
-      const result = advanceSculptureSimulation(step.bands, step.waveform, step.deltaTime);
+      const result = advanceSculptureSimulation(
+        step.bands,
+        step.waveform,
+        step.deltaTime,
+        step.rhythmBands,
+      );
       displayBands = result.bands;
       rhythmEvents = result.rhythmEvents;
       speciesProfile = result.speciesProfile;
@@ -8825,12 +9643,13 @@ const render = () => {
     waveform = audioInput.getWaveformBytes();
     bandMeters = snapshotBandMeters(displayBands);
   } else if (isAudioReady) {
-    const rawBands = audioInput.update(deltaTime);
+    const sculptureBands = audioInput.update(deltaTime);
+    const rhythmBands = audioInput.getRhythmBands();
     const waveformMetrics = audioInput.getWaveformMetrics();
     waveform = audioInput.getWaveformBytes();
-    bandMeters = snapshotBandMeters(rawBands);
+    bandMeters = snapshotBandMeters(sculptureBands);
     if (isComplete) {
-      displayBands = applyWaveGate(rawBands, waveformMetrics);
+      displayBands = applyWaveGate(sculptureBands, waveformMetrics);
       rhythmEvents = latestRhythm;
       sculpture.update(
         bandSoloMode === "off" ? displayBands : applyBandSolo(displayBands, bandSoloMode),
@@ -8841,7 +9660,12 @@ const render = () => {
         speciesProfile,
       );
     } else {
-      const result = advanceSculptureSimulation(rawBands, waveformMetrics, deltaTime);
+      const result = advanceSculptureSimulation(
+        sculptureBands,
+        waveformMetrics,
+        deltaTime,
+        rhythmBands,
+      );
       displayBands = result.bands;
       rhythmEvents = result.rhythmEvents;
       speciesProfile = result.speciesProfile;
@@ -9014,5 +9838,127 @@ const initTuningPanel = () => {
 };
 
 initTuningPanel();
+
+type LightDevKey = keyof typeof lightDev;
+type LightSliderSpec = {
+  key: LightDevKey;
+  label: string;
+  help: string;
+  min: number;
+  max: number;
+  step: number;
+};
+
+const LIGHT_SLIDER_SPECS: readonly LightSliderSpec[] = [
+  { key: "key", label: "Key", help: "メイン光源の強さ", min: 0, max: 5, step: 0.05 },
+  { key: "fill", label: "Fill", help: "正面寄りの補助光", min: 0, max: 4, step: 0.05 },
+  { key: "softFill", label: "Soft fill", help: "反対側の弱いフィル", min: 0, max: 4, step: 0.05 },
+  { key: "ambient", label: "Ambient", help: "半球環境光", min: 0, max: 5, step: 0.05 },
+  { key: "rim", label: "Rim", help: "背面リムライト", min: 0, max: 2, step: 0.02 },
+  { key: "exposure", label: "Exposure", help: "トーンマッピング露出", min: 0.4, max: 2, step: 0.02 },
+  { key: "elevationDeg", label: "Elevation", help: "キーライト高度（°）。昼空ON時は時刻が優先", min: 0, max: 90, step: 1 },
+  { key: "sideDeg", label: "Side", help: "キーライト左右（°）。昼空ON時は時刻が優先", min: -90, max: 90, step: 1 },
+];
+
+const lightSliderInputs = new Map<LightDevKey, HTMLInputElement>();
+const lightSliderValueLabels = new Map<LightDevKey, HTMLElement>();
+
+const syncLightRigSlidersFromState = () => {
+  for (const spec of LIGHT_SLIDER_SPECS) {
+    const input = lightSliderInputs.get(spec.key);
+    const valueLabel = lightSliderValueLabels.get(spec.key);
+    const value = lightDev[spec.key];
+    if (input) {
+      input.value = String(value);
+    }
+    if (valueLabel) {
+      valueLabel.textContent = Number.isInteger(spec.step) ? value.toFixed(0) : value.toFixed(2);
+    }
+  }
+};
+
+const initLightRigPanel = () => {
+  const root = document.querySelector<HTMLElement>("#light-rig-sliders");
+  const resetButton = document.querySelector<HTMLButtonElement>("#reset-light-rig");
+  if (!root || !devSurface) return;
+
+  for (const spec of LIGHT_SLIDER_SPECS) {
+    const row = document.createElement("div");
+    row.className = "tuning-slider";
+    const label = document.createElement("button");
+    label.className = "tuning-slider__label";
+    label.type = "button";
+    label.textContent = spec.label;
+    const help = document.createElement("div");
+    help.className = "tuning-slider__help";
+    help.textContent = spec.help;
+    help.hidden = true;
+    const helpId = `light-help-${spec.key}`;
+    help.id = helpId;
+    label.setAttribute("aria-expanded", "false");
+    label.setAttribute("aria-controls", helpId);
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = String(spec.min);
+    input.max = String(spec.max);
+    input.step = String(spec.step);
+    input.value = String(lightDev[spec.key]);
+    const valueLabel = document.createElement("span");
+    valueLabel.className = "tuning-slider__value";
+    row.append(label, input, valueLabel, help);
+    root.appendChild(row);
+
+    lightSliderInputs.set(spec.key, input);
+    lightSliderValueLabels.set(spec.key, valueLabel);
+
+    label.addEventListener("click", (event) => {
+      event.preventDefault();
+      const next = help.hidden;
+      help.hidden = !next;
+      label.setAttribute("aria-expanded", next ? "true" : "false");
+    });
+
+    input.addEventListener("input", () => {
+      const value = Number(input.value);
+      lightDev[spec.key] = value;
+      // 形成中スライダーを動かしたら、完成時も同じ比率で追従（独立キー以外）
+      if (spec.key === "key") {
+        const ratio = sceneEnv.key > 0.001 ? sceneEnv.keyComplete / sceneEnv.key : 1;
+        lightDev.keyComplete = value * ratio;
+      } else if (spec.key === "fill") {
+        const ratio = sceneEnv.fill > 0.001 ? sceneEnv.fillComplete / sceneEnv.fill : 1;
+        lightDev.fillComplete = value * ratio;
+      } else if (spec.key === "softFill") {
+        const ratio = sceneEnv.fill > 0.001 ? sceneEnv.fillComplete / sceneEnv.fill : 1;
+        lightDev.softFillComplete = value * ratio;
+      } else if (spec.key === "ambient") {
+        const ratio = sceneEnv.ambient > 0.001 ? sceneEnv.ambientComplete / sceneEnv.ambient : 1;
+        lightDev.ambientComplete = value * ratio;
+      } else if (spec.key === "rim") {
+        lightDev.rimComplete = value * 0.85;
+      }
+      valueLabel.textContent = Number.isInteger(spec.step) ? value.toFixed(0) : value.toFixed(2);
+      if (spec.key === "exposure" && !ditherStyle) {
+        renderer.toneMappingExposure = value;
+      }
+      if (spec.key === "elevationDeg" || spec.key === "sideDeg") {
+        updateKeyLight();
+      }
+    });
+  }
+
+  resetButton?.addEventListener("click", () => {
+    lightDev = createLightDevFromStyle();
+    syncLightRigSlidersFromState();
+    if (!ditherStyle) {
+      renderer.toneMappingExposure = lightDev.exposure;
+    }
+    updateKeyLight();
+  });
+
+  syncLightRigSlidersFromState();
+};
+
+initLightRigPanel();
 updateKeyLight();
 render();
