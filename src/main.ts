@@ -58,12 +58,16 @@ import {
 } from "./growth-algorithm";
 import {
   clayStyleFromVisualCore,
+  combineClayShifts,
   createClayColorShift,
+  lerpHueShortest,
   nudgeClayColorShift,
   resolveClayPalette,
+  envClayShiftFromWeatherAndHour,
 } from "./clay-color";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import {
+  applyEnvShiftToSculpturePalette,
   deriveAfterlifeMaterial,
   deriveSculpturePalette,
   NEUTRAL_SCULPTURE_PALETTE,
@@ -191,12 +195,16 @@ let latestRhythm: RhythmEvents = {
   snare: 0,
   hat: 0,
   transient: 0,
+  chop: 0,
+  salience: 0,
   beat: 0,
   beatIndex: 0,
   kickIndex: 0,
   snareIndex: 0,
   hatIndex: 0,
   transientIndex: 0,
+  chopIndex: 0,
+  salienceIndex: 0,
   downbeat: false,
   bpm: 0,
   pulsePhase: 0,
@@ -209,6 +217,7 @@ let latestRhythm: RhythmEvents = {
   kickRing: 0,
   snareRing: 0,
   hatRing: 0,
+  melodyOnset: 0,
   subLevel: 0,
   wavePeak: 0,
   waveEnergy: 0,
@@ -221,6 +230,7 @@ speciesProfiler.setCalibrationSeconds(runtimeTuning.speciesCalibrationSeconds);
 const defaultStructureSnapshot = (): StructureSnapshot => ({
   energyLong: 0,
   energyMid: 0,
+  sectionLift: 0.5,
   tension: 0,
   density: 0,
   novelty: 0,
@@ -257,6 +267,7 @@ const scopeCyanDrive = (rhythm: RhythmEvents) =>
       rhythm.snareRing * 0.2 +
       rhythm.hat * 0.22 +
       rhythm.hatRing * 0.12 +
+      rhythm.chop * 0.55 +
       rhythm.transient * 0.45,
   );
 
@@ -328,12 +339,18 @@ class RhythmTracker {
   private lastSnare = 10;
   private lastHat = 10;
   private lastTransient = 10;
+  private lastChop = 10;
+  private lastSalience = 10;
   private lastBeat = 10;
+  /** 直近1秒のイベント回数（高密度ミックス判定用） */
+  private recentEventTimes: number[] = [];
   private beatIndex = 0;
   private kickIndex = 0;
   private snareIndex = 0;
   private hatIndex = 0;
   private transientIndex = 0;
+  private chopIndex = 0;
+  private salienceIndex = 0;
   private bpm = 0;
   private elapsed = 0;
   private lastPulseTime = 0;
@@ -379,12 +396,17 @@ class RhythmTracker {
     this.lastSnare = 10;
     this.lastHat = 10;
     this.lastTransient = 10;
+    this.lastChop = 10;
+    this.lastSalience = 10;
     this.lastBeat = 10;
+    this.recentEventTimes = [];
     this.beatIndex = 0;
     this.kickIndex = 0;
     this.snareIndex = 0;
     this.hatIndex = 0;
     this.transientIndex = 0;
+    this.chopIndex = 0;
+    this.salienceIndex = 0;
     this.bpm = 0;
     this.elapsed = 0;
     this.lastPulseTime = 0;
@@ -409,6 +431,23 @@ class RhythmTracker {
     this.kickRing = 0;
     this.snareRing = 0;
     this.hatRing = 0;
+  }
+
+  /** 直近1秒の検出イベント密度 0〜1（多いほど埋もれやすいミックス） */
+  private getDetectionBusy() {
+    const now = this.elapsed;
+    while (this.recentEventTimes.length > 0 && now - this.recentEventTimes[0] > 1) {
+      this.recentEventTimes.shift();
+    }
+    // 秒あたり ~12 イベントでほぼ満杯（メタル／チャグ想定）
+    return clamp01(this.recentEventTimes.length / 12);
+  }
+
+  private noteDetectionEvent() {
+    this.recentEventTimes.push(this.elapsed);
+    if (this.recentEventTimes.length > 32) {
+      this.recentEventTimes.shift();
+    }
   }
 
   private registerPulse(strength: number) {
@@ -438,10 +477,17 @@ class RhythmTracker {
           const cv = Math.sqrt(variance) / Math.max(fibUnit(2, 21), median);
           const sampleConfidence = clamp01((this.pulseIntervals.length - 1) / 3);
           this.pulseConfidence = clamp01(1 - cv * fibRatio(5, 3)) * sampleConfidence;
-          this.expectedPulseInterval = median;
+
+          // 細かいキック連打 IOI を「人が頭を振る拍」帯（約 72–160 BPM）へ畳む
+          // Fury のような倍テン／ダブルキックでも心地よいうなずき周期になる
+          let beatIoI = median;
+          while (beatIoI < 60 / 160) beatIoI *= 2;
+          while (beatIoI > 60 / 72) beatIoI *= 0.5;
+          const follow = this.pulseIntervals.length < 4 ? 0.55 : 0.28;
+          this.expectedPulseInterval += (beatIoI - this.expectedPulseInterval) * follow;
 
           if (this.pulseIntervals.length >= 3) {
-            let estimatedBpm = 60 / median;
+            let estimatedBpm = 60 / this.expectedPulseInterval;
             while (estimatedBpm < 70) estimatedBpm *= 2;
             while (estimatedBpm > 180) estimatedBpm *= 0.5;
             this.bpm += (estimatedBpm - this.bpm) * (this.bpm <= 0 ? 1 : 0.22);
@@ -519,6 +565,8 @@ class RhythmTracker {
     this.lastSnare += deltaTime;
     this.lastHat += deltaTime;
     this.lastTransient += deltaTime;
+    this.lastChop += deltaTime;
+    this.lastSalience += deltaTime;
     this.lastBeat += deltaTime;
 
     const waveHit =
@@ -539,10 +587,10 @@ class RhythmTracker {
     const kickTransient =
       peakDelta > fibUnit(3, 34) + this.deltaPeak * fibUnit(3, 13) ||
       energyDelta > fibUnit(2, 21) + this.deltaEnergy * fibUnit(2, 13);
-    // グリッド学習後は拍間隔の半分前後で連打を間引く（修羅場などの崩れ軽減）
+    // グリッド学習後は拍間隔の ~6 割で連打を間引く（J-pop など中テンポのキック過多を防ぐ）
     const minKickGap =
       this.pulseConfidence > 0.35
-        ? Math.max(0.052, this.expectedPulseInterval * 0.48)
+        ? Math.max(0.06, this.expectedPulseInterval * 0.62)
         : Math.max(0.04, fibUnit(5, 34));
     let kick = 0;
     if (
@@ -558,40 +606,56 @@ class RhythmTracker {
       );
     }
 
-    // --- snare: 中域立ち上がり + トランジェント（キック直後は抑える）---
-    const snareGate = 0.028 + this.deltaMid * 0.65;
-    const melodySnareGate = 0.018 + this.deltaMelody * 0.8;
-    const snareTransient = peakDelta > fibUnit(3, 34) || energyDelta > fibUnit(2, 34);
-    const snareFromMid =
-      this.lastSnare > 0.055 &&
-      onsetMid > snareGate &&
-      bands.mid > 0.06 &&
-      kick < 0.05 &&
-      snareTransient
-        ? onsetMid
-        : 0;
-    const snareFromMelody =
-      this.lastSnare > 0.045 &&
-      onsetMelody > melodySnareGate &&
-      bands.melody > 0.08 &&
-      kick < 0.05 &&
-      snareTransient
-        ? onsetMelody * 1.15
-        : 0;
-    const snare = Math.max(snareFromMid, snareFromMelody);
-    const snareLevel = Math.max(bands.mid, bands.melody * 0.85);
+    // --- snare: 胴(中域) + クラック。誤爆防止で聴こえる打点を落とさない ---
+    const minSnareGap =
+      this.pulseConfidence > 0.4
+        ? Math.max(0.08, this.expectedPulseInterval * 0.32)
+        : 0.1;
+    const snareGate = 0.02 + this.deltaMid * 0.42;
+    const snareCrackGate = 0.01 + this.deltaHigh * 0.32;
+    const snareBody = Math.max(bands.mid, bands.low * 0.35);
+    // 明るいクラック、または暗いスネア（波形ピーク＋中域胴）
+    const snareCrack =
+      (onsetHigh > snareCrackGate && bands.high > 0.024) ||
+      (peakDelta > fibUnit(5, 34) && bands.high > 0.028 && onsetHigh > 0.006) ||
+      (peakDelta > fibUnit(8, 34) && onsetMid > 0.022 && bands.mid > 0.06);
+    // ギター句頭のハード排他はやめ、メロが明らかに主導のときだけ弾く
+    const guitarPhraseLead =
+      onsetMelody > onsetMid * 1.35 &&
+      bands.melodyFocus > 0.3 &&
+      onsetHigh < Math.max(0.012, onsetMelody * 0.65);
+    let snare = 0;
+    if (
+      this.lastSnare > minSnareGap &&
+      kick < 0.2 &&
+      !guitarPhraseLead &&
+      snareBody > 0.055 &&
+      onsetMid > snareGate * 0.8 &&
+      (peakDelta > fibUnit(2, 34) ||
+        energyDelta > fibUnit(2, 34) ||
+        onsetHigh > 0.01 ||
+        onsetMid > 0.038)
+    ) {
+      if (snareCrack || (onsetMid > 0.048 && peakDelta > fibUnit(5, 34))) {
+        snare = Math.min(
+          1,
+          onsetMid * 1.15 + onsetHigh * 1.55 + peakDelta * 0.8 + energyDelta * 0.35,
+        );
+      }
+    }
+    const snareLevel = Math.max(bands.mid, bands.high * 0.75);
 
-    // --- hat: 拾いすぎない（ノイズ化を防ぐ）---
-    const hatGate = 0.014 + this.deltaHigh * 0.45;
+    // --- hat: 拾いすぎないが、チッチのトレンドは落とさない ---
+    const hatGate = 0.012 + this.deltaHigh * 0.4;
     const hat =
-      this.lastHat > 0.028 &&
+      this.lastHat > 0.022 &&
       onsetHigh > hatGate &&
-      bands.high > 0.028 &&
+      bands.high > 0.024 &&
       kick < 0.08 &&
       snare < 0.08 &&
-      onsetHigh > onsetMid * 0.9 &&
-      (peakDelta > fibUnit(3, 34) || energyDelta > fibUnit(2, 34))
-        ? onsetHigh * 1.1
+      onsetHigh > onsetMid * 0.85 &&
+      (peakDelta > fibUnit(3, 34) || energyDelta > fibUnit(2, 34) || onsetHigh > hatGate * 1.35)
+        ? onsetHigh * 1.15
         : 0;
 
     // --- transient: シンバル／クラッシュ（強めの高域＋波形だけ）---
@@ -610,12 +674,35 @@ class RhythmTracker {
       transient = Math.max(peakDelta * 1.1, energyDelta * 0.95);
     }
 
+    // --- chop: チャグ／カッティング。スネアのクラックとは排他 ---
+    const eventBusy = this.getDetectionBusy();
+    const chopGate = 0.01 + Math.max(this.deltaMid, this.deltaMelody) * 0.3 + eventBusy * 0.012;
+    const chopLevel = Math.max(bands.mid * 0.9, bands.melody * 1.25);
+    const chopOnset = Math.max(onsetMid * 0.9, onsetMelody * 1.25);
+    const minChopGap = 0.034 + eventBusy * 0.055;
+    let chop = 0;
+    if (
+      snare < 0.04 &&
+      this.lastChop > minChopGap &&
+      chopOnset > chopGate &&
+      chopLevel > 0.06 + eventBusy * 0.04 &&
+      // 明るいクラック優勢ならスネア側に譲る
+      onsetHigh < Math.max(0.02, chopOnset * 1.05) &&
+      (peakDelta > fibUnit(2, 34) + eventBusy * 0.02 ||
+        energyDelta > fibUnit(2, 34) + eventBusy * 0.015 ||
+        chopOnset > 0.016 + eventBusy * 0.02 ||
+        (bands.melodyFocus > 0.18 && eventBusy < 0.45))
+    ) {
+      chop = Math.min(1, chopOnset * 1.55 + peakDelta * 0.3);
+    }
+
     if (kick > 0) {
       this.lastKick = 0;
       this.kickIndex += 1;
       this.kickGateOpen = true;
       this.kickGateStart = this.elapsed;
       this.kickGatePeak = bassLevel;
+      this.noteDetectionEvent();
     }
     if (snare > 0) {
       this.lastSnare = 0;
@@ -623,6 +710,7 @@ class RhythmTracker {
       this.snareGateOpen = true;
       this.snareGateStart = this.elapsed;
       this.snareGatePeak = snareLevel;
+      this.noteDetectionEvent();
     }
     if (hat > 0) {
       this.lastHat = 0;
@@ -630,10 +718,42 @@ class RhythmTracker {
       this.hatGateOpen = true;
       this.hatGateStart = this.elapsed;
       this.hatGatePeak = bands.high;
+      this.noteDetectionEvent();
     }
     if (transient > 0) {
       this.lastTransient = 0;
       this.transientIndex += 1;
+      this.noteDetectionEvent();
+    }
+    if (chop > 0) {
+      this.lastChop = 0;
+      this.chopIndex += 1;
+      this.noteDetectionEvent();
+    }
+
+    // --- salience: 分類外の強いアタック。高密度では厳選して埋もれを防ぐ ---
+    const busy = this.getDetectionBusy();
+    const saliencePeakNeed = 0.055 + busy * 0.07;
+    const salienceEnergyNeed = 0.045 + busy * 0.055;
+    const minSalienceGap = 0.09 + busy * 0.14;
+    let salience = 0;
+    if (
+      this.lastSalience > minSalienceGap &&
+      kick < 0.05 &&
+      snare < 0.05 &&
+      hat < 0.05 &&
+      chop < 0.05 &&
+      transient < 0.05 &&
+      (peakDelta > saliencePeakNeed || energyDelta > salienceEnergyNeed) &&
+      bands.overall > 0.07 &&
+      (onsetMid > 0.012 || onsetHigh > 0.01 || onsetMelody > 0.014 || bassOnset > 0.014)
+    ) {
+      salience = Math.min(1, Math.max(peakDelta * 1.25, energyDelta * 1.1, onsetMid * 0.9 + onsetHigh * 0.7));
+    }
+    if (salience > 0) {
+      this.lastSalience = 0;
+      this.salienceIndex += 1;
+      this.noteDetectionEvent();
     }
 
     // 帯域が残っているあいだを長さとして確定（キック長め／ハット短めの上限）
@@ -756,12 +876,16 @@ class RhythmTracker {
       snare,
       hat,
       transient,
+      chop,
+      salience,
       beat,
       beatIndex: this.beatIndex,
       kickIndex: this.kickIndex,
       snareIndex: this.snareIndex,
       hatIndex: this.hatIndex,
       transientIndex: this.transientIndex,
+      chopIndex: this.chopIndex,
+      salienceIndex: this.salienceIndex,
       downbeat,
       bpm: this.bpm,
       pulsePhase: this.pulsePhase,
@@ -774,6 +898,7 @@ class RhythmTracker {
       kickRing: this.kickRing,
       snareRing: this.snareRing,
       hatRing: this.hatRing,
+      melodyOnset: clamp01(this.deltaMelody * 2.4),
       subLevel: bands.sub,
       wavePeak: peak,
       waveEnergy: rms,
@@ -927,40 +1052,48 @@ const surfaceFragmentShader = /* glsl */ `
     // オブジェクト局所座標のノイズ（ワールド固定だと回転で模様が滑って飛ぶ）
     float latitude = sin(vLocalPosition.y * 11.5 + flowTime * 2.8 + surfaceNoise * 2.2);
     float meridian = sin(dot(vLocalPosition, vec3(9.5, 0.7, 8.2)) - flowTime * 3.6 + fineNoise * 1.6);
-    float lineDrive = uLive * (0.62 + uHigh * 0.95);
-    float melodyLines = smoothstep(0.72, 0.98, latitude) * lineDrive * uMelodyLine;
+    // 音楽連動の uLive/uGlow — 形状は抑えめでも光は 7/28 以前の煌めきを残す
+    float liveAmt = clamp(uLive, 0.0, 1.15);
+    float glowAmt = clamp(uGlow, 0.0, 1.15);
+    // リード／ギター帯 (uMelody・uMid) でもラインが立つ。高域だけだとイントロリフが消える
+    float leadAmt = max(uMelody, uMid * 0.72);
+    float lineDrive = liveAmt * (0.55 + leadAmt * 0.75 + uHigh * 0.7);
+    float melodyLines = smoothstep(0.7, 0.98, latitude) * lineDrive * uMelodyLine;
     float dataLines = 0.0;
-    float microSignals = smoothstep(0.8, 0.995, meridian) * uHigh * lineDrive * 0.4;
+    float microSignals = smoothstep(0.8, 0.995, meridian) * uHigh * lineDrive * 0.95;
 
     vec3 baseColor = uPaletteColor;
     vec3 electricBlue = uPaletteAccent;
     vec3 melodyGold = vec3(1.0, 0.82, 0.52);
-    vec3 color = baseColor * 0.26;
-    float idleDim = 0.48 + uLive * 0.52;
-    color += electricBlue * (pearl * (0.72 + uHigh * 0.75)) * idleDim;
-    color += melodyGold * melodyLines;
-    color += melodyGold * pearl * uMelodyFresnel * lineDrive;
-    color += vec3(0.72, 0.94, 1.0) * microSignals * 0.28;
-    color += vec3(0.2, 0.42, 0.72) * surfaceNoise * uLive * 0.22;
-    color += vec3(0.55, 0.38, 0.22) * surfaceNoise * uMelodyNoise * lineDrive * 0.35;
+    vec3 color = baseColor * 0.2;
+    float idleDim = 0.42 + liveAmt * 0.5;
+    color += electricBlue * (pearl * (0.75 + uHigh * 0.95)) * idleDim;
+    color += melodyGold * melodyLines * 0.95;
+    color += melodyGold * pearl * uMelodyFresnel * lineDrive * 0.95;
+    color += vec3(0.72, 0.94, 1.0) * microSignals * 0.4;
+    color += vec3(0.2, 0.42, 0.72) * surfaceNoise * liveAmt * 0.2;
+    color += vec3(0.55, 0.38, 0.22) * surfaceNoise * uMelodyNoise * lineDrive * 0.32;
 
     float hotVeins = pow(noise(vLocalPosition * 9.5 + vec3(flowTime * 0.5)), 2.8);
     float ember = pow(noise(vLocalPosition * 22.0 - vec3(flowTime * 0.8)), 4.2);
-    color += vec3(0.45, 0.78, 1.0) * hotVeins * uGlow * (0.35 + uHigh * 0.55) * mix(0.55, 1.0, pearl);
-    color += vec3(0.92, 0.96, 1.0) * ember * uGlow * uHigh * 0.55 * mix(0.5, 1.0, pearl);
+    color += vec3(0.45, 0.78, 1.0) * hotVeins * glowAmt * (0.22 + uHigh * 0.32) * mix(0.7, 1.0, pearl);
+    // ember はパレットのみ（白寄りミックスなし）
+    color += electricBlue * ember * glowAmt * uHigh * 0.18 * mix(0.65, 1.0, pearl);
 
     // 透明外殻が強いと「中身が空っぽ」に見えやすいので、fresnel/ラインの寄与を抑える
-    float alpha = uOpacity + pearl * 0.1 * idleDim + melodyLines * 0.05 + microSignals * 0.03;
-    alpha += hotVeins * uGlow * 0.07 + ember * uGlow * uHigh * 0.05;
-    alpha += lineDrive * pearl * uMelodyFresnel * 0.05;
+    float alpha = uOpacity + pearl * 0.08 * idleDim + melodyLines * 0.04 + microSignals * 0.04;
+    alpha += hotVeins * glowAmt * 0.045 + ember * glowAmt * uHigh * 0.03;
+    alpha += lineDrive * pearl * uMelodyFresnel * 0.045;
     alpha *= mix(1.0, 0.58, frozen);
 
-    // vita: 真珠光沢 — 回転で色相が飛ばないよう緩やかに
+    // vita: 真珠は色付きの薄い艶。明るさ・白みをさらに抑える
     if (uVita > 0.5) {
-      vec3 irid = 0.5 + 0.5 * cos(6.28318 * (pearl * 0.55 + vec3(0.02, 0.18, 0.52)) + flowTime * 0.18);
-      vec3 pearlColor = irid * mix(vec3(1.0), uPaletteColor * 1.7, 0.55);
-      color = mix(color, color * 0.45 + pearlColor * (0.35 + uBreath * 0.4), 0.48 * idleDim);
-      alpha += (0.03 + pearl * 0.09 + uBreath * pearl * 0.07) * idleDim;
+      vec3 irid = 0.42 + 0.38 * cos(6.28318 * (pearl * 0.85 + vec3(0.02, 0.18, 0.52)) + flowTime * 0.22);
+      vec3 pearlColor = irid * mix(uPaletteColor * 0.92, uPaletteColor * 1.18, 0.8);
+      color = mix(color, color * 0.58 + pearlColor * (0.28 + uBreath * 0.22), 0.3 * idleDim);
+      alpha += (0.01 + pearl * 0.04 + uBreath * pearl * 0.028) * idleDim;
+      alpha = min(alpha, 0.52);
+      color = min(color, vec3(0.88));
     }
 
     // petrify: 下から上へ結晶化が進む（変容スタイル）
@@ -983,6 +1116,10 @@ const surfaceFragmentShader = /* glsl */ `
 class AudioInput {
   private context: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
+  /** スピーカー出力専用。解析前段には入れず、ブラウザ再生音量だけを変える */
+  private outputGain: GainNode | null = null;
+  private outputVolume = 0.8;
+  private monitoringConnected = false;
   private data: Uint8Array<ArrayBuffer> | null = null;
   private timeData: Uint8Array<ArrayBuffer> | null = null;
   private stream: MediaStream | null = null;
@@ -1046,9 +1183,9 @@ class AudioInput {
   /** ピーク減衰（非常に遅い; 時定数 ~55 秒）— 曲全体のスケール感を保持する */
   private static readonly BAND_NORM_RELEASE = 1 / 55;
   /** ピーク正規化の混ぜ具合（1=フルAGC／0=絶対値のみ）。下げると静かな所の過剰反応を抑える */
-  private static readonly BAND_NORM_AMOUNT = 0.52;
+  private static readonly BAND_NORM_AMOUNT = 0.36;
   /** >1 で中域を落としピークを残す（コンプを弱めてダイナミクスを広げる） */
-  private static readonly BAND_NORM_CURVE = 1.28;
+  private static readonly BAND_NORM_CURVE = 1.12;
   private profile = createEmptyAudioProfile();
   private previousProfileBands: AudioBands | null = null;
   private lowProfileTotal = 0;
@@ -1244,14 +1381,46 @@ class AudioInput {
     }
     this.bufferSource?.disconnect();
     this.bufferSource = null;
+    this.disconnectMonitoring();
+  }
 
-    if (this.analyser && this.context) {
-      try {
-        this.analyser.disconnect(this.context.destination);
-      } catch {
-        // not connected
-      }
+  /** ブラウザ再生音量 (0–1)。解析・造形には影響しない */
+  setOutputVolume(value: number) {
+    this.outputVolume = clamp01(value);
+    if (this.outputGain) {
+      this.outputGain.gain.value = this.outputVolume;
     }
+  }
+
+  getOutputVolume() {
+    return this.outputVolume;
+  }
+
+  private connectMonitoring() {
+    if (!this.analyser || !this.outputGain || !this.context || this.monitoringConnected) {
+      return;
+    }
+    this.analyser.connect(this.outputGain);
+    this.outputGain.connect(this.context.destination);
+    this.monitoringConnected = true;
+  }
+
+  private disconnectMonitoring() {
+    if (!this.analyser || !this.outputGain || !this.context || !this.monitoringConnected) {
+      this.monitoringConnected = false;
+      return;
+    }
+    try {
+      this.analyser.disconnect(this.outputGain);
+    } catch {
+      // not connected
+    }
+    try {
+      this.outputGain.disconnect(this.context.destination);
+    } catch {
+      // not connected
+    }
+    this.monitoringConnected = false;
   }
 
   async playBandIsolationTest(
@@ -1268,7 +1437,7 @@ class AudioInput {
       await this.context.resume();
     }
 
-    this.analyser.connect(this.context.destination);
+    this.connectMonitoring();
 
     let startAt = this.context.currentTime + 0.08;
     const gap = 0.4;
@@ -1312,7 +1481,7 @@ class AudioInput {
     source.buffer = this.devAudioBuffer;
     source.loop = false;
     source.connect(this.analyser);
-    this.analyser.connect(this.context.destination);
+    this.connectMonitoring();
     const when = this.context.currentTime;
     source.start(when);
     this.playbackStartAt = when;
@@ -1321,6 +1490,7 @@ class AudioInput {
   }
 
   private disconnect() {
+    this.disconnectMonitoring();
     this.stream?.getTracks().forEach((track) => track.stop());
     this.source?.disconnect();
     this.bufferSource?.stop();
@@ -1328,6 +1498,7 @@ class AudioInput {
     this.stream = null;
     this.source = null;
     this.bufferSource = null;
+    this.outputGain = null;
   }
 
   private clearDeterministicSession() {
@@ -1346,6 +1517,9 @@ class AudioInput {
     this.analyser.fftSize = 2048;
     // ビート/ハイハットの瞬間を拾いやすくする（常時ノイズではなくオンセット駆動に寄せる）
     this.analyser.smoothingTimeConstant = 0.09;
+    this.outputGain = this.context.createGain();
+    this.outputGain.gain.value = this.outputVolume;
+    this.monitoringConnected = false;
     this.data = new Uint8Array(this.analyser.frequencyBinCount);
     this.timeData = new Uint8Array(this.analyser.fftSize);
     this.resetProfile();
@@ -1397,7 +1571,8 @@ class AudioInput {
     const sub = this.readBand(30, 120);
     const low = this.readBand(120, 400);
     const mid = this.readBand(400, 2000);
-    const melody = this.readBand(700, 1500);
+    // 目立つギターリフ／主旋律 (でっでででででー 等) が乗る 500–1800 Hz
+    const melody = this.readBand(500, 1800);
     const presence = this.readBandHybrid(1800, 6500);
     const air = this.readBandHybrid(5000, 18000);
     const high = presence * 0.38 + air * 0.62;
@@ -1406,7 +1581,9 @@ class AudioInput {
     const spectralTotal = sub + low + mid + high + melody * 0.35 + 0.0001;
     const centroid = this.readCentroid(24, 9000);
     const bassFocus = (sub + low) / spectralTotal;
-    const melodyFocus = melody / spectralTotal;
+    // キック胴でメロ存在感が潰れないよう、低域の分母を少し抑える
+    const melodyFocus =
+      melody / (sub * 0.55 + low * 0.7 + mid * 0.85 + high + melody * 0.4 + 0.0001);
     const brightness = high / spectralTotal;
     const contrast =
       (Math.abs(sub - mid) +
@@ -1659,9 +1836,17 @@ class AudioInput {
     const lateMelodyFocus =
       this.lateMelodyFocusProfileTotal / Math.max(0.0001, this.lateProfileSamples);
     this.profile.sectionContrast = clamp01(
-      Math.abs(lateCentroid - earlyCentroid) * 0.9 +
-        Math.abs(lateBrightness - earlyBrightness) * 0.75 +
-        Math.abs(lateMelodyFocus - earlyMelodyFocus) * 1.2,
+      Math.abs(lateCentroid - earlyCentroid) * 0.75 +
+        Math.abs(lateBrightness - earlyBrightness) * 0.6 +
+        Math.abs(lateMelodyFocus - earlyMelodyFocus) * 0.95 +
+        // 静かと盛り上がりの両立・時間変動も「セクション差」として種・パレットへ
+        Math.sqrt(
+          Math.max(0, this.quietProfileDuration / Math.max(0.0001, this.profile.duration)) *
+            Math.max(0, this.loudProfileDuration / Math.max(0.0001, this.profile.duration)),
+        ) *
+          2.4 +
+        (this.variationProfileTotal / Math.max(0.0001, this.profile.activeDuration || this.profile.duration)) *
+          0.28,
     );
     this.profile.variation = this.variationProfileTotal / activeDuration;
     this.profile.attackAmount = this.attackProfileTotal / activeDuration;
@@ -1908,6 +2093,16 @@ class SoundSculpture {
   private claySatBase = 0.18;
   private clayLightBase = 0.78;
   private clayColorShift = createClayColorShift();
+  private weatherClayShift = createClayColorShift();
+  private lastWeatherClayKey = "";
+  private lastWeatherSnapshot: import("./live-weather").LiveWeatherSnapshot | null = null;
+  private lastWeatherHour = 12;
+  /** 再生中に蓄積プロファイルから導いた曲パレット（完成前） */
+  private liveSongPalette: SculpturePalette | null = null;
+  /** 0=スタイル基準色 → 1=曲パレット（天気は常に両方へ加算） */
+  private songColorBlend = 0;
+  private pearlColorBakeCooldown = 0;
+  private lastPearlBakeHue = -1;
   private readonly targetCoreColor = new THREE.Color(CLAY_CORE_COLOR);
   private readonly targetCoreEmissive = new THREE.Color(0x000000);
   private particleCursor = 0;
@@ -1944,6 +2139,8 @@ class SoundSculpture {
   private lastSnareIndexApplied = -1;
   private lastHatIndexApplied = -1;
   private lastTransientIndexApplied = -1;
+  private lastChopIndexApplied = -1;
+  private lastSalienceIndexApplied = -1;
   private lastPulseIndexApplied = -1;
   private kickImpulse = 0;
   private snareImpulse = 0;
@@ -1958,8 +2155,16 @@ class SoundSculpture {
   /** ギター／中域メロディのうねり */
   private guitarImpulse = 0;
   private guitarFlash = 0;
+  /** メロディ句頭（人がフレーズの立ち上がりで感じる反応） */
+  private melodyPhraseImpulse = 0;
+  /** 音数の多いミックスでイベントが埋もれないよう、直近の視覚イベント密度 */
+  private mixBusy = 0;
+  /** キック／スネア直後は副次イベントを抑える排他窓 */
+  private primaryHitLock = 0;
   /** ドラム起点 LIVE ゲート（キック／スネアが鳴っているときだけ大きく動かす） */
   private drumLiveGate = 0;
+  /** エネルギーサージ直後の永久蓄積ブースト（減衰） */
+  private sectionSurgeBoost = 0;
   private lastBands: AudioBands | null = null;
   private readonly baseScale = new THREE.Vector3(1, 1, 1);
   /** 周囲 FX をワールド固定にするための逆クォータニオン */
@@ -2307,6 +2512,7 @@ class SoundSculpture {
   /**
    * vita 用: コアの頂点カラーに真珠の干渉色（青緑〜藤〜桃）のムラを焼き込む。
    * 単色の初期状態でも生命の質感が出る。マテリアルカラーと乗算される。
+   * ※明度を上げすぎると再生中のハイライトと重なってチョーク白に見えるため、上限を抑える。
    */
   private bakeCorePearlColors(amount: number) {
     const position = this.geometry.attributes.position;
@@ -2325,10 +2531,13 @@ class SoundSculpture {
       const p3 = growthPattern(nx * 0.85, ny * 1.15, nz * 0.95, this.morphologySeed + 31.4);
       const hue = (this.clayHueBase + p1 * 0.18 + p3 * 0.1 + ny * 0.05 + p2 * 0.04 + 1) % 1;
       const saturation = clamp01(
-        this.claySatBase + (Math.abs(p2) * 0.32 + Math.abs(p3) * 0.14) * amount * 0.55,
+        this.claySatBase + (Math.abs(p2) * 0.38 + Math.abs(p3) * 0.16) * amount * 0.65,
       );
       const lightness = clamp01(
-        this.clayLightBase + p1 * 0.12 * amount * 0.4 + p2 * 0.05 * amount + p3 * 0.03 * amount,
+        Math.min(
+          0.62,
+          this.clayLightBase + p1 * 0.08 * amount * 0.35 + p2 * 0.03 * amount + p3 * 0.02 * amount,
+        ),
       );
       color.setHSL(hue, saturation, lightness);
       const idx = i * 3;
@@ -2374,56 +2583,233 @@ class SoundSculpture {
     this.coreMaterial.needsUpdate = true;
   }
 
-  private applyMembraneClayPalette(palette: { hue: number; sat: number; light: number }) {
+  private applyMembraneClayPalette(palette: { hue: number; sat: number; light: number }, fullness = 0) {
+    const f = clamp01(fullness);
+    const satMul = THREE.MathUtils.lerp(0.85, 1.05, f);
+    const satCap = THREE.MathUtils.lerp(0.42, 0.92, f);
+    const lightMul = THREE.MathUtils.lerp(0.94, 1, f);
+    const lightCap = THREE.MathUtils.lerp(0.72, 0.82, f);
     const base = new THREE.Color().setHSL(
       palette.hue,
-      Math.min(0.42, palette.sat * 0.85),
-      Math.min(0.72, palette.light * 0.94),
+      Math.min(satCap, palette.sat * satMul),
+      Math.min(lightCap, palette.light * lightMul),
     );
     const accent = new THREE.Color().setHSL(
       (palette.hue + 0.08 + 1) % 1,
-      Math.min(0.48, palette.sat * 0.95),
-      Math.min(0.68, palette.light * 0.88),
+      Math.min(THREE.MathUtils.lerp(0.48, 0.95, f), palette.sat * THREE.MathUtils.lerp(0.95, 1.1, f)),
+      Math.min(THREE.MathUtils.lerp(0.68, 0.78, f), palette.light * THREE.MathUtils.lerp(0.88, 1, f)),
     );
     (this.surfaceMaterial.uniforms.uPaletteColor.value as THREE.Color).copy(base);
     (this.surfaceMaterial.uniforms.uPaletteAccent.value as THREE.Color).copy(accent);
   }
 
-  private rebakeCoreClayColors() {
-    const st = this.style.core;
-    if (st.pearlVariation > 0) {
-      this.bakeCorePearlColors(st.pearlVariation);
-      return;
+  /**
+   * 表示色の目標:
+   * lerp(スタイル+クリック+天気, 曲パレット+クリック+天気, songColorBlend)
+   * 天気シフトはそれぞれの基準色相から再計算（スタイル青の差分を曲色に足して wrap 赤化するのを防ぐ）
+   */
+  private resolveEvolvingClayTarget(): {
+    hue: number;
+    sat: number;
+    light: number;
+    song?: SculpturePalette;
+  } {
+    const stylePal = resolveClayPalette(
+      clayStyleFromVisualCore(this.style.core),
+      combineClayShifts(this.clayColorShift, this.weatherClayShift),
+    );
+    const songSource = this.completionPalette ?? this.liveSongPalette;
+    if (!songSource || this.songColorBlend <= 0.0005) {
+      return { hue: stylePal.hue, sat: stylePal.sat, light: stylePal.light };
     }
-    this.bakeCoreClayMottle(0.18);
+    // 曲色を基準に天気・時刻を同じ pull 強度で適用
+    const songWeather = envClayShiftFromWeatherAndHour(
+      this.lastWeatherSnapshot,
+      this.lastWeatherHour,
+      songSource.hue,
+    );
+    const songPal = applyEnvShiftToSculpturePalette(
+      applyEnvShiftToSculpturePalette(songSource, this.clayColorShift),
+      songWeather,
+    );
+    const b = clamp01(this.songColorBlend);
+    return {
+      hue: lerpHueShortest(stylePal.hue, songPal.hue, b),
+      sat: THREE.MathUtils.lerp(stylePal.sat, songPal.saturation, b),
+      light: THREE.MathUtils.lerp(stylePal.light, songPal.lightness, b),
+      song: songPal,
+    };
   }
 
-  /** スタイル基準 + クリックシフトで粘土・膜の色を一括同期 */
-  private syncClayColors() {
+  /** 目標色へ滑らかに追従（曲の蓄積・天気・時刻の変化を吸収） */
+  private refreshEvolvingClayColors(deltaTime: number, snap = false) {
+    if (this.completed) {
+      return;
+    }
+    const target = this.resolveEvolvingClayTarget();
+    const follow = snap ? 1 : Math.min(1, deltaTime * 2.1);
+    this.clayHueBase = lerpHueShortest(this.clayHueBase, target.hue, follow);
+    this.claySatBase += (target.sat - this.claySatBase) * follow;
+    this.clayLightBase += (target.light - this.clayLightBase) * follow;
+
     const st = this.style.core;
-    const palette = resolveClayPalette(clayStyleFromVisualCore(st), this.clayColorShift);
-    this.clayHueBase = palette.hue;
-    this.claySatBase = palette.sat;
-    this.clayLightBase = palette.light;
-
-    this.innerCoreMaterial.color.setHex(palette.innerHex);
-
     if (st.pearlVariation > 0) {
       this.coreMaterial.color.set(0xffffff);
     } else {
-      this.coreMaterial.color.setHex(palette.surfaceHex);
-      this.targetCoreColor.setHex(palette.surfaceHex);
+      this.targetCoreColor.setHSL(this.clayHueBase, this.claySatBase, this.clayLightBase);
+      this.coreMaterial.color.lerp(this.targetCoreColor, follow);
+      this.innerCoreMaterial.color.setHSL(
+        this.clayHueBase,
+        clamp01(this.claySatBase * 0.96),
+        clamp01(this.clayLightBase - 0.06),
+      );
     }
 
     if (this.style.membrane.visible) {
-      this.applyMembraneClayPalette(palette);
+      const fullness = clamp01(this.songColorBlend);
+      if (target.song && fullness > 0.55) {
+        // 後半は曲パレット色を膜へそのまま寄せる（完成時のジャンプを防ぐ）
+        const memBlend = snap ? 1 : Math.min(1, deltaTime * (0.8 + fullness));
+        const memBase = this.surfaceMaterial.uniforms.uPaletteColor.value as THREE.Color;
+        const memAccent = this.surfaceMaterial.uniforms.uPaletteAccent.value as THREE.Color;
+        const muted = {
+          hue: this.clayHueBase,
+          sat: this.claySatBase,
+          light: this.clayLightBase,
+        };
+        this.applyMembraneClayPalette(muted, fullness);
+        if (fullness > 0.75) {
+          memBase.lerp(target.song.baseColor, memBlend * (fullness - 0.75) / 0.25);
+          memAccent.lerp(target.song.accentColor, memBlend * (fullness - 0.75) / 0.25);
+        }
+      } else {
+        this.applyMembraneClayPalette(
+          { hue: this.clayHueBase, sat: this.claySatBase, light: this.clayLightBase },
+          fullness,
+        );
+      }
     }
+
+    this.pearlColorBakeCooldown = Math.max(0, this.pearlColorBakeCooldown - deltaTime);
+    let hueDist = Math.abs(this.clayHueBase - this.lastPearlBakeHue);
+    if (hueDist > 0.5) hueDist = 1 - hueDist;
+    if (
+      st.pearlVariation > 0 &&
+      (snap || this.pearlColorBakeCooldown <= 0 || hueDist > 0.012 || this.lastPearlBakeHue < 0)
+    ) {
+      this.bakeCorePearlColors(st.pearlVariation);
+      this.lastPearlBakeHue = this.clayHueBase;
+      this.pearlColorBakeCooldown = snap ? 0.05 : 0.22;
+    } else if (st.pearlVariation <= 0 && (snap || this.pearlColorBakeCooldown <= 0)) {
+      this.bakeCoreClayMottle(0.18);
+      this.pearlColorBakeCooldown = 0.35;
+    }
+  }
+
+  /** スタイル基準 + クリック + 天気（＋再生中は曲色ブレンド） */
+  private syncClayColors() {
+    this.refreshEvolvingClayColors(0, true);
+  }
+
+  /** 曲パレット + 天気・時刻（曲の色相を基準に同じ pull 強度） */
+  private getDisplayCompletionPalette(): SculpturePalette {
+    const base = this.completionPalette ?? this.liveSongPalette ?? NEUTRAL_SCULPTURE_PALETTE;
+    const songWeather = envClayShiftFromWeatherAndHour(
+      this.lastWeatherSnapshot,
+      this.lastWeatherHour,
+      base.hue,
+    );
+    return applyEnvShiftToSculpturePalette(
+      applyEnvShiftToSculpturePalette(base, this.clayColorShift),
+      songWeather,
+    );
+  }
+
+  /** 完成色（曲 + 環境）を粘土・膜へ反映。完成後の天気更新でも使う */
+  private applyCompletionEnvColors() {
+    const palette = this.getDisplayCompletionPalette();
+    const uniforms = this.surfaceMaterial.uniforms;
+    const isVitaPearl =
+      this.style.completion.mode === "breathe" && this.style.core.pearlVariation > 0;
+
+    this.clayHueBase = palette.hue;
+    this.claySatBase = clamp01(palette.saturation);
+    this.clayLightBase = clamp01(palette.lightness);
+
+    if (isVitaPearl) {
+      (uniforms.uPaletteColor.value as THREE.Color).copy(palette.baseColor);
+      (uniforms.uPaletteAccent.value as THREE.Color).copy(palette.accentColor);
+      this.coreMaterial.color.set(0xffffff);
+      this.bakeCorePearlColors(this.style.core.pearlVariation);
+      this.lastPearlBakeHue = this.clayHueBase;
+    } else {
+      (uniforms.uPaletteColor.value as THREE.Color).copy(palette.baseColor);
+      (uniforms.uPaletteAccent.value as THREE.Color).copy(palette.accentColor);
+      this.coreMaterial.color.copy(palette.baseColor);
+      this.targetCoreColor.copy(palette.baseColor);
+      this.innerCoreMaterial.color.copy(palette.baseColor).multiplyScalar(0.88);
+    }
+  }
+
+  /**
+   * 再生中: 蓄積プロファイルから曲色を更新し、スタイル色から徐々に寄せる。
+   * 天気・時刻は weatherClayShift 経由で毎フレーム加味される。
+   */
+  evolveSongColors(
+    profile: import("./audio-palette").AudioProfileSummary | null,
+    deltaTime: number,
+  ) {
+    if (this.completed) {
+      return;
+    }
+    const hasSignal = profile !== null && profile.activeDuration > 0.5;
+    if (hasSignal) {
+      this.liveSongPalette = deriveSculpturePalette(profile);
+      // 序盤は控えめ、おおよそ 3 分かけて完成色へ（完成瞬間の急変を避ける）
+      const active = profile.activeDuration;
+      const targetBlend = clamp01(
+        smoothstep(6, 40, active) * 0.35 + smoothstep(40, 180, active) * 0.65,
+      );
+      this.songColorBlend += (targetBlend - this.songColorBlend) * Math.min(1, deltaTime * 0.42);
+    } else {
+      this.songColorBlend += (0 - this.songColorBlend) * Math.min(1, deltaTime * 0.35);
+    }
+    this.refreshEvolvingClayColors(deltaTime);
   }
 
   nudgeClayColorOnClick() {
     this.clayColorShift = nudgeClayColorShift(this.clayColorShift);
     this.syncClayColors();
-    this.rebakeCoreClayColors();
+  }
+
+  /** 天気・時刻に合わせて粘土質（内側含む）の色を更新 */
+  applyWeatherClayTint(
+    snapshot: import("./live-weather").LiveWeatherSnapshot | null,
+    hour = 12,
+  ) {
+    this.lastWeatherSnapshot = snapshot;
+    this.lastWeatherHour = hour;
+    const next = envClayShiftFromWeatherAndHour(snapshot, hour, this.style.core.hueBase);
+    // 時刻は連続変化させる（分キーだけで間引かない）
+    const fineKey = Math.round((((hour % 24) + 24) % 24) * 240); // 15秒粒度
+    const key = snapshot
+      ? `${snapshot.condition}:${snapshot.cloudCover.toFixed(2)}:${snapshot.rainIntensity.toFixed(2)}:${snapshot.lightningIntensity.toFixed(2)}:${fineKey}`
+      : `none:${fineKey}`;
+    const shiftDelta =
+      Math.abs(next.hue - this.weatherClayShift.hue) +
+      Math.abs(next.sat - this.weatherClayShift.sat) +
+      Math.abs(next.light - this.weatherClayShift.light);
+    this.weatherClayShift = next;
+    if (key === this.lastWeatherClayKey && shiftDelta < 0.0006) {
+      return;
+    }
+    this.lastWeatherClayKey = key;
+    if (this.completed && this.completionPalette) {
+      this.applyCompletionEnvColors();
+      return;
+    }
+    // 目標だけ更新。見た目の追従は evolveSongColors / refresh 側
+    this.refreshEvolvingClayColors(0.05);
   }
 
   private makeCircleTexture() {
@@ -2518,6 +2904,41 @@ class SoundSculpture {
     this.morphWeights.spindle *= inv;
   }
 
+  /** 勝者を強く残す（1.32 では差が薄い） */
+  private static readonly MORPH_WINNER_POW = 2.05;
+
+  private emphasizeMorphWeights(weights: MorphWeights): MorphWeights {
+    const pow = SoundSculpture.MORPH_WINNER_POW;
+    const next: MorphWeights = {
+      diabolo: Math.pow(Math.max(1e-6, weights.diabolo), pow),
+      torus: Math.pow(Math.max(1e-6, weights.torus), pow),
+      monolith: Math.pow(Math.max(1e-6, weights.monolith), pow),
+      coral: Math.pow(Math.max(1e-6, weights.coral), pow),
+      spindle: Math.pow(Math.max(1e-6, weights.spindle), pow),
+    };
+    const sum = next.diabolo + next.torus + next.monolith + next.coral + next.spindle;
+    const inv = 1 / Math.max(0.0001, sum);
+    next.diabolo *= inv;
+    next.torus *= inv;
+    next.monolith *= inv;
+    next.coral *= inv;
+    next.spindle *= inv;
+    return next;
+  }
+
+  /** 完成時: 種＋algo から強調したモルフ目標を作る */
+  private buildFinalizedMorphWeights(species: SpeciesProfile): MorphWeights {
+    const target = speciesMorphTargets(species);
+    const algoBias = getGrowthAlgoSilhouetteBias();
+    return this.emphasizeMorphWeights({
+      diabolo: target.diabolo * algoBias.diabolo,
+      torus: target.torus * algoBias.torus,
+      monolith: target.monolith * algoBias.monolith,
+      coral: target.coral * algoBias.coral,
+      spindle: target.spindle * algoBias.spindle,
+    });
+  }
+
   private lerpMorphWeights(target: MorphWeights, t: number) {
     const w = this.morphWeights;
     w.diabolo += (target.diabolo - w.diabolo) * t;
@@ -2530,6 +2951,129 @@ class SoundSculpture {
 
   private getFormationScale() {
     return getStructureFormationScale(this.currentStructure);
+  }
+
+  /**
+   * セクション相対エネルギーに応じた永久蓄積倍率。
+   * 静かな区間は控えめ、盛り上がり／サージで深く刻み、完成シルエットに静動差を残す。
+   */
+  private getSectionAccumMul() {
+    const lift = this.currentStructure.sectionLift;
+    const surge = this.sectionSurgeBoost;
+    // quiet ≈ 0.18–0.35 / loud ≈ 1.4–2.5（旧 0.46+ だと静区間も同程度に膨らんで差が薄れる）
+    return 0.18 + lift * 1.55 + surge * 0.85;
+  }
+
+  /**
+   * 表面テクスチャ（mid bumps / high spikes）用のセクション倍率。
+   * 静は滑らか、動はざらつき・棘を強く残す。
+   */
+  private getSectionTextureMul() {
+    const lift = this.currentStructure.sectionLift;
+    const surge = this.sectionSurgeBoost;
+    return 0.12 + lift * 1.85 + surge * 1.1;
+  }
+
+  /**
+   * 描画だけのライブ振幅スケール（永久層への bleed には掛けない）。
+   * 平常時も少し残し、イベントで開く（少し前の LIVE 感に戻す）。
+   */
+  private getLiveDrawScale(bands: AudioBands) {
+    const listen = this.getQuietLivePresence(bands);
+    return 0.27 + listen * 0.5;
+  }
+
+  /**
+   * LIVE リズム・ジェスチャー駆動（聴感トレンド）。
+   * - thump: ばっ／ばーん（キック・バス・拍）
+   * - ting: ちん！（スネア等の鋭い打点）
+   * - chatter: ジャカジャカ（チョップ・チャグ・句頭）
+   * - sparkle: ハット等の装飾
+   */
+  private getListeningEventDrive(bands: AudioBands) {
+    const busy = this.mixBusy;
+    const listen = this.getQuietLivePresence(bands);
+    const bob = this.getGrooveBob() * (0.7 + listen * 0.3);
+    const thump = clamp01(
+      this.kickImpulse * 1.15 +
+        this.peakPunch * 0.55 +
+        bob * 0.5 +
+        (this.currentStructure.events.energySurge ? 0.22 : 0),
+    );
+    const ting = clamp01(this.snareImpulse * 1.05 + this.snareFlash * 0.75);
+    const chatter = clamp01(
+      this.guitarFlash * 1.15 +
+        this.guitarImpulse * 0.25 +
+        this.melodyPhraseImpulse * 0.45,
+    );
+    const sparkle = clamp01(
+      (this.hatImpulse * 0.85 + this.hatFlash * 1.15 + this.waveImpulse * 0.35) *
+        (1 - busy * 0.2) *
+        (this.primaryHitLock > 0 ? 0.7 : 1),
+    );
+    return {
+      thump,
+      ting,
+      chatter,
+      body: thump,
+      crack: ting,
+      phrase: chatter,
+      sparkle,
+      listen,
+      busy,
+    };
+  }
+
+  /**
+   * 人が聴いて「今反応する」瞬間の存在感。
+   * 蓄積パスには掛けない。
+   */
+  private getQuietLivePresence(bands: AudioBands) {
+    const r = latestRhythm;
+    const busy = this.mixBusy;
+    const events = clamp01(
+      this.kickImpulse * 1.15 +
+        this.snareImpulse * 0.95 +
+        this.peakPunch * 0.55 +
+        this.guitarImpulse * (0.55 - busy * 0.2) +
+        this.guitarFlash * (0.7 - busy * 0.22) +
+        this.melodyPhraseImpulse * (0.9 - busy * 0.25) +
+        this.hatFlash * 0.16 +
+        this.waveImpulse * 0.4 +
+        this.sectionSurgeBoost * 0.4 +
+        (this.currentStructure.events.energySurge ? 0.35 : 0),
+    );
+    const bob =
+      this.getGrooveBob() *
+      smoothstep(0.45, 0.8, r.pulseConfidence) *
+      (0.35 + r.pulseEnvelope * 0.65) *
+      (1 - busy * 0.3);
+    const melodic = clamp01(
+      this.melodyPhraseImpulse * 0.85 +
+        this.guitarFlash * (0.55 - busy * 0.2) +
+        this.guitarImpulse * (0.35 - busy * 0.15) +
+        bands.melodyFocus * r.melodyOnset * (1.2 - busy * 0.4),
+    );
+    return clamp01(events * 0.78 + bob * 0.35 + melodic * 0.55);
+  }
+
+  /** Fly Away / Fury / 修羅場など音数が多いときの埋もれ度 0〜1 */
+  private refreshMixBusy(deltaTime: number) {
+    const s = this.currentStructure;
+    const sp = this.getSpecies();
+    const target = clamp01(
+      s.density * 0.48 +
+        sp.aggressive * 0.25 +
+        (1 - sp.organic) * 0.08 +
+        s.tension * 0.12 +
+        this.mixBusy * 0.12,
+    );
+    this.mixBusy += (target - this.mixBusy) * Math.min(1, deltaTime * 1.8);
+    this.mixBusy *= Math.exp(-deltaTime * 0.55);
+  }
+
+  private noteVisualEvent(weight = 1) {
+    this.mixBusy = Math.min(1, this.mixBusy + 0.14 * weight);
   }
 
   private getDetailScale() {
@@ -2634,7 +3178,8 @@ class SoundSculpture {
     };
 
     const speciesTarget = speciesMorphTargets(sp);
-    const bandBlend = fibUnit(2, 13);
+    // ライブ帯域ブレンドを弱め、種のシルエット差を完成形に残す
+    const bandBlend = fibUnit(1, 13);
     const liveOverallBlend = bands.overall * bandBlend;
     const speciesWeights: MorphWeights = {
       diabolo:
@@ -2702,11 +3247,13 @@ class SoundSculpture {
       liveSoft * 0.4 + bands.bassFocus * softBias * 0.35 + (1 - coralCue) * softBias * 0.35,
     );
 
-    targetWeights.monolith *= 0.5 + liveHard * 0.65 + massCue * 1.08;
-    targetWeights.spindle *= 0.34 + liveHard * 0.38 + spindleCue * 2.0;
-    targetWeights.diabolo *= 0.5 + liveSoft * 0.7 + diaboloCue * 0.95;
-    targetWeights.coral *= 0.42 + liveSoft * 0.65 + coralCue * 1.25;
-    targetWeights.torus *= 0.38 + torusCue * 1.35 + rhythmic * 0.32;
+    // 種が確定するほどライブ帯域補正を弱め、完成シルエットを種に寄せる
+    const liveMorph = 1 - speciesConfidence * 0.7;
+    targetWeights.monolith *= 1 + (0.55 + liveHard * 0.75 + massCue * 1.15 - 1) * liveMorph;
+    targetWeights.spindle *= 1 + (0.34 + liveHard * 0.38 + spindleCue * 2.0 - 1) * liveMorph;
+    targetWeights.diabolo *= 1 + (0.42 + liveSoft * 0.55 + diaboloCue * 0.75 - 1) * liveMorph;
+    targetWeights.coral *= 1 + (0.42 + liveSoft * 0.65 + coralCue * 1.25 - 1) * liveMorph;
+    targetWeights.torus *= 1 + (0.38 + torusCue * 1.35 + rhythmic * 0.32 - 1) * liveMorph;
 
     // アルゴリズム差を大域シルエットにも残す
     const algoBias = getGrowthAlgoSilhouetteBias();
@@ -2715,25 +3262,8 @@ class SoundSculpture {
     targetWeights.monolith *= algoBias.monolith;
     targetWeights.coral *= algoBias.coral;
     targetWeights.spindle *= algoBias.spindle;
-    targetWeights.diabolo = Math.pow(targetWeights.diabolo, 1.12);
-    targetWeights.torus = Math.pow(targetWeights.torus, 1.12);
-    targetWeights.monolith = Math.pow(targetWeights.monolith, 1.12);
-    targetWeights.coral = Math.pow(targetWeights.coral, 1.12);
-    targetWeights.spindle = Math.pow(targetWeights.spindle, 1.12);
-    const biasedSum =
-      targetWeights.diabolo +
-      targetWeights.torus +
-      targetWeights.monolith +
-      targetWeights.coral +
-      targetWeights.spindle;
-    const biasedInv = 1 / Math.max(0.0001, biasedSum);
-    targetWeights.diabolo *= biasedInv;
-    targetWeights.torus *= biasedInv;
-    targetWeights.monolith *= biasedInv;
-    targetWeights.coral *= biasedInv;
-    targetWeights.spindle *= biasedInv;
-
-    this.lerpMorphWeights(targetWeights, lerp);
+    const emphasized = this.emphasizeMorphWeights(targetWeights);
+    this.lerpMorphWeights(emphasized, lerp);
     this.waistCenterAlong += (bands.centroid - 0.5) * deltaTime * 0.35;
     this.waistCenterAlong = Math.min(0.55, Math.max(-0.55, this.waistCenterAlong));
   }
@@ -2826,6 +3356,7 @@ class SoundSculpture {
 
     // 曲終了直後〜完成まで: 形を凍結したまま描画だけ更新
     if (this.shapeHold && !this.completed) {
+      this.refreshEvolvingClayColors(deltaTime);
       this.updateCoreGeometry(bands, deltaTime);
       if (this.surface.visible) {
         this.updateSurfaceGeometry(bands, deltaTime);
@@ -2852,6 +3383,14 @@ class SoundSculpture {
         this.activeFormingTime += deltaTime;
       }
 
+      if (this.currentStructure.events.energySurge) {
+        this.sectionSurgeBoost = Math.min(1, this.sectionSurgeBoost + 0.85);
+      }
+      if (this.currentStructure.events.energyDrop) {
+        this.sectionSurgeBoost *= 0.35;
+      }
+      this.sectionSurgeBoost *= Math.exp(-1.6 * deltaTime);
+
       this.spectralPhase +=
         deltaTime * activity * (0.12 + bands.centroid * 1.6 + bands.brightness * 0.9 + bands.melody * 1.2);
       this.carvingPhase += deltaTime * activity * (0.1 + bands.overall * 1.2 + bands.contrast * 1.2);
@@ -2868,6 +3407,11 @@ class SoundSculpture {
 
     if (!this.completed) {
       this.syncSculptureMemory(deltaTime);
+    }
+
+    // ヒットを先に反映（kick/snare の食い込み・衝動が同フレームの幾何に乗る）
+    if (!this.completed) {
+      this.applyRhythmImpulses(deltaTime, bands);
     }
 
     this.updateCoreGeometry(bands, deltaTime);
@@ -2890,16 +3434,16 @@ class SoundSculpture {
 
     const innerBase = this.style.membrane.vita ? 0.9 : 1;
     if (!this.completed) {
-      // ヒットを先に反映してから芯を膨らませる（同フレームで「だ！」を見せる）
-      this.applyRhythmImpulses(deltaTime, bands);
       // 大きな芯の膨らみはビートうなずき + キック／スネア
       const groove = this.getGrooveBob();
+      const quietLive = this.getQuietLivePresence(bands);
       const kickPulse =
         1 +
-        (groove * 0.28 + this.kickImpulse * 0.4 + this.peakPunch * 0.18 + this.snareImpulse * 0.08) *
+        (groove * 0.34 + this.kickImpulse * 0.36 + this.peakPunch * 0.17 + this.snareImpulse * 0.08) *
           fibUnit(8, 13) *
           runtimeTuning.liveLow *
-          SoundSculpture.LIVE_MOTION;
+          SoundSculpture.LIVE_MOTION *
+          (0.22 + quietLive * 0.62);
       this.innerCore.scale.setScalar(innerBase * kickPulse);
     } else {
       this.updateAfterlife(deltaTime);
@@ -2931,6 +3475,7 @@ class SoundSculpture {
     if (this.surface.visible) {
       pokeClickRepulsion(this.surfaceClickRepulsion, this.baseSurfacePositions, localPoint, 0.1, 0.52);
     }
+    // クリックのたびに粘土色をランダムに少しずらす（天気・時刻シフトと合成）
     this.nudgeClayColorOnClick();
   }
 
@@ -3010,170 +3555,319 @@ class SoundSculpture {
     const r = latestRhythm;
     const grooveBob = this.getGrooveBob();
     this.drumLiveGate = clamp01(
-      r.pulseConfidence * 0.7 +
+      r.pulseConfidence * 0.45 +
         grooveBob * 0.55 +
-        this.kickImpulse * 0.55 +
-        this.snareImpulse * 0.4 +
+        this.kickImpulse * 0.65 +
+        this.snareImpulse * 0.45 +
         this.peakPunch * 0.35 +
-        r.pulseEnvelope * 0.25,
+        this.melodyPhraseImpulse * 0.4 +
+        this.guitarFlash * 0.3 +
+        r.pulseEnvelope * 0.18,
     );
   }
 
   /** パルス位相から「うなずき」量。phase=0 が拍、その後回復 → で、で、で */
   private getGrooveBob() {
     const r = latestRhythm;
-    if (r.pulseConfidence < 0.12) {
+    if (r.pulseConfidence < 0.08) {
       return 0;
     }
-    const recover = 0.52;
-    const bob = Math.pow(Math.max(0, 1 - r.pulsePhase / recover), 1.35);
-    return clamp01(bob * (0.22 + r.pulseConfidence * 0.4) * (0.28 + r.pulseEnvelope * 0.45));
+    // 短いアタックで頭を振る感覚。回復は早めに戻して次の拍を待つ
+    const recover = 0.34;
+    const bob = Math.pow(Math.max(0, 1 - r.pulsePhase / recover), 1.7);
+    const steady = smoothstep(0.28, 0.7, r.pulseConfidence);
+    const env = 0.45 + r.pulseEnvelope * 0.55;
+    return clamp01(bob * (0.42 + r.pulseConfidence * 0.58) * env * (0.85 + steady * 0.45));
   }
 
   /** LIVE 全体の動きゲイン（強弱の天井） */
   private static readonly LIVE_MOTION = 0.68;
 
-  /** ビート／ギター／ハイがいるほど LIVE を開く */
-  private getDrumLiveMul(floor = 0.12) {
-    const conf = latestRhythm.pulseConfidence;
-    const color =
-      this.guitarImpulse * 0.5 +
-      this.waveImpulse * 0.35 +
-      this.hatFlash * 0.12 +
-      this.snareFlash * 0.18;
-    return floor + clamp01(conf * 0.5 + this.drumLiveGate * 0.22 + color * 0.55) * (1 - floor);
+  /** ビート／ギター／ハイがいるほど LIVE を開く（持続 overall ではなく出来事） */
+  private getDrumLiveMul(floor = 0.08) {
+    const events = clamp01(
+      this.kickImpulse * 0.7 +
+        this.snareImpulse * 0.55 +
+        this.peakPunch * 0.4 +
+        this.guitarFlash * 0.55 +
+        this.melodyPhraseImpulse * 0.65 +
+        this.hatFlash * 0.18 +
+        this.waveImpulse * 0.25 +
+        this.getGrooveBob() * 0.35,
+    );
+    return floor + clamp01(events * 0.85 + this.drumLiveGate * 0.2) * (1 - floor);
   }
 
-  /** ヒット強度 0–1 → 弱い音は小さく、強い音だけ大きく */
-  private hitDynamics(strength: number, downbeat = false) {
+  /** ヒット強度 0–1 → 弱い音は小さく、強い音は残す */
+  private hitDynamics(strength: number, downbeat = false, busy = 0) {
     const s = clamp01(strength);
-    const shaped = Math.pow(s, 1.35);
+    const shaped = Math.pow(s, 1.2 + busy * 0.35);
     return clamp01(shaped * (downbeat ? 1.15 : 1) * 0.55 + shaped * 0.45);
   }
 
   private applyRhythmImpulses(deltaTime: number, bands: AudioBands) {
     const r = latestRhythm;
     const s = this.currentStructure;
-    const M = SoundSculpture.LIVE_MOTION;
-    const kickDecay = 5.2 + (1 - clamp01(r.kickLength / 0.35)) * 6.8;
-    const snareDecay = 4.4 + (1 - clamp01(r.snareLength / 0.22)) * 6.2;
-    const hatDecay = 8.0 + (1 - clamp01(r.hatLength / 0.28)) * 9.0;
+    this.refreshMixBusy(deltaTime);
+    const busy = this.mixBusy;
+    const M = SoundSculpture.LIVE_MOTION * (1 - busy * 0.1);
+    const kickDecay = (5.2 + (1 - clamp01(r.kickLength / 0.35)) * 6.8) * (1 + busy * 0.4);
+    const snareDecay = (4.4 + (1 - clamp01(r.snareLength / 0.22)) * 6.2) * (1 + busy * 0.35);
+    const hatDecay = (8.0 + (1 - clamp01(r.hatLength / 0.28)) * 9.0) * (1 + busy * 0.3);
     this.kickImpulse *= Math.exp(-kickDecay * deltaTime);
     this.snareImpulse *= Math.exp(-snareDecay * deltaTime);
     this.hatImpulse *= Math.exp(-hatDecay * deltaTime);
-    this.waveImpulse *= Math.exp(-8.5 * deltaTime);
-    this.peakPunch *= Math.exp(-12 * deltaTime);
-    this.snareFlash *= Math.exp(-11 * deltaTime);
-    this.hatFlash *= Math.exp(-14 * deltaTime);
-    this.guitarImpulse *= Math.exp(-3.2 * deltaTime);
-    this.guitarFlash *= Math.exp(-6.5 * deltaTime);
-    // ring の継続は弱め（常時フルスイングに見えないように）
-    this.kickImpulse = Math.max(this.kickImpulse, r.kickRing * 0.06);
-    this.snareImpulse = Math.max(this.snareImpulse, r.snareRing * 0.1);
-    this.snareFlash = Math.max(this.snareFlash, r.snareRing * 0.08);
-    this.hatImpulse = Math.max(this.hatImpulse, r.hatRing * 0.08);
-    this.hatFlash = Math.max(this.hatFlash, r.hatRing * 0.1);
+    this.waveImpulse *= Math.exp(-(8.5 + busy * 2.5) * deltaTime);
+    this.peakPunch *= Math.exp(-(12 + busy * 3) * deltaTime);
+    this.snareFlash *= Math.exp(-(9.2 + busy * 2.5) * deltaTime);
+    this.hatFlash *= Math.exp(-(10 + busy * 2) * deltaTime);
+    this.guitarImpulse *= Math.exp(-(3.8 + busy * 3.2) * deltaTime);
+    // カッティングは一瞬のフラッシュ。余韻のうねりにしない
+    this.guitarFlash *= Math.exp(-(9.5 + busy * 2.8) * deltaTime);
+    this.melodyPhraseImpulse *= Math.exp(-(5.5 + busy * 2.2) * deltaTime);
+    this.primaryHitLock = Math.max(0, this.primaryHitLock - deltaTime);
+    // ring はヒットの余韻だけ。busy ではさらに短く
+    const ringFloor = (latestRhythm.pulseConfidence > 0.4 ? 0.012 : 0.028) * (1 - busy * 0.55);
+    this.kickImpulse = Math.max(this.kickImpulse, r.kickRing * ringFloor);
+    this.snareImpulse = Math.max(this.snareImpulse, r.snareRing * 0.018 * (1 - busy * 0.5));
+    this.snareFlash = Math.max(this.snareFlash, r.snareRing * 0.016 * (1 - busy * 0.5));
+    this.hatImpulse = Math.max(this.hatImpulse, r.hatRing * 0.04 * (1 - busy * 0.6));
+    this.hatFlash = Math.max(this.hatFlash, r.hatRing * 0.05 * (1 - busy * 0.6));
+
+    const secondaryMul = this.primaryHitLock > 0 ? 0.25 + (1 - busy) * 0.25 : 1;
+    const weakFloor = 0.07 + busy * 0.22;
+
+    // --- メロディ句頭: 人がフレーズの立ち上がりで感じる反応 ---
+    if (
+      r.melodyOnset > 0.035 + busy * 0.04 &&
+      (bands.melodyFocus > 0.12 + busy * 0.1 || bands.melody > 0.08 + busy * 0.06)
+    ) {
+      const phrase = this.hitDynamics(r.melodyOnset * (0.7 + bands.melodyFocus * 0.8), false, busy);
+      if (phrase > weakFloor * 0.7) {
+        this.melodyPhraseImpulse = Math.min(
+          1,
+          this.melodyPhraseImpulse + phrase * 2.8 * M * (1 - busy * 0.45) * secondaryMul,
+        );
+        this.guitarFlash = Math.min(
+          1,
+          this.guitarFlash + phrase * 0.55 * M * (1 - busy * 0.4) * secondaryMul,
+        );
+        this.guitarImpulse = Math.min(
+          1,
+          this.guitarImpulse + phrase * 1.4 * M * (1 - busy * 0.5) * secondaryMul,
+        );
+        this.noteVisualEvent(0.45);
+      }
+    }
 
     // --- kick: 強弱つきの「で」---
     if (r.kickIndex !== this.lastKickIndexApplied) {
       this.lastKickIndexApplied = r.kickIndex;
       if (r.kick > 0) {
-        const dyn = this.hitDynamics(r.kick, r.downbeat);
+        const dyn = this.hitDynamics(r.kick, r.downbeat, busy);
         const lengthBoost = 0.7 + clamp01(r.kickLength / 0.28) * 0.7;
-        this.kickImpulse = Math.min(1, this.kickImpulse + dyn * 4.2 * lengthBoost * M);
+        // busy でもキックは立てる
+        const kickGain = 4.2 + busy * 0.7;
+        this.kickImpulse = Math.min(1, this.kickImpulse + dyn * kickGain * lengthBoost * M);
         this.peakPunch = Math.min(0.75, this.peakPunch + dyn * (0.28 + (r.downbeat ? 0.18 : 0)));
+        this.injectMusicPierce(dyn * (0.72 + (r.downbeat ? 0.28 : 0)) * M, "kick");
+        this.primaryHitLock = Math.max(this.primaryHitLock, 0.09 + busy * 0.05);
+        this.noteVisualEvent(1.1);
         if (s.phase !== "embryo" && dyn > 0.35) {
           this.trySpawnStructureAnchor("lobe", bands, 0.7);
         }
       }
     }
 
-    // --- snare ---
+    // --- snare: 横へパシッ（クラック）---
     if (r.snareIndex !== this.lastSnareIndexApplied) {
       this.lastSnareIndexApplied = r.snareIndex;
       if (r.snare > 0) {
-        const dyn = this.hitDynamics(r.snare);
-        const lengthBoost = 0.6 + clamp01(r.snareLength / 0.18) * 0.65;
-        this.snareImpulse = Math.min(1, this.snareImpulse + dyn * 3.2 * lengthBoost * M);
-        this.snareFlash = Math.min(1, this.snareFlash + dyn * 0.55);
-        this.peakPunch = Math.min(0.6, this.peakPunch + dyn * 0.12);
+        const dyn = this.hitDynamics(r.snare, false, busy);
+        const lengthBoost = 0.7 + clamp01(r.snareLength / 0.16) * 0.55;
+        const snareGain = (4.0 + busy * 0.55) * (this.primaryHitLock > 0.05 ? 0.78 : 1);
+        this.snareImpulse = Math.min(1, this.snareImpulse + dyn * snareGain * lengthBoost * M);
+        this.snareFlash = Math.min(1, this.snareFlash + dyn * (0.9 + busy * 0.12));
+        this.peakPunch = Math.min(0.65, this.peakPunch + dyn * 0.16);
         this.fragmentSpawnCooldown = 0;
-        this.separationTendency = Math.min(1, this.separationTendency + dyn * 0.35);
-        if (s.phase !== "embryo" && dyn > 0.4) {
+        this.separationTendency = Math.min(1, this.separationTendency + dyn * 0.42 * (1 - busy * 0.3));
+        this.injectMusicPierce(dyn * 0.85 * M, "snare");
+        this.primaryHitLock = Math.max(this.primaryHitLock, 0.07 + busy * 0.05);
+        this.noteVisualEvent(1);
+        const origin = new THREE.Vector3(
+          (Math.random() - 0.5) * 0.9,
+          (Math.random() - 0.5) * 0.55,
+          (Math.random() - 0.5) * 0.9,
+        );
+        const dir = origin.clone().normalize();
+        if (dir.lengthSq() < 1e-6) dir.set(1, 0.2, 0).normalize();
+        this.emitDetachmentDust("metal", origin, dir, 0.35 + dyn * 0.75);
+        if (s.phase !== "embryo" && dyn > 0.35) {
           this.trySpawnStructureAnchor(this.pickAnchorKindFromStructure(bands), bands, 0.75);
         }
       }
     }
 
-    // --- hat: スパークルは弱めに戻す（連打は維持）---
+    // --- hat: チッチ＝粒子本線。膜は補助グローのみ ---
     if (r.hatIndex !== this.lastHatIndexApplied) {
       this.lastHatIndexApplied = r.hatIndex;
       if (r.hat > 0) {
-        const dyn = this.hitDynamics(r.hat);
-        const lengthBoost = 0.7 + clamp01(r.hatLength / 0.22) * 0.85;
-        this.hatImpulse = Math.min(1, this.hatImpulse + dyn * 2.8 * lengthBoost * M);
-        this.hatFlash = Math.min(1, this.hatFlash + dyn * 0.48);
-        const burst = Math.min(
-          6,
-          1 +
-            Math.floor(
-              r.hat * 5 * (0.65 + clamp01(r.hatLength / 0.2) * 0.85) * (0.45 + s.detailRamp * 0.45),
-            ),
-        );
-        for (let i = 0; i < burst; i += 1) {
-          this.spawnSparkle({
-            ...bands,
-            high: Math.min(1, bands.high + 0.3),
-            brightness: Math.min(1, bands.brightness + 0.22),
-          });
+        const dyn = this.hitDynamics(r.hat, false, busy);
+        if (dyn > weakFloor * 0.35) {
+          const lengthBoost = 0.75 + clamp01(r.hatLength / 0.22) * 0.8;
+          const hatMul = (1 - busy * 0.22) * Math.max(0.62, secondaryMul);
+          this.hatImpulse = Math.min(1, this.hatImpulse + dyn * 4.8 * lengthBoost * M * hatMul);
+          this.hatFlash = Math.min(1, this.hatFlash + dyn * 1.35 * hatMul);
+          const burst = Math.min(
+            Math.max(3, 12 - Math.floor(busy * 2)),
+            3 +
+              Math.floor(
+                r.hat * 10 * (0.75 + clamp01(r.hatLength / 0.2)) * (0.6 + s.detailRamp * 0.4) * hatMul,
+              ),
+          );
+          for (let i = 0; i < burst; i += 1) {
+            this.spawnSparkle(
+              {
+                ...bands,
+                high: Math.min(1, bands.high + 0.55),
+                brightness: Math.min(1, bands.brightness + 0.5),
+              },
+              0.7 + dyn * 0.95,
+            );
+          }
+          this.noteVisualEvent(0.28);
         }
       }
     }
 
-    // --- cymbal: 一閃＋スパークル（ハットより少なめ）---
+    // --- cymbal: 一閃。粒子はハットより少なめ ---
     if (r.transientIndex !== this.lastTransientIndexApplied) {
       this.lastTransientIndexApplied = r.transientIndex;
       if (r.transient > 0) {
-        const dyn = this.hitDynamics(r.transient);
-        this.waveImpulse = Math.min(1, this.waveImpulse + dyn * 0.85);
-        this.hatFlash = Math.min(1, this.hatFlash + dyn * 0.28);
-        const burst = Math.min(5, 1 + Math.floor(dyn * 5));
-        for (let i = 0; i < burst; i += 1) {
-          this.spawnSparkle({
-            ...bands,
-            high: Math.min(1, bands.high + 0.45),
-            brightness: Math.min(1, bands.brightness + 0.4),
-          });
-        }
-        if (s.mineralScore > fibUnit(8, 21) && dyn > 0.55) {
-          this.trySpawnStructureAnchor("crystal", bands, fibUnit(5, 13));
+        const dyn = this.hitDynamics(r.transient, false, busy);
+        if (dyn > weakFloor * 0.5) {
+          this.waveImpulse = Math.min(1, this.waveImpulse + dyn * 0.85 * M * secondaryMul);
+          this.hatFlash = Math.min(1, this.hatFlash + dyn * 0.2 * secondaryMul);
+          const burst = Math.min(Math.max(1, 4 - Math.floor(busy * 2)), 1 + Math.floor(dyn * 4 * secondaryMul));
+          for (let i = 0; i < burst; i += 1) {
+            this.spawnSparkle(
+              {
+                ...bands,
+                high: Math.min(1, bands.high + 0.4),
+                brightness: Math.min(1, bands.brightness + 0.35),
+              },
+              0.45 + dyn * 0.5,
+            );
+          }
+          this.noteVisualEvent(0.45);
+          if (s.mineralScore > fibUnit(8, 21) && dyn > 0.55) {
+            this.trySpawnStructureAnchor("crystal", bands, fibUnit(5, 13));
+          }
         }
       }
     }
 
-    // --- guitar: ソロ時（中域優位・キック疎）ははっきりうねる ---
+    // --- chop: 中音＝膜フラッシュ＋横パルス。粒子には載せない（高音チャンネルと分離）---
+    if (r.chopIndex !== this.lastChopIndexApplied) {
+      this.lastChopIndexApplied = r.chopIndex;
+      if (r.chop > 0) {
+        const dyn = this.hitDynamics(r.chop, false, busy);
+        if (dyn > weakFloor * 0.75 && secondaryMul > 0.32) {
+          const chopMul = (1 - busy * 0.4) * secondaryMul;
+          this.guitarImpulse = Math.min(1, this.guitarImpulse + dyn * 0.85 * M * chopMul);
+          this.guitarFlash = Math.min(1, this.guitarFlash + dyn * 1.85 * chopMul);
+          this.peakPunch = Math.min(0.5, this.peakPunch + dyn * 0.1 * chopMul);
+          this.noteVisualEvent(0.32);
+        }
+      }
+    }
+
+    // --- salience: 分類外でも強く鳴った瞬間。busy では厳選 ---
+    if (r.salienceIndex !== this.lastSalienceIndexApplied) {
+      this.lastSalienceIndexApplied = r.salienceIndex;
+      if (r.salience > 0) {
+        const dyn = this.hitDynamics(r.salience, false, busy);
+        if (dyn > weakFloor + busy * 0.12 && secondaryMul > 0.35) {
+          const salMul = (1 - busy * 0.5) * secondaryMul;
+          this.waveImpulse = Math.min(1, this.waveImpulse + dyn * 0.95 * M * salMul);
+          this.peakPunch = Math.min(0.7, this.peakPunch + dyn * 0.28 * M * salMul);
+          if (bands.mid >= bands.high) {
+            this.snareFlash = Math.min(1, this.snareFlash + dyn * 0.45 * M * salMul);
+            this.injectMusicPierce(dyn * 0.4 * M * salMul, "snare");
+          } else {
+            this.hatFlash = Math.min(1, this.hatFlash + dyn * 0.55 * M * salMul);
+            const burst = Math.min(Math.max(1, 4 - Math.floor(busy * 2)), 1 + Math.floor(dyn * 3.5 * salMul));
+            for (let i = 0; i < burst; i += 1) {
+              this.spawnSparkle({
+                ...bands,
+                high: Math.min(1, bands.high + 0.35),
+                brightness: Math.min(1, bands.brightness + 0.28),
+              });
+            }
+          }
+          this.noteVisualEvent(0.55);
+        }
+      }
+    }
+
+    // --- guitar: 持続チャグはフラッシュ連打に寄せ、うねり用 impulse は抑える ---
     if (bandSoloAllows("mid") || bandSoloAllows("high")) {
-      const midLead = Math.max(bands.mid, bands.melody * 1.2);
-      const soloBias = clamp01(
-        midLead * 1.15 +
-          bands.melodyFocus * 0.9 -
-          bands.bassFocus * 0.75 -
-          this.kickImpulse * 0.85 -
-          r.kickRing * 0.5,
+      const midLead = Math.max(bands.mid * 0.85, bands.melody * 1.45);
+      const melodicRock = clamp01(
+        (bands.melody * 0.65 + bands.mid * 0.35 + bands.melodyFocus * 0.55) *
+          (0.4 + r.pulseConfidence * 0.55),
       );
-      const guitarBody = clamp01(midLead * (0.25 + bands.melodyFocus * 0.45 + soloBias * 0.85));
-      const kickMute = 1 - clamp01(this.kickImpulse * 0.85 + r.kickRing * 0.4);
-      const soloGain = 0.55 + soloBias * 1.35;
+      const chugBed = clamp01(
+        Math.max(bands.mid * 0.85, bands.melody * 1.2) * 0.95 - bands.bassFocus * 0.08,
+      );
+      const soloBias = clamp01(
+        midLead * 1.1 +
+          bands.melodyFocus * 1.0 +
+          melodicRock * 0.55 +
+          chugBed * 0.55 +
+          this.guitarFlash * 0.4 -
+          bands.bassFocus * 0.2 -
+          this.kickImpulse * 0.25 -
+          r.kickRing * 0.14,
+      );
+      const eventGate = clamp01(
+        r.melodyOnset * 2.4 +
+          this.melodyPhraseImpulse * 1.35 +
+          this.guitarFlash * 0.75 +
+          chugBed * (0.45 - busy * 0.2) +
+          melodicRock * (0.35 - busy * 0.15),
+      );
+      const guitarBody = clamp01(
+        midLead *
+          (0.1 + bands.melodyFocus * 0.35 + soloBias * 0.35 + eventGate * 0.7) *
+          (0.15 + eventGate) *
+          (1 - busy * 0.45),
+      );
+      const kickMute =
+        1 -
+        clamp01(this.kickImpulse * 0.4 + this.snareImpulse * 0.18 + r.kickRing * 0.14) * 0.75;
+      const soloGain =
+        (0.32 +
+          soloBias * 0.85 * eventGate +
+          melodicRock * 0.25 +
+          chugBed * 0.3 +
+          r.melodyOnset * 1.4 +
+          this.melodyPhraseImpulse * 0.55) *
+        (1 - busy * 0.3);
+      // うねり源の impulse は薄く。見た目は Flash（横パルス・膜ライン・粒子）
       this.guitarImpulse = Math.max(
         this.guitarImpulse,
-        guitarBody * kickMute * soloGain * 0.85,
+        guitarBody * kickMute * soloGain * 0.35 * secondaryMul,
       );
-      if (guitarBody > 0.1 && (soloBias > 0.35 || (r.kick < 0.03 && r.snare < 0.04))) {
-        this.guitarFlash = Math.min(1, this.guitarFlash + guitarBody * (0.18 + soloBias * 0.4));
+      if (eventGate > 0.12 && guitarBody > 0.05) {
+        this.guitarFlash = Math.min(
+          1,
+          this.guitarFlash +
+            guitarBody * (0.38 + soloBias * 0.4 + eventGate * 0.45) * (1 - busy * 0.22) * secondaryMul,
+        );
       }
-      if (r.snare > 0.05 && bands.melodyFocus > 0.22) {
-        this.guitarFlash = Math.min(1, this.guitarFlash + r.snare * 0.28);
-        this.guitarImpulse = Math.min(1, this.guitarImpulse + r.snare * 0.2);
+      if (r.snare > 0.08 && (bands.melodyFocus > 0.22 || melodicRock > 0.5 || chugBed > 0.5)) {
+        this.guitarFlash = Math.min(1, this.guitarFlash + r.snare * 0.08 * (1 - busy * 0.35));
       }
     }
 
@@ -3183,19 +3877,34 @@ class SoundSculpture {
 
     this.refreshGrooveDrive();
 
-    // スケール: 全体控えめ＋強弱。ハットはスケールに乗せない
+    // スケール: キック縦／スネア横／カッティングは Flash 主導の横パルス
     if (bandSoloAllows("low") || bandSoloAllows("mid") || bandSoloAllows("high")) {
       const groove = this.getGrooveBob() * M;
       const conf = r.pulseConfidence;
-      const kickAccent = (this.kickImpulse * 0.65 + this.peakPunch * 0.28) * M;
-      const snareCrack = (this.snareImpulse * 0.55 + this.snareFlash * 0.35) * M;
-      const guitarWobble = (this.guitarImpulse * 0.4 + this.guitarFlash * 0.3) * M;
-      const grooveAmp = 0.045 + conf * 0.028;
-      const targetY = 1 - Math.min(0.12, groove * grooveAmp * 1.35 + kickAccent * 0.085);
+      const kickAccent = (this.kickImpulse * 0.85 + this.peakPunch * 0.35) * M;
+      const snareCrack = (this.snareImpulse * 0.75 + this.snareFlash * 0.6) * M;
+      // カッティング／スネア＝横のキレ。持続 wobble なし
+      const chopPulse = (this.guitarFlash * 1.35 + this.snareFlash * 0.35) * M;
+      const grooveAmp = 0.11 + conf * 0.08;
+      const targetY =
+        1 -
+        Math.min(0.12, groove * grooveAmp * 1.35 + kickAccent * 0.075);
       const targetXz =
-        1 + Math.min(0.09, snareCrack * 0.07 + groove * 0.015 + guitarWobble * 0.04);
-      const onBeat = groove > 0.18 || kickAccent > 0.2 || snareCrack > 0.2;
-      const attack = onBeat ? 26 : this.guitarFlash > 0.25 ? 12 : 9;
+        1 +
+        Math.min(
+          0.16,
+          snareCrack * 0.13 +
+            groove * 0.018 +
+            kickAccent * 0.012 +
+            chopPulse * 0.13,
+        );
+      const onBeat =
+        groove > 0.12 ||
+        kickAccent > 0.14 ||
+        snareCrack > 0.12 ||
+        this.guitarFlash > 0.14 ||
+        this.snareFlash > 0.16;
+      const attack = onBeat ? 48 : this.guitarFlash > 0.1 ? 36 : 8;
       const follow = Math.min(1, deltaTime * attack);
       if (bandSoloAllows("low")) {
         this.group.scale.y += (this.baseScale.y * targetY - this.group.scale.y) * follow;
@@ -3211,18 +3920,14 @@ class SoundSculpture {
       this.group.scale.lerp(this.baseScale, Math.min(1, deltaTime * 7));
     }
 
-    // 表面: ギター／シンバル／スネア中心。ハットはごく弱く
+    // 表面 flow: スネア／シンバルのクラックのみ。ギター・ハットのうねりは載せない
     const surfaceShake =
-      this.snareFlash * 0.28 +
-      this.snareImpulse * 0.14 +
-      this.waveImpulse * 0.45 +
-      this.guitarImpulse * 0.5 +
-      this.guitarFlash * 0.4 +
-      this.hatFlash * 0.12 +
-      this.hatImpulse * 0.08 +
-      this.getGrooveBob() * 0.04;
-    if (surfaceShake > 0.055 && !this.completed && !this.shapeHold) {
-      const amount = surfaceShake * deltaTime * 0.055 * M;
+      this.snareFlash * 0.5 +
+      this.snareImpulse * 0.25 +
+      this.waveImpulse * 0.3 +
+      this.guitarFlash * 0.12;
+    if (surfaceShake > 0.08 && !this.completed && !this.shapeHold) {
+      const amount = surfaceShake * deltaTime * 0.045 * M;
       const salt = this.formingTime * 3.2 + this.morphologySeed;
       const flowStride = getHeavyGrowthFlowStride();
       const flowPhase = Math.floor(this.formingTime * 20) % flowStride;
@@ -3238,7 +3943,7 @@ class SoundSculpture {
         );
         const boost =
           flowStride *
-          (0.45 + this.guitarFlash * 0.4 + this.waveImpulse * 0.35 + this.snareFlash * 0.22);
+          (0.45 + this.waveImpulse * 0.35 + this.snareFlash * 0.35 + this.guitarFlash * 0.12);
         this.flowField[idx] += this._curlOut.x * amount * boost;
         this.flowField[idx + 1] += this._curlOut.y * amount * boost;
         this.flowField[idx + 2] += this._curlOut.z * amount * boost;
@@ -3249,10 +3954,23 @@ class SoundSculpture {
   /** 完成直前に、録音音声から導出したパレットと種プロファイルを受け取る */
   prepareCompletion(palette: SculpturePalette, species?: SpeciesProfile) {
     this.completionPalette = palette;
+    this.liveSongPalette = palette;
+    this.songColorBlend = 1;
     this.completionSpecies = species ?? null;
     if (species) {
       this.speciesProfile = species;
+      // 完成シルエットを種の勝者寄りへ寄せる（ライブ最終フレームの曖昧さ残しを減らす）
+      const finalized = this.buildFinalizedMorphWeights(species);
+      const w = this.morphWeights;
+      w.diabolo = w.diabolo * 0.4 + finalized.diabolo * 0.6;
+      w.torus = w.torus * 0.4 + finalized.torus * 0.6;
+      w.monolith = w.monolith * 0.4 + finalized.monolith * 0.6;
+      w.coral = w.coral * 0.4 + finalized.coral * 0.6;
+      w.spindle = w.spindle * 0.4 + finalized.spindle * 0.6;
+      this.normalizeMorphWeights();
     }
+    // 完成待ち中も最終色へ滑らかに寄せる（瞬間切り替えしない）
+    this.refreshEvolvingClayColors(0.2);
   }
 
   /** 曲終了後、完成確定までのあいだ形を動かさない */
@@ -3296,15 +4014,15 @@ class SoundSculpture {
     this.hatFlash = 0;
     this.guitarImpulse = 0;
     this.guitarFlash = 0;
+    this.melodyPhraseImpulse = 0;
+    this.mixBusy = 0;
+    this.primaryHitLock = 0;
     this.drumLiveGate = 0;
+    this.sectionSurgeBoost = 0;
     this.membranePressureImpulse = 0;
-    const palette = this.completionPalette ?? NEUTRAL_SCULPTURE_PALETTE;
-    const uniforms = this.surfaceMaterial.uniforms;
-    // vita: 膜も音パレットの暖色へ飛ばさず、初期の寒色パレットを維持
-    if (!(this.style.completion.mode === "breathe" && this.style.core.pearlVariation > 0)) {
-      (uniforms.uPaletteColor.value as THREE.Color).copy(palette.baseColor);
-      (uniforms.uPaletteAccent.value as THREE.Color).copy(palette.accentColor);
-    }
+    this.songColorBlend = 1;
+    // 曲パレット + 天気・時刻（再生中に寄せ済みならほぼ変化なし）
+    this.applyCompletionEnvColors();
   }
 
   /**
@@ -3315,7 +4033,7 @@ class SoundSculpture {
    */
   private updateAfterlife(deltaTime: number) {
     const st = this.style;
-    const palette = this.completionPalette ?? NEUTRAL_SCULPTURE_PALETTE;
+    const palette = this.getDisplayCompletionPalette();
     const species = this.completionSpecies ?? this.speciesProfile;
     const afterlife = deriveAfterlifeMaterial(palette, species);
     this.completionProgress = Math.min(
@@ -3392,20 +4110,23 @@ class SoundSculpture {
           THREE.MathUtils.lerp(this.innerCore.scale.x, innerTarget, scaleFollow),
         );
         if (st.core.pearlVariation > 0) {
-          // vita: 真珠頂点色を主体に保つ。音パレット（琥珀〜金など）へ寄せない
+          // vita: 真珠 + 曲色 + 環境（天気・時刻）を同じ強さで保つ
           this.coreMaterial.color.set(0xffffff);
           this.innerCoreMaterial.color.copy(this.completionStartInnerColor);
-          // 発光だけ、初期の寒色寄り＋音の記憶をわずかに混ぜて鼓動する
           this._tmpColor.setHSL(
-            THREE.MathUtils.lerp(this.clayHueBase, palette.hue, 0.22),
-            Math.min(0.72, this.claySatBase * 0.9 + palette.saturation * 0.25),
-            0.22 + this.breathWave * 0.08,
+            palette.hue,
+            Math.min(0.82, palette.saturation * 0.72 * afterlife.saturationMul),
+            0.2 + this.breathWave * 0.1 + palette.lightness * 0.08,
           );
           this.coreMaterial.emissive.lerp(this._tmpColor, Math.min(1, deltaTime * 2.4));
           this.coreMaterial.emissiveIntensity =
-            (0.14 + this.breathWave * 0.28 + palette.emissiveStrength * 0.12 * ease) *
+            (0.16 + this.breathWave * 0.32 + palette.emissiveStrength * 0.28 * ease) *
             afterlife.emissiveMul *
             st.core.emissiveScale;
+          const memBase = this.surfaceMaterial.uniforms.uPaletteColor.value as THREE.Color;
+          const memAccent = this.surfaceMaterial.uniforms.uPaletteAccent.value as THREE.Color;
+          memBase.lerp(palette.baseColor, Math.min(1, deltaTime * 0.55 * ease));
+          memAccent.lerp(palette.accentColor, Math.min(1, deltaTime * 0.6 * ease));
         } else {
           this._tmpColor.setHSL(
             palette.hue,
@@ -3465,6 +4186,10 @@ class SoundSculpture {
     this.completionSettle = 0;
     this.completionPalette = null;
     this.completionSpecies = null;
+    this.liveSongPalette = null;
+    this.songColorBlend = 0;
+    this.pearlColorBakeCooldown = 0;
+    this.lastPearlBakeHue = -1;
     this.breathTime = 0;
     this.breathWave = 0;
     this.currentStructure = defaultStructureSnapshot();
@@ -3486,6 +4211,7 @@ class SoundSculpture {
     this.idlePokeImpulse = 0;
     this.audioColorBlend = 0;
     this.clayColorShift = createClayColorShift();
+    // 天気シフトは環境側の状態なのでリセット後も維持
     this.idleWobbleField.fill(0);
     this.idleWobbleVector.fill(0);
     resetClickRepulsionState(this.clickRepulsion);
@@ -3503,6 +4229,8 @@ class SoundSculpture {
     this.lastSnareIndexApplied = -1;
     this.lastHatIndexApplied = -1;
     this.lastTransientIndexApplied = -1;
+    this.lastChopIndexApplied = -1;
+    this.lastSalienceIndexApplied = -1;
     this.lastPulseIndexApplied = -1;
     this.kickImpulse = 0;
     this.snareImpulse = 0;
@@ -3513,7 +4241,11 @@ class SoundSculpture {
     this.hatFlash = 0;
     this.guitarImpulse = 0;
     this.guitarFlash = 0;
+    this.melodyPhraseImpulse = 0;
+    this.mixBusy = 0;
+    this.primaryHitLock = 0;
     this.drumLiveGate = 0;
+    this.sectionSurgeBoost = 0;
     this.previousBandsForSeparation = null;
 
     this.accumulated.fill(0);
@@ -3878,7 +4610,7 @@ class SoundSculpture {
     exportGroup.add(core, innerCore);
 
     if (this.surface.visible) {
-      const palette = this.completionPalette ?? NEUTRAL_SCULPTURE_PALETTE;
+      const palette = this.getDisplayCompletionPalette();
       const surface = new THREE.Mesh(
         this.surfaceGeometry.clone(),
         new THREE.MeshStandardMaterial({
@@ -3998,35 +4730,38 @@ class SoundSculpture {
         (targetEmissive - this.coreMaterial.emissiveIntensity) * emissiveLerp;
     }
 
-    // 膜の質感が粘土へ移るのは控えめに（全体が発光体に見えない範囲）
+    // 膜の質感が粘土へ移るのは控えめに（スペキュラ白飛び防止）
     // 回転で色が飛ぶ原因になる clearcoat / sheen / iridescence は、既定が 0 のときは足さない
     const membraneBleed = this.membranePressureImpulse * 0.35;
     if (this.baseCoreClearcoat > 0) {
       this.coreMaterial.clearcoat = Math.min(
         1,
-        this.baseCoreClearcoat + membraneBleed * 0.25,
+        this.baseCoreClearcoat + membraneBleed * 0.12,
       );
-      this.coreMaterial.clearcoatRoughness = Math.max(0.2, 0.55 - membraneBleed * 0.08);
+      this.coreMaterial.clearcoatRoughness = Math.max(0.35, 0.62 - membraneBleed * 0.04);
     } else {
       this.coreMaterial.clearcoat = 0;
     }
     if (this.baseCoreSheen > 0) {
-      this.coreMaterial.sheen = Math.min(1, this.baseCoreSheen + membraneBleed * 0.2);
-      this.coreMaterial.sheenRoughness = Math.max(0.55, 0.82 - membraneBleed * 0.08);
+      this.coreMaterial.sheen = Math.min(1, this.baseCoreSheen + membraneBleed * 0.1);
+      this.coreMaterial.sheenRoughness = Math.max(0.62, 0.88 - membraneBleed * 0.04);
     } else {
       this.coreMaterial.sheen = 0;
     }
     if (this.baseCoreIridescence > 0) {
-      this.coreMaterial.iridescence = Math.min(1, this.baseCoreIridescence + membraneBleed * 0.15);
+      this.coreMaterial.iridescence = Math.min(1, this.baseCoreIridescence + membraneBleed * 0.08);
       this.coreMaterial.iridescenceIOR = 1.35;
     } else {
       this.coreMaterial.iridescence = 0;
     }
+    // 明るさで粗さを落としすぎるとスペキュラがチョーク白になるため控えめに
+    // 膜接触時はむしろ少し粗くして白飛びを抑える
     const baseRoughness =
       fibRatio(11, 12) +
       fibUnit(5, 21) -
-      bands.brightness * fibUnit(5, 21) * shift -
-      bands.high * fibUnit(3, 21) * shift;
+      bands.brightness * fibUnit(3, 21) * shift * 0.65 -
+      bands.high * fibUnit(2, 21) * shift * 0.65 +
+      membraneBleed * 0.06;
     this.coreMaterial.roughness = Math.min(
       1,
       Math.max(
@@ -4055,25 +4790,19 @@ class SoundSculpture {
       }
       return this.hasActiveClickWobble() ? this.idleWobbleAmp * 5 : 0;
     }
-    return (
-      this.getGrooveBob() * 0.35 +
-      this.kickImpulse * 0.22 +
-      this.peakPunch * 0.15 +
-      this.snareImpulse * 0.12 +
-      this.snareFlash * 0.08 +
-      this.hatImpulse * 0.22 +
-      this.hatFlash * 0.2 +
-      this.waveImpulse * 0.55 +
-      this.guitarImpulse * 0.45 +
-      this.guitarFlash * 0.35 +
-      w.high * t.liveHigh * fibRatio(3, 13) * audioPart * this.getDrumLiveMul(0.12) +
-      this.getSpecies().membraneGain * fibUnit(2, 21) * audioPart +
-      this.idleWobbleAmp * 5
-    );
+    const ev = this.getListeningEventDrive(bands);
+    // 膜のソフトうねりは中音フラッシュ中心。高音は粒子本線なので soft live は弱く
+    const eventLive =
+      ev.thump * 0.12 +
+      ev.ting * 0.62 +
+      ev.chatter * 0.78 +
+      ev.sparkle * 0.12 +
+      w.high * t.liveHigh * fibRatio(2, 13) * audioPart * this.getDrumLiveMul(0.08) * 0.25 +
+      this.getSpecies().membraneGain * fibUnit(1, 21) * audioPart * ev.listen * 0.55;
+    return (eventLive + this.idleWobbleAmp * 5) * (0.22 + ev.listen * 0.78);
   }
 
   private getMembraneGlowTarget(bands: AudioBands) {
-    const t = runtimeTuning;
     const audioPart = this.style.core.pearlVariation > 0 ? this.audioColorBlend : 1;
     if (this.completed && this.style.completion.mode === "breathe") {
       const interaction = this.hasActiveClickWobble() ? this.idleWobbleAmp : 0;
@@ -4083,19 +4812,16 @@ class SoundSculpture {
       const interaction = this.hasActiveClickWobble() ? this.idleWobbleAmp : 0;
       return 0.35 + interaction * (3.2 + Math.sin(this.idleTime * 0.55) * 1.2);
     }
+    const ev = this.getListeningEventDrive(bands);
     return (
-      (this.completed ? 0.35 : 0.2) +
-      this.getGrooveBob() * 0.2 +
-      this.kickImpulse * 0.16 +
-      this.peakPunch * 0.1 +
-      this.snareImpulse * 0.12 +
-      this.snareFlash * 0.1 +
-      this.hatImpulse * 0.18 +
-      this.hatFlash * 0.16 +
-      this.waveImpulse * 0.5 +
-      this.guitarImpulse * 0.35 +
-      this.guitarFlash * 0.28 +
-      bands.overall * t.liveHigh * 0.08 * audioPart * this.getDrumLiveMul(0.12) +
+      0.12 +
+      ev.listen * 0.28 +
+      // 中音：膜グローの主役
+      ev.ting * 0.55 +
+      ev.chatter * 0.95 +
+      // 高音：粒子が本線。膜はチッチの補助だけ
+      ev.sparkle * 0.4 +
+      ev.thump * 0.08 +
       this.separationTendency * 0.06 * audioPart +
       this.idleWobbleAmp * (3.2 + Math.sin(this.idleTime * 0.55) * 1.2)
     );
@@ -4135,12 +4861,23 @@ class SoundSculpture {
     );
 
     const uniforms = this.surfaceMaterial.uniforms;
-    uniforms.uMelodyLine.value = t.membraneLine;
-    uniforms.uMelodyFresnel.value = t.membraneFresnel;
-    uniforms.uMelodyNoise.value = t.membraneNoise;
-    uniforms.uMelodyFlowAnim.value = 1.2 + t.liveHigh * 1.4;
-    uniforms.uLive.value = this.getMembraneLiveTarget(bands);
-    uniforms.uGlow.value = this.getMembraneGlowTarget(bands);
+    // 中音フラッシュ＝ライン／フレネル。高音は uHigh 微信号のみ（粒子が本線）
+    const midFlash = clamp01(this.guitarFlash * 1.05 + this.snareFlash * 0.55);
+    const hatTick = clamp01(this.hatFlash * 1.05 + this.hatImpulse * 0.45);
+    uniforms.uMelodyLine.value =
+      t.membraneLine * (1 + midFlash * 1.65 + this.melodyPhraseImpulse * 0.4);
+    uniforms.uMelodyFresnel.value =
+      t.membraneFresnel * (1 + midFlash * 0.75 + this.melodyPhraseImpulse * 0.25);
+    uniforms.uMelodyNoise.value = t.membraneNoise * (0.85 + midFlash * 0.35);
+    uniforms.uMelodyFlowAnim.value = 0.95 + t.liveHigh * 0.7 + midFlash * 0.65;
+    uniforms.uLive.value = Math.min(1.05, Math.max(0, this.getMembraneLiveTarget(bands)));
+    uniforms.uGlow.value = Math.min(1.2, Math.max(0, this.getMembraneGlowTarget(bands)));
+    // 帯域の持続よりフラッシュを優先（常時ラインを消す）
+    uniforms.uMid.value = clamp01(midFlash * 0.95 + bands.mid * 0.12);
+    uniforms.uMelody.value = clamp01(
+      this.guitarFlash * 0.9 + this.melodyPhraseImpulse * 0.55 + bands.melody * 0.1,
+    );
+    uniforms.uHigh.value = clamp01(hatTick * 0.85 + bands.high * 0.12);
 
     const impulsePart =
       (this.getGrooveBob() * 0.5 + this.kickImpulse * 0.55 + this.snareImpulse * 0.18 + this.peakPunch * 0.22) *
@@ -4176,31 +4913,51 @@ class SoundSculpture {
 
   private updateGlobalForm(bands: AudioBands, deltaTime: number) {
     const formation = this.getFormationScale();
+    const sp = this.getSpecies();
     const energy =
       Math.max(0, bands.overall - 0.02) *
       deltaTime *
       runtimeTuning.globalFormEnergyScale *
-      formation;
+      formation *
+      this.getSectionAccumMul();
     const w = this.morphWeights;
+    // 種・モルフで伸び方と上限の両方を分岐（長い曲でも同じ天井に潰さない）
+    const stretchBias = 0.85 + sp.aggressive * 0.55 + w.spindle * 0.7 + w.monolith * 0.35;
+    const waistBias = 0.75 + sp.organic * 0.55 + w.diabolo * 0.85 + w.coral * 0.4;
+    const twistBias = 0.8 + sp.rhythmic * 0.5 + w.torus * 0.75 + bands.contrast * 0.25;
+    const stretchCap = Math.min(
+      0.78,
+      0.4 + w.spindle * 0.34 + w.monolith * 0.2 + sp.aggressive * 0.14,
+    );
+    const waistCap = Math.min(
+      0.82,
+      0.46 + w.diabolo * 0.3 + w.coral * 0.18 + sp.organic * 0.12,
+    );
+    const twistCap = Math.min(
+      0.92,
+      0.5 + w.torus * 0.34 + sp.rhythmic * 0.16 + bands.contrast * 0.08,
+    );
 
     this.formStretch = Math.min(
-      0.42,
+      stretchCap,
       this.formStretch +
-        energy * (0.1 + bands.overall * 0.22) * runtimeTuning.formStretchRate,
+        energy * (0.1 + bands.overall * 0.22) * runtimeTuning.formStretchRate * stretchBias,
     );
     this.formWaist = Math.min(
-      0.58,
+      waistCap,
       this.formWaist +
         energy *
           (0.12 + bands.contrast * 0.32 + bands.overall * 0.18) *
-          (0.25 + w.diabolo * 0.75),
+          (0.25 + w.diabolo * 0.75) *
+          waistBias,
     );
     this.formTwist = Math.min(
-      0.65,
+      twistCap,
       this.formTwist +
         energy *
           (0.12 + bands.overall * 0.26 + bands.contrast * 0.18) *
-          runtimeTuning.formTwistAccumRate,
+          runtimeTuning.formTwistAccumRate *
+          twistBias,
     );
     this.formBaseWeight = Math.min(
       0.34,
@@ -4259,8 +5016,10 @@ class SoundSculpture {
     const rz = pz - az * alongLift;
     const perp = Math.min(1.2, Math.hypot(rx, ry, rz) / 1.6);
     const w = this.morphWeights;
-
-    const blendScale = (delta: number, weight: number) => 1 + delta * weight;
+    const winW = Math.max(w.diabolo, w.torus, w.monolith, w.coral, w.spindle);
+    // 勝者が強いほどモーフ振幅を上げ、5 者平均の「少し歪んだ球」を避ける
+    const winBoost = 0.78 + winW * 1.15;
+    const blendScale = (delta: number, weight: number) => 1 + delta * weight * winBoost;
 
     // diabolo: くびれ＋両端 (従来の Y 対称を主軸に沿わせたもの。重みで抑制)
     const diaboloWaist =
@@ -4319,9 +5078,10 @@ class SoundSculpture {
       growthPattern(px * 1.15, py * 1.08, pz * 1.12, this.morphologySeed + this.formingTime * 0.16) *
       this.formDevelopment;
     const coralBump = 1 + coralNoise * 0.26 * (0.45 + this.formTwist * 0.08);
-    sx *= blendScale(coralBump - 1, Math.max(w.coral, 0.18));
-    sy *= blendScale(coralBump - 1, Math.max(w.coral, 0.18));
-    sz *= blendScale(coralBump - 1, Math.max(w.coral, 0.18));
+    // coral 床を撤廃 — 非 coral 曲に共通のゴツゴツを乗せて個性を潰さない
+    sx *= blendScale(coralBump - 1, w.coral);
+    sy *= blendScale(coralBump - 1, w.coral);
+    sz *= blendScale(coralBump - 1, w.coral);
 
     // アルゴリズム固有の半径うねり（coral 以外でも常に薄く効かせる）
     const algoWarp =
@@ -4370,6 +5130,7 @@ class SoundSculpture {
     const t = runtimeTuning;
     const formation = this.getFormationScale();
     const detail = this.getDetailScale();
+    const sectionMul = this.getSectionAccumMul();
     const liveW = this.getBandLiveWeights(bands);
     const drumMul = this.getDrumLiveMul(0.1);
     const liveGainK = 0.38;
@@ -4381,13 +5142,15 @@ class SoundSculpture {
     const highPressure = Math.max(0, bands.high - 0.025);
     const sculptMidDrive = midPressure;
     const midTexture = sculptMidDrive * (0.42 + bands.contrast * 0.48);
-    const lowAmount = lowPressure * deltaTime * t.accumRate * liveGainLow * formation;
+    const textureMul = this.getSectionTextureMul();
+    const lowAmount = lowPressure * deltaTime * t.accumRate * liveGainLow * formation * sectionMul;
     const midAmount =
       sculptMidDrive *
       deltaTime *
       t.accumRate *
       liveGainMid *
       formation *
+      textureMul *
       (0.65 + bands.contrast * 0.85);
     const highAmount =
       highPressure *
@@ -4395,6 +5158,7 @@ class SoundSculpture {
       t.accumRate *
       liveGainHigh *
       detail *
+      textureMul *
       this.getSpecies().spikeGain *
       (0.8 + bands.brightness * 0.1);
 
@@ -4473,8 +5237,8 @@ class SoundSculpture {
       const carveMask = smoothstep(0.04, 0.82, -largeForm + chiselNoise * 0.45 + axisFocusA * 0.42) * localFocus;
       const pushMask = smoothstep(0.12, 0.9, largeForm + surfaceGrain * 0.32 + axisFocusB * 0.22) * (0.38 + axisFocusB * 0.62);
       const ridge = Math.abs(surfaceGrain - chiselNoise) * midTexture;
-      // 共通モーフは弱め、アルゴリズム pattern を完成形に残す
-      const idolMix = 0.52;
+      // 共通モーフを強め、アルゴリズム pattern と合わせて完成形の読み分けを残す
+      const idolMix = 0.68;
       const algoGrain = largeForm * 0.85 + surfaceGrain * 0.42 + chiselNoise * 0.35;
       const idolBulge =
         w.diabolo * diaboloBulge +
@@ -4972,11 +5736,26 @@ class SoundSculpture {
 
   /** 録音中に LIVE 変位を少しずつ永久レイヤーへ転写する */
   private bleedLiveIntoSculpture(bands: AudioBands, deltaTime: number) {
-    const w = this.getBandLiveWeights(bands);
     const t = runtimeTuning;
     const rate = deltaTime * 1.4;
-
-    const bleedRate = 0.058;
+    // ヒット瞬間は転写を加速し、静かな区間は控えめ（ライブ感は残しつつ軌跡を刻む）
+    const hitEnergy = clamp01(
+      this.kickImpulse * 0.9 +
+        this.peakPunch * 0.55 +
+        this.snareFlash * 0.7 +
+        this.snareImpulse * 0.45 +
+        this.guitarImpulse * 0.55 +
+        this.guitarFlash * 0.4 +
+        this.hatFlash * 0.25,
+    );
+    const sectionMul = this.getSectionAccumMul();
+    const textureMul = this.getSectionTextureMul();
+    const bleedRate = 0.09 * (1 + hitEnergy * 1.35) * sectionMul;
+    const ev = this.getListeningEventDrive(bands);
+    // 帯域重みではなく聴感イベントで「何が刻まれたか」を決める（蓄積でも軌跡が読みやすい）
+    const lowGate = 0.25 + ev.body * 0.75;
+    const midGate = 0.2 + ev.crack * 0.4 + ev.phrase * 0.4;
+    const highGate = 0.15 + ev.sparkle * 0.85;
 
     for (let i = 0; i < this.accumulated.length; i += 1) {
       const index = i * 3;
@@ -4988,9 +5767,14 @@ class SoundSculpture {
       const ny = y / radius;
       const nz = z / radius;
       const deformSalt = this.vertexDeformSalt(i);
+      const grain = growthPattern(nx, ny, nz, this.formingTime * 1.15 + i * 0.029);
 
+      const kickStamp =
+        (this.kickImpulse * 0.085 + this.peakPunch * 0.055) * (0.55 + grain * 0.45);
       const lowBleed = growthModulateScalar(
-        this.liveOffset[i] * w.low * t.liveLow * rate * bleedRate * this.getDrumLiveMul(0.15),
+        (this.liveOffset[i] * lowGate * t.liveLow * this.getDrumLiveMul(0.15) + kickStamp) *
+          rate *
+          bleedRate,
         nx,
         ny,
         nz,
@@ -5002,13 +5786,15 @@ class SoundSculpture {
       }
 
       const midBleed = growthModulateScalar(
-        (this.surfaceLiveOffset[i] * w.mid * t.liveMid +
-          this.snareFlash * 0.45 +
-          this.snareImpulse * 0.22 +
-          this.guitarImpulse * 0.55 +
-          this.guitarFlash * 0.4) *
+        (this.surfaceLiveOffset[i] * midGate * t.liveMid +
+          this.snareFlash * 0.72 +
+          this.snareImpulse * 0.38 +
+          this.guitarImpulse * 0.78 +
+          this.guitarFlash * 0.58 +
+          this.pierceAmount[i] * 0.22) *
           rate *
-          bleedRate,
+          bleedRate *
+          (textureMul / Math.max(0.18, sectionMul)),
         nx,
         ny,
         nz,
@@ -5020,12 +5806,16 @@ class SoundSculpture {
       }
 
       const highDrive =
-        w.high * t.liveHigh * 0.85 +
-        this.hatImpulse * 0.5 +
-        this.hatFlash * 0.55 +
-        this.waveImpulse * 0.6;
+        highGate * t.liveHigh * 0.85 +
+        this.hatImpulse * 0.58 +
+        this.hatFlash * 0.68 +
+        this.waveImpulse * 0.7;
       const highBleed = growthModulateScalar(
-        highDrive * rate * bleedRate * growthPattern(nx, ny, nz, this.formingTime * 2.1 + i * 0.03),
+        highDrive *
+          rate *
+          bleedRate *
+          (textureMul / Math.max(0.18, sectionMul)) *
+          growthPattern(nx, ny, nz, this.formingTime * 2.1 + i * 0.03),
         nx,
         ny,
         nz,
@@ -5065,7 +5855,14 @@ class SoundSculpture {
 
   private rememberSculptedDisplacement(index: number, sculptedDisplacement: number, deltaTime: number) {
     const remembered = this.sculptureMemory[index];
-    const follow = Math.min(1, deltaTime * 5.5);
+    // ヒット直後は記憶追従を早め、ライブ衝動が完成形へ残りやすくする
+    const hitLock = clamp01(
+      this.kickImpulse * 0.85 +
+        this.peakPunch * 0.5 +
+        this.snareFlash * 0.65 +
+        this.guitarImpulse * 0.45,
+    );
+    const follow = Math.min(1, deltaTime * (5.5 + hitLock * 7.5));
     const oppositeFlip =
       Math.sign(sculptedDisplacement) !== Math.sign(remembered) &&
       Math.abs(sculptedDisplacement) > Math.abs(remembered) * 0.68;
@@ -5160,14 +5957,15 @@ class SoundSculpture {
       const nx = x / radius;
       const ny = y / radius;
       const nz = z / radius;
+      const livePresence = this.completed ? 0 : this.getQuietLivePresence(_bands);
+      const ev = this.completed
+        ? { body: 0, crack: 0, phrase: 0, sparkle: 0, listen: 0, busy: 0, thump: 0, ting: 0, chatter: 0 }
+        : this.getListeningEventDrive(_bands);
       const pulseRaw =
         this.completed ? 0 : growthPattern(nx, ny, nz, this.formingTime * 1.6) * (
-          (this.getGrooveBob() * 0.45 +
-            this.kickImpulse * 0.45 +
-            this.peakPunch * 0.25 +
-            this.snareImpulse * 0.18 +
-            this.snareFlash * 0.08) *
-          t.liveLow
+          (ev.thump * 0.48 + ev.ting * 0.18 + ev.chatter * 0.13) *
+          t.liveLow *
+          (0.018 + livePresence * 0.78)
         );
       const pulse = growthModulateScalar(
         pulseRaw,
@@ -5180,7 +5978,11 @@ class SoundSculpture {
 
       // 完成／ホールド中は liveOffset を動かさない（最終形を維持）
       if (!this.completed && !this.shapeHold) {
-        const liveFollow = 6 + this.drumLiveGate * 10;
+        const rising = Math.abs(pulse) > Math.abs(this.liveOffset[i]);
+        // 立ち上がりは俊敏、平常への戻りは速め → 揺れが形を覆い隠さない
+        const liveFollow = rising
+          ? 6 + this.drumLiveGate * 10
+          : 11 + this.drumLiveGate * 6;
         this.liveOffset[i] += (pulse - this.liveOffset[i]) * Math.min(1, deltaTime * liveFollow);
       }
 
@@ -5241,6 +6043,7 @@ class SoundSculpture {
 
     // 完成後も最終ライブ／フローを描画して形を維持（値は更新しない）
     {
+      const liveDraw = this.completed ? 1 : this.getLiveDrawScale(_bands);
       for (let i = 0; i < this.accumulated.length; i += 1) {
         const index = i * 3;
         const x = this.basePositions[index];
@@ -5251,7 +6054,8 @@ class SoundSculpture {
         const ny = y / radius;
         const nz = z / radius;
         const live =
-          this.liveOffset[i] * (1 - this.detachmentCarve[i] * 0.88) + this.idleWobbleField[i];
+          this.liveOffset[i] * liveDraw * (1 - this.detachmentCarve[i] * 0.88) +
+          this.idleWobbleField[i];
         if (
           Math.abs(live) < 1e-6 &&
           Math.abs(this.idleWobbleVector[index]) < 1e-6 &&
@@ -5330,9 +6134,11 @@ class SoundSculpture {
         .replace(
           "vec4 diffuseColor = vec4( diffuse, opacity );",
           /* glsl */ `
-          // 透明度は変えない（膜とのソート競合を避ける）。色味だけ僅かに寄せる
-          float pierceMask = smoothstep(0.4, 0.9, vPierce);
-          vec3 pierceTint = mix(diffuse, vec3(0.82, 0.52, 0.72), pierceMask * 0.1);
+          // 接点 = 同じ粘土がわずかに濃く・暖かく（明るくしない）
+          float pierceMask = smoothstep(0.34, 0.92, vPierce);
+          vec3 flushWarm = mix(diffuse * 0.62, diffuse * vec3(1.06, 0.82, 0.72), 0.45);
+          flushWarm = clamp(flushWarm, vec3(0.0), vec3(0.72));
+          vec3 pierceTint = mix(diffuse, flushWarm, pierceMask * 0.22);
           vec4 diffuseColor = vec4( pierceTint, opacity );
           `,
         )
@@ -5340,13 +6146,14 @@ class SoundSculpture {
           "#include <emissivemap_fragment>",
           /* glsl */ `
           #include <emissivemap_fragment>
-          float pierceGlow = smoothstep(0.45, 0.95, vPierce);
-          totalEmissiveRadiance += vec3(0.7, 0.4, 0.65) * pierceGlow * 0.4;
-          totalEmissiveRadiance += vec3(0.35, 0.55, 0.75) * pierceGlow * pierceGlow * 0.18;
+          // 発光はごく弱い粘土色のみ
+          float pierceGlow = smoothstep(0.45, 0.96, vPierce);
+          float glowPulse = pierceGlow * pierceGlow;
+          totalEmissiveRadiance += diffuse * vec3(1.05, 0.7, 0.55) * glowPulse * 0.1;
           `,
         );
     };
-    material.customProgramCacheKey = () => "vita-core-pierce-opaque-v7";
+    material.customProgramCacheKey = () => "vita-core-pierce-opaque-v10";
     material.needsUpdate = true;
   }
 
@@ -5395,6 +6202,111 @@ class SoundSculpture {
   }
 
   /**
+   * キック／スネアに合わせて膜食い込み（pierce）を直接乗せる。
+   * 幾何交差だけだと聴感とずれて感じられないため、ヒット瞬間に接点の熱を立てる。
+   */
+  private injectMusicPierce(strength: number, mode: "kick" | "snare") {
+    if (!this.style.membrane.vita || this.completed || this.shapeHold) {
+      return;
+    }
+    const amount = clamp01(strength);
+    if (amount < 0.04) {
+      return;
+    }
+
+    const corePositions = this.geometry.attributes.position.array as Float32Array;
+    const surfacePositions = this.surfaceGeometry.attributes.position.array as Float32Array;
+    const count = Math.min(
+      this.pierceAmount.length,
+      Math.min(corePositions.length, surfacePositions.length) / 3,
+    );
+    const mx = this.morphAxis.x;
+    const my = this.morphAxis.y;
+    const mz = this.morphAxis.z;
+    const softGap = 0.42;
+    let changed = false;
+    let peak = 0;
+
+    for (let i = 0; i < count; i += 1) {
+      const index = i * 3;
+      const cx = corePositions[index];
+      const cy = corePositions[index + 1];
+      const cz = corePositions[index + 2];
+      const coreRadius = Math.hypot(cx, cy, cz);
+      if (coreRadius < 0.0001) {
+        continue;
+      }
+      const sx = surfacePositions[index];
+      const sy = surfacePositions[index + 1];
+      const sz = surfacePositions[index + 2];
+      const surfaceRadius = Math.hypot(sx, sy, sz) || 1;
+      const gap = surfaceRadius - coreRadius;
+
+      const bx = this.basePositions[index];
+      const by = this.basePositions[index + 1];
+      const bz = this.basePositions[index + 2];
+      const br = Math.hypot(bx, by, bz) || 1;
+      const nx = bx / br;
+      const ny = by / br;
+      const nz = bz / br;
+      const along = nx * mx + ny * my + nz * mz;
+      const perp = Math.sqrt(Math.max(0.001, 1 - along * along));
+      const grain = growthPattern(nx, ny, nz, this.morphologySeed + (mode === "kick" ? 41.2 : 73.8));
+      const grain01 = grain * 0.5 + 0.5;
+
+      // キックは胴・底寄り、スネアは側面・赤道寄り
+      const spatial =
+        mode === "kick"
+          ? smoothstep(-0.85, 0.15, along) * smoothstep(0.95, 0.25, along) * (0.35 + grain01 * 0.65)
+          : smoothstep(0.28, 0.92, perp) *
+            smoothstep(-0.55, 0.35, along) *
+            smoothstep(0.7, 0.1, along) *
+            (0.3 + grain01 * 0.7);
+
+      // 膜に近い／すでに食い込んでいる頂点を優先。遠くても弱いフラッシュは許可
+      let proximity = 0.18;
+      if (gap < 0) {
+        proximity = 1;
+      } else if (gap < softGap) {
+        const t = 1 - gap / softGap;
+        proximity = 0.35 + t * t * 0.65;
+      }
+
+      const liveBias = clamp01(Math.abs(this.liveOffset[i]) * 4.5 + this.membranePressure[i] * 2.2);
+      const target = clamp01(amount * spatial * proximity * (0.55 + liveBias * 0.55));
+      if (target < 0.03) {
+        continue;
+      }
+
+      const next = Math.min(1, Math.max(this.pierceAmount[i], this.pierceAmount[i] * 0.55 + target));
+      if (next > this.pierceAmount[i] + 0.01) {
+        const delta = next - this.pierceAmount[i];
+        this.pierceAmount[i] = next;
+        this.membranePressure[i] = Math.min(0.38, this.membranePressure[i] + target * 0.16);
+        // 音楽ヒットの食い込みを mid 永久層へ薄く刻む（発光だけで終わらせない）
+        this.midBumps[i] = this.accumulateWithMemory(
+          this.midBumps[i],
+          delta * (mode === "kick" ? 0.028 : 0.022),
+          -0.42,
+          0.26,
+        );
+        changed = true;
+        peak = Math.max(peak, next);
+      }
+    }
+
+    if (peak > 0) {
+      this.membranePressureImpulse = Math.min(1, this.membranePressureImpulse + amount * 0.65);
+    }
+    if (changed) {
+      const pierceAttr = this.geometry.getAttribute("aPierce");
+      if (pierceAttr) {
+        pierceAttr.needsUpdate = true;
+      }
+    }
+  }
+
+  /**
    * コアが膜に近づいた／突き抜けた頂点で圧力を溜め、近傍へ拡散する。
    * 完成後は新規加算せず減衰のみ。
    * ※ 膜接着の前に呼ぶこと — ここで aPierce も更新する。
@@ -5406,7 +6318,9 @@ class SoundSculpture {
     }
     const decay = Math.exp(-4 * deltaTime);
     const impulseDecay = Math.exp(-5.2 * deltaTime);
-    const pierceDecay = Math.exp(-3.8 * deltaTime);
+    // キック／スネア直後は食い込み発光を少し長く残す
+    const rhythmHold = clamp01(this.kickImpulse * 0.7 + this.snareFlash * 0.55 + this.peakPunch * 0.35);
+    const pierceDecay = Math.exp(-(2.4 + (1 - rhythmHold) * 2.2) * deltaTime);
     const pierceAttack = Math.min(1, deltaTime * 18);
     const count = this.membranePressure.length;
     let pierceChanged = false;
@@ -5444,6 +6358,7 @@ class SoundSculpture {
       const surfacePositions = this.surfaceGeometry.attributes.position.array as Float32Array;
       const softGap = 0.35;
       const vertexCount = Math.min(count, Math.min(corePositions.length, surfacePositions.length) / 3);
+      const rhythmBoost = 1 + this.kickImpulse * 0.9 + this.snareFlash * 0.55 + this.peakPunch * 0.35;
 
       for (let i = 0; i < vertexCount; i += 1) {
         const index = i * 3;
@@ -5484,15 +6399,21 @@ class SoundSculpture {
         this.membranePressure[i] = Math.min(0.38, this.membranePressure[i] + push);
         hit = Math.max(hit, push);
 
-        // 膜を突き抜けた頂点だけ発光マスク（接近だけでは立てない）
+        // 幾何突き抜け＋リズムで食い込みを強調。接近だけでもヒット直後は弱いフラッシュ
         if (gap < 0) {
-          const pierceTarget = Math.min(1, (-gap / 0.1) * 0.95);
+          const pierceTarget = Math.min(1, (-gap / 0.1) * 0.95 * rhythmBoost);
           if (pierceTarget > this.pierceAmount[i]) {
             this.pierceAmount[i] += (pierceTarget - this.pierceAmount[i]) * pierceAttack;
           } else {
             this.pierceAmount[i] = Math.max(this.pierceAmount[i] * pierceDecay, pierceTarget);
           }
           pierceChanged = true;
+        } else if (rhythmHold > 0.2 && gap < softGap * 0.55) {
+          const nearFlush = (1 - gap / (softGap * 0.55)) * rhythmHold * 0.45;
+          if (nearFlush > this.pierceAmount[i]) {
+            this.pierceAmount[i] += (nearFlush - this.pierceAmount[i]) * pierceAttack * 0.7;
+            pierceChanged = true;
+          }
         }
       }
 
@@ -5746,17 +6667,23 @@ class SoundSculpture {
       }
 
       if (colors) {
-        // 膜内は粘土色のまま。突き抜け先端もごく弱く寄せるだけ
-        const tintStrength = Math.min(1, Math.max(0, (pierce - 0.4) / 0.55) * 0.1);
-        if (tintStrength > 0.015) {
-          const tr = 0.78;
-          const tg = 0.5 + pierce * 0.06;
-          const tb = 0.62 + pierce * 0.05;
-          colors[index] = this.coreColorBase[index] + (tr - this.coreColorBase[index]) * tintStrength;
-          colors[index + 1] =
-            this.coreColorBase[index + 1] + (tg - this.coreColorBase[index + 1]) * tintStrength;
-          colors[index + 2] =
-            this.coreColorBase[index + 2] + (tb - this.coreColorBase[index + 2]) * tintStrength;
+        // 接点は粘土色をわずかに濃く・暖かく（明度は上げない）
+        const tintStrength = Math.min(1, Math.max(0, (pierce - 0.32) / 0.55) * 0.28);
+        if (tintStrength > 0.02) {
+          this._tmpColor.setHSL(
+            this.clayHueBase,
+            Math.min(0.9, this.claySatBase * 1.35 + 0.12),
+            Math.max(0.16, Math.min(0.42, this.clayLightBase * 0.55)),
+          );
+          const br = this.coreColorBase[index];
+          const bg = this.coreColorBase[index + 1];
+          const bb = this.coreColorBase[index + 2];
+          const tr = Math.min(0.72, br * 0.65 + this._tmpColor.r * 0.35);
+          const tg = Math.min(0.68, bg * 0.65 + this._tmpColor.g * 0.35);
+          const tb = Math.min(0.64, bb * 0.65 + this._tmpColor.b * 0.35);
+          colors[index] = br + (tr - br) * tintStrength;
+          colors[index + 1] = bg + (tg - bg) * tintStrength;
+          colors[index + 2] = bb + (tb - bb) * tintStrength;
           colorChanged = true;
         } else {
           colors[index] = this.coreColorBase[index];
@@ -5828,8 +6755,19 @@ class SoundSculpture {
   private updateSurfaceGeometry(bands: AudioBands, deltaTime: number) {
     const positions = this.surfaceGeometry.attributes.position.array;
     const t = runtimeTuning;
+    const ev = this.completed
+      ? { body: 0, crack: 0, phrase: 0, sparkle: 0, listen: 0, busy: 0, thump: 0, ting: 0, chatter: 0 }
+      : this.getListeningEventDrive(bands);
     const w = this.getBandLiveWeights(bands);
-    const midDrive = w.mid * t.liveMid;
+    const listen = ev.listen;
+    const liveDraw = this.completed ? 1 : this.getLiveDrawScale(bands);
+    // 表面うねり LIVE: スネア寄りのみ。ギター／ハットは載せない（別表現）
+    const midDrive =
+      (ev.ting * 0.42 +
+        ev.thump * 0.06 +
+        w.mid * 0.18 * this.getDrumLiveMul(0.08)) *
+      t.liveMid *
+      (0.03 + listen * 0.4);
     // surface は core より少し外側を覆うので vector offset を僅かに拡大。
     const vectorScale = 1.04;
     const flowScale = 0.92;
@@ -5847,18 +6785,19 @@ class SoundSculpture {
       const ripple = growthPattern(nx, ny, nz, this.formingTime * 3.6 + this.carvingPhase * 0.7);
       const surfacePattern = flow * 0.22 + ripple * 0.09;
       const targetSurfaceLive =
-        midDrive * surfacePattern * (0.55 + this.getDrumLiveMul(0.25)) +
-        (this.guitarImpulse * 0.55 + this.guitarFlash * 0.4 + this.snareFlash * 0.2) *
-          surfacePattern;
+        midDrive * surfacePattern +
+        ev.ting * 0.35 * surfacePattern * (0.4 + listen * 0.55);
       if (!this.completed && !this.shapeHold) {
+        const rising = Math.abs(targetSurfaceLive) > Math.abs(this.surfaceLiveOffset[i]);
+        const follow = rising ? 9 : 14;
         this.surfaceLiveOffset[i] +=
-          (targetSurfaceLive - this.surfaceLiveOffset[i]) * Math.min(1, deltaTime * 9);
+          (targetSurfaceLive - this.surfaceLiveOffset[i]) * Math.min(1, deltaTime * follow);
       }
       const remembered = this.getPermanentScalarDisplacement(i);
       const deformSalt = this.vertexDeformSalt(i, 9.2);
       // ホールド／完成後は midDrive 由来の瞬時オフセットも足さない（形固定）
       const liveSurfaceNudge =
-        this.completed || this.shapeHold ? 0 : flow * midDrive * 0.05;
+        this.completed || this.shapeHold ? 0 : flow * midDrive * 0.02 * liveDraw;
       const scalarDisp = growthModulateScalar(
         remembered * 0.98 + liveSurfaceNudge,
         nx,
@@ -5911,7 +6850,7 @@ class SoundSculpture {
         const ny = y / radius;
         const nz = z / radius;
         // 膜はコアより僅かに大きくホヨホヨさせて「柔らかい外皮」を演出
-        const live = this.surfaceLiveOffset[i] + this.idleWobbleField[i] * 1.18;
+        const live = this.surfaceLiveOffset[i] * liveDraw + this.idleWobbleField[i] * 1.18;
         if (
           Math.abs(live) < 1e-6 &&
           Math.abs(this.idleWobbleVector[index]) < 1e-6 &&
@@ -5962,29 +6901,47 @@ class SoundSculpture {
     uniforms.uTime.value = this.completed
       ? this.frozenTime
       : this.formingTime + (this.style.idleWobble > 0 ? this.idleTime * 0.3 : 0);
-    uniforms.uMelodyLine.value = t.membraneLine;
-    uniforms.uMelodyFresnel.value = t.membraneFresnel;
-    uniforms.uMelodyNoise.value = t.membraneNoise;
-    uniforms.uMelodyFlowAnim.value = 1.2 + t.liveHigh * 1.4;
-    uniforms.uMid.value += (bands.mid - uniforms.uMid.value) * Math.min(1, deltaTime * 9);
-    uniforms.uMelody.value += (bands.melody - uniforms.uMelody.value) * Math.min(1, deltaTime * 9);
-    uniforms.uHigh.value += (bands.high - uniforms.uHigh.value) * Math.min(1, deltaTime * 9);
+    const midFlash = clamp01(this.guitarFlash * 1.05 + this.snareFlash * 0.55);
+    const hatTick = clamp01(this.hatFlash * 1.05 + this.hatImpulse * 0.45);
+    uniforms.uMelodyLine.value =
+      t.membraneLine * (1 + midFlash * 1.65 + this.melodyPhraseImpulse * 0.4);
+    uniforms.uMelodyFresnel.value =
+      t.membraneFresnel * (1 + midFlash * 0.75 + this.melodyPhraseImpulse * 0.25);
+    uniforms.uMelodyNoise.value = t.membraneNoise * (0.85 + midFlash * 0.35);
+    uniforms.uMelodyFlowAnim.value = 0.95 + t.liveHigh * 0.7 + midFlash * 0.65;
+    // フラッシュ追従を速く（中高音のキレ）
+    const midTarget = clamp01(midFlash * 0.95 + bands.mid * 0.12);
+    const melTarget = clamp01(
+      this.guitarFlash * 0.9 + this.melodyPhraseImpulse * 0.55 + bands.melody * 0.1,
+    );
+    const highTarget = clamp01(hatTick * 0.85 + bands.high * 0.12);
+    uniforms.uMid.value += (midTarget - uniforms.uMid.value) * Math.min(1, deltaTime * 18);
+    uniforms.uMelody.value += (melTarget - uniforms.uMelody.value) * Math.min(1, deltaTime * 18);
+    uniforms.uHigh.value += (highTarget - uniforms.uHigh.value) * Math.min(1, deltaTime * 20);
     const tension = this.membranePressureImpulse;
-    const targetLive = this.getMembraneLiveTarget(bands) + tension * 0.7;
-    uniforms.uLive.value += (targetLive - uniforms.uLive.value) * Math.min(1, deltaTime * 14);
-    const targetGlow = this.getMembraneGlowTarget(bands) + tension * 0.9;
-    uniforms.uGlow.value += (targetGlow - uniforms.uGlow.value) * Math.min(1, deltaTime * 5);
+    const targetLive = Math.min(1.05, Math.max(0, this.getMembraneLiveTarget(bands) + tension * 0.7));
+    const liveRising = targetLive > uniforms.uLive.value;
+    uniforms.uLive.value +=
+      (targetLive - uniforms.uLive.value) * Math.min(1, deltaTime * (liveRising ? 20 : 10));
+    const targetGlow = Math.min(1.2, Math.max(0, this.getMembraneGlowTarget(bands) + tension * 0.9));
+    const glowRising = targetGlow > uniforms.uGlow.value;
+    uniforms.uGlow.value +=
+      (targetGlow - uniforms.uGlow.value) * Math.min(1, deltaTime * (glowRising ? 24 : 8));
     // 外殻の透明感を抑えて「中身が詰まっている」印象に寄せる
+    // ※ membraneGain は曲で organic が上がると 10 超になり得る → vita は粘土が見えるよう不透明度を上限する
     const sp = this.getSpecies();
     const stMembrane = this.style.membrane;
     const initialGate = 0.5 + this.formDevelopment * 0.5;
-    const membraneOpacity =
+    const rawMembraneOpacity =
       (this.completed
         ? stMembrane.completedOpacity
         : (fibUnit(5, 21) + sp.membraneGain * fibUnit(8, 21) - sp.aggressive * fibUnit(5, 21)) *
           stMembrane.opacityScale) *
         initialGate +
       tension * 0.14;
+    const membraneOpacity = stMembrane.vita
+      ? Math.min(this.completed ? stMembrane.completedOpacity : 0.46, Math.max(0.1, rawMembraneOpacity))
+      : Math.min(0.92, Math.max(0, rawMembraneOpacity));
     const opacityFollow = this.completed
       ? 0.7 + (1 - this.completionSettle) * 1.4
       : fib(3);
@@ -6227,17 +7184,22 @@ class SoundSculpture {
 
   private updateSparkles(bands: AudioBands, deltaTime: number) {
     const drive = this.completed ? 0 : scopeCyanDrive(latestRhythm);
+    const hatTick = this.completed
+      ? 0
+      : clamp01(this.hatFlash * 1.2 + this.hatImpulse * 0.75);
     if (!this.completed) {
-      this.sparkleEmission += drive * deltaTime * 22;
+      // 常時 cyan はごく弱く。高音チッチだけ粒子を立てる（中音は膜側）
+      this.sparkleEmission += (drive * 0.12 + hatTick * 3.6) * deltaTime * 22;
       let spawned = 0;
-      while (this.sparkleEmission >= 1 && spawned < 6) {
-        this.spawnSparkle(bands, drive);
+      while (this.sparkleEmission >= 1 && spawned < 12) {
+        this.spawnSparkle(bands, Math.max(0.35, hatTick * 1.05 + drive * 0.2));
         this.sparkleEmission -= 1;
         spawned += 1;
       }
     }
 
-    const decay = this.completed ? 2.8 : 1.8;
+    // チッチは短く明るく消える（リズムが読める）
+    const decay = this.completed ? 2.8 : 2.2 + hatTick * 0.6;
     let anyAlive = false;
     for (let i = 0; i < SoundSculpture.maxSparkles; i += 1) {
       if (this.sparkleLife[i] <= 0) {
@@ -6252,15 +7214,17 @@ class SoundSculpture {
         this.sparklePositions[idx + 2] = 999;
         continue;
       }
-      const twinkle = this.sparkleLife[i] * (0.45 + drive * 0.7);
-      this.sparkleColors[idx] = 0.5 * twinkle;
-      this.sparkleColors[idx + 1] = 0.82 * twinkle;
+      const twinkle = this.sparkleLife[i] * (0.55 + hatTick * 0.75 + drive * 0.2);
+      // 高音チッチ：白寄りシアン
+      this.sparkleColors[idx] = 0.72 * twinkle;
+      this.sparkleColors[idx + 1] = 0.94 * twinkle;
       this.sparkleColors[idx + 2] = 1.0 * twinkle;
     }
 
+    const targetOpacity = this.completed ? 0.08 : 0.12 + drive * 0.15 + hatTick * 0.95;
     this.sparkleMaterial.opacity +=
-      ((this.completed ? 0.08 : 0.2 + drive * 0.75) - this.sparkleMaterial.opacity) * Math.min(1, deltaTime * 8);
-    this.sparkleMaterial.size = 0.04 + drive * 0.06;
+      (targetOpacity - this.sparkleMaterial.opacity) * Math.min(1, deltaTime * 14);
+    this.sparkleMaterial.size = 0.04 + drive * 0.025 + hatTick * 0.11;
     if (anyAlive && this.style.particlesVisible) {
       SoundSculpture.unparkPointsGeometry(this.sparkleGeometry, SoundSculpture.maxSparkles);
     } else {
@@ -8487,9 +9451,13 @@ const snapshotToSceneWeather = (snapshot: LiveWeatherSnapshot | null): SceneWeat
     snapshot.rainIntensity * 0.55 +
     (isFog ? 3.2 : 0) +
     snapshot.lightningIntensity * 0.2;
+  // 強風時は雲を足して、風の強さが背景でも分かるようにする
+  const windCloudBoost =
+    snapshot.windStrength > 0.5 ? (snapshot.windStrength - 0.5) * 0.85 : 0;
+  const cloudCover = Math.min(1, snapshot.cloudCover + windCloudBoost);
   return {
     enabled: true,
-    cloudCover: snapshot.cloudCover,
+    cloudCover,
     rainIntensity: snapshot.rainIntensity,
     windStrength: snapshot.windStrength,
     windX: snapshot.windX,
@@ -8504,6 +9472,7 @@ const snapshotToSceneWeather = (snapshot: LiveWeatherSnapshot | null): SceneWeat
 const applyLiveWeatherToScene = () => {
   sceneBackground.setWeather(snapshotToSceneWeather(getActiveWeatherSnapshot()));
   updateWeatherHud();
+  sculpture.applyWeatherClayTint?.(getActiveWeatherSnapshot(), getActiveDaytimeHour());
 };
 
 const tintHexWithClouds = (hex: number, cloudCover: number) => {
@@ -8925,6 +9894,7 @@ const updateEnvironmentCrossfade = (deltaTime: number) => {
       seaHour,
     );
   }
+  sculpture.applyWeatherClayTint?.(getActiveWeatherSnapshot(), seaHour);
   syncSceneFog();
   const baseKey = envLerp(lightDev.key, lightDev.keyComplete);
   const baseFill = envLerp(lightDev.fill, lightDev.fillComplete);
@@ -9123,6 +10093,62 @@ type ArmedAudioSource = "input" | "system" | "dev" | null;
 let armedAudioSource: ArmedAudioSource = null;
 let sourceButtonsEnabled = true;
 const inputDevicePanel = document.querySelector<HTMLElement>("#input-device-panel");
+const playbackVolumeSlider = document.querySelector<HTMLInputElement>("#playback-volume");
+const playbackVolumeValue = document.querySelector<HTMLElement>("#playback-volume-value");
+const PLAYBACK_VOLUME_STORAGE_KEY = "sound-sculpture.playback-volume";
+
+const syncPlaybackVolumeUi = (percent: number) => {
+  const clamped = Math.round(clamp01(percent / 100) * 100);
+  if (playbackVolumeSlider) {
+    playbackVolumeSlider.value = String(clamped);
+    playbackVolumeSlider.setAttribute("aria-valuenow", String(clamped));
+    playbackVolumeSlider.setAttribute(
+      "aria-valuetext",
+      clamped === 0 ? "Muted" : `${clamped}%`,
+    );
+    // Input Device 非活性時も常に操作可能（親パネルの disabled に巻き込まない）
+    playbackVolumeSlider.disabled = false;
+  }
+  if (playbackVolumeValue) {
+    playbackVolumeValue.textContent = clamped === 0 ? "Mute" : `${clamped}%`;
+  }
+  const volumeLabel = playbackVolumeSlider?.closest(".playback-volume");
+  volumeLabel?.classList.toggle("is-muted", clamped === 0);
+};
+
+const applyPlaybackVolume = (percent: number, persist = true) => {
+  const raw = Number(percent);
+  const unit = clamp01(Number.isFinite(raw) ? raw / 100 : 0.8);
+  audioInput.setOutputVolume(unit);
+  syncPlaybackVolumeUi(unit * 100);
+  if (persist) {
+    try {
+      localStorage.setItem(PLAYBACK_VOLUME_STORAGE_KEY, String(Math.round(unit * 100)));
+    } catch {
+      // private mode など
+    }
+  }
+};
+
+{
+  let initial = 80;
+  try {
+    const stored = localStorage.getItem(PLAYBACK_VOLUME_STORAGE_KEY);
+    if (stored != null) {
+      const parsed = Number(stored);
+      if (Number.isFinite(parsed)) {
+        initial = Math.round(clamp01(parsed / 100) * 100);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  applyPlaybackVolume(initial, false);
+}
+
+playbackVolumeSlider?.addEventListener("input", () => {
+  applyPlaybackVolume(Number(playbackVolumeSlider.value));
+});
 
 const syncArmedSourceUi = () => {
   const useButtons: Array<{ button: HTMLButtonElement | null; source: Exclude<ArmedAudioSource, null> }> = [
@@ -9225,12 +10251,16 @@ const resetSculptureSession = () => {
     snare: 0,
     hat: 0,
     transient: 0,
+    chop: 0,
+    salience: 0,
     beat: 0,
     beatIndex: 0,
     kickIndex: 0,
     snareIndex: 0,
     hatIndex: 0,
     transientIndex: 0,
+    chopIndex: 0,
+    salienceIndex: 0,
     downbeat: false,
     bpm: 0,
     pulsePhase: 0,
@@ -9243,6 +10273,7 @@ const resetSculptureSession = () => {
     kickRing: 0,
     snareRing: 0,
     hatRing: 0,
+    melodyOnset: 0,
     subLevel: 0,
     wavePeak: 0,
     waveEnergy: 0,
@@ -9533,6 +10564,7 @@ const advanceSculptureSimulation = (
   // バッファ曲が終わったら形を止め、短く待って完成
   if (playbackEnded && !isComplete) {
     sculpture.holdShapeForCompletion?.();
+    sculpture.evolveSongColors?.(audioInput.getProfile(), deltaTime);
     trackSilenceForCompletion(bands, deltaTime, waveformMetrics);
     const heldBands = lastDisplayBands.overall > 0 ? lastDisplayBands : emptyBands();
     sculpture.update(
@@ -9601,6 +10633,9 @@ const advanceSculptureSimulation = (
   );
 
   const speciesProfile = speciesProfiler.getProfile();
+  if (!isComplete) {
+    sculpture.evolveSongColors?.(audioInput.getProfile(), deltaTime);
+  }
   const soloBands = bandSoloMode === "off" ? bands : applyBandSolo(bands, bandSoloMode);
   sculpture.update(
     soloBands,

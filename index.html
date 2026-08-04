@@ -183,6 +183,25 @@
                 </button>
               </div>
             </div>
+            <label class="playback-volume" for="playback-volume">
+              Volume
+              <div class="playback-volume__row">
+                <input
+                  id="playback-volume"
+                  class="playback-volume__slider"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value="80"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow="80"
+                  aria-valuetext="80%"
+                />
+                <span id="playback-volume-value" class="playback-volume__value">80%</span>
+              </div>
+            </label>
             <div class="input-device-panel" id="input-device-panel" aria-disabled="true">
               <label class="input-device-mode" for="audio-input-device">Input Device</label>
               <div class="input-device-panel__row">

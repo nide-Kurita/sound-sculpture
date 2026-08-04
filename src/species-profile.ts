@@ -57,12 +57,12 @@ const applyGains = (
     aggressive,
     rhythmic,
     flowGain: fibUnit(5, 8) + organic * fibRatio(8, 5),
-    spikeGain: fibUnit(3, 8) + aggressive * fibRatio(8, 3),
+    spikeGain: fibUnit(3, 8) + aggressive * fibUnit(8, 9),
     crystalGain: fibUnit(2, 8) + aggressive * fibRatio(8, 2) + mineral * fibUnit(5, 13),
-    tentacleGain: fibUnit(3, 8) + organic * fibRatio(8, 3),
+    tentacleGain: fibUnit(3, 8) + organic * fibUnit(8, 9),
     erosionGain: fibUnit(2, 8) + aggressive * fibRatio(5, 3) + mineral * fibUnit(3, 13),
     fragmentGain: fibUnit(2, 8) + aggressive * fibRatio(8, 2),
-    membraneGain: fibUnit(3, 8) + organic * fibRatio(8, 3) + rhythmic * fibUnit(5, 13),
+    membraneGain: fibUnit(5, 8) + organic * fibUnit(8, 9) + rhythmic * fibUnit(5, 13),
     finalized,
     confidence,
   };
@@ -80,55 +80,69 @@ const computeAxesFromAverages = (
   avgMelodyFocus: number,
   avgNovelty: number,
   avgEventRate: number,
-  avgOverall: number,
+  _avgOverall: number,
   loudRatio: number,
   densityVar: number,
-  tensionVar: number,
+  _tensionVar: number,
   contrastVar: number,
-  brightnessVar: number,
+  _brightnessVar: number,
   sectionContrast: number,
 ) => {
-  // Sustained loudness separates wall-of-sound metal/prog from dynamic acoustic/soft tracks.
-  // Peak-normalized overall saturates many mixes, so only extreme loudRatio counts.
-  const loudHard = smoothstep(0.78, 0.98, loudRatio);
+  // Sustained loudness + bright grit separates wall-of-sound metal/prog from loud-but-dark alt rock.
+  const loudHard = smoothstep(0.72, 0.96, loudRatio);
   const softDyn = smoothstep(0.04, 0.45, sectionContrast) * (1 - loudHard * 0.55);
+  const grit = clamp01(
+    smoothstep(0.55, 0.85, loudRatio) * smoothstep(0.145, 0.22, avgBrightness) * 1.15 +
+      smoothstep(0.16, 0.24, avgBrightness) * 0.35,
+  );
+  // 中音圧＋高パルスのグルーヴ（Fly Away 系）と、明るく静かめの器楽（Peaches 系）を分ける
+  const grooveLead = clamp01(
+    smoothstep(0.86, 0.95, avgPulse) *
+      smoothstep(0.4, 0.5, loudRatio) *
+      (1 - smoothstep(0.58, 0.78, loudRatio)),
+  );
+  const brightSoft = clamp01(
+    smoothstep(0.17, 0.24, avgBrightness) * (1 - smoothstep(0.4, 0.7, loudRatio)),
+  );
   const organic = clamp01(
     0.44 -
-      avgDensity * 0.14 -
-      avgBassFocus * 0.06 -
-      loudHard * 0.26 +
+      avgDensity * 0.12 -
+      avgBassFocus * 0.05 -
+      loudHard * 0.2 -
+      grit * 0.25 -
+      brightSoft * 0.1 -
+      grooveLead * 0.05 +
       softDyn * 0.38 +
       avgMelodyFocus * 0.68 +
-      avgCentroid * 0.38 +
+      avgCentroid * 0.4 +
       sectionContrast * 0.5 +
-      contrastVar * 0.42 -
-      avgBrightness * 0.08 -
-      avgTransient * 0.08,
+      contrastVar * 0.4 -
+      avgTransient * 0.06,
   );
   const aggressive = clamp01(
     0.12 +
-      loudHard * 0.4 +
-      avgOverall * 0.06 +
-      avgContrast * 0.16 +
-      avgBrightness * 0.22 +
-      avgTension * 0.2 +
-      avgTransient * 0.1 +
-      avgBassFocus * 0.02 +
-      avgNovelty * 0.1 +
-      avgEventRate * 0.08 +
-      brightnessVar * 0.1 -
-      avgMelodyFocus * 0.2 -
-      softDyn * 0.3,
+      loudHard * 0.34 +
+      grit * 0.48 +
+      brightSoft * 0.14 +
+      grooveLead * 0.12 +
+      avgContrast * 0.12 +
+      avgBrightness * 0.1 +
+      avgTension * 0.14 +
+      avgTransient * 0.08 +
+      avgNovelty * 0.08 +
+      avgEventRate * 0.07 -
+      avgMelodyFocus * 0.16 -
+      softDyn * 0.28,
   );
   const rhythmic = clamp01(
     0.02 +
-      avgPulse * 0.24 +
-      avgDensity * 0.12 +
-      densityVar * 0.34 +
-      tensionVar * 0.12 +
-      avgEventRate * 0.16 +
-      sectionContrast * 0.12 -
-      avgTransient * 0.05,
+      avgPulse * 0.42 +
+      grooveLead * 0.22 +
+      avgDensity * 0.06 +
+      densityVar * 0.2 +
+      avgEventRate * 0.2 +
+      sectionContrast * 0.1 -
+      avgTransient * 0.04,
   );
   return { organic, aggressive, rhythmic };
 };
@@ -165,6 +179,7 @@ export class SpeciesProfiler {
   private sumEventRate = 0;
   private sumOverall = 0;
   private loudSampleCount = 0;
+  private softSampleCount = 0;
   private sumDensitySq = 0;
   private sumTensionSq = 0;
   private sumContrastSq = 0;
@@ -203,6 +218,7 @@ export class SpeciesProfiler {
     this.sumEventRate = 0;
     this.sumOverall = 0;
     this.loudSampleCount = 0;
+    this.softSampleCount = 0;
     this.sumDensitySq = 0;
     this.sumTensionSq = 0;
     this.sumContrastSq = 0;
@@ -237,6 +253,7 @@ export class SpeciesProfiler {
     const avgEventRate = this.sumEventRate / n;
     const avgOverall = this.sumOverall / n;
     const loudRatio = this.loudSampleCount / n;
+    const softRatio = this.softSampleCount / n;
     const densityVar = Math.max(0, this.sumDensitySq / n - avgDensity * avgDensity);
     const tensionVar = Math.max(0, this.sumTensionSq / n - avgTension * avgTension);
     const contrastVar = Math.max(0, this.sumContrastSq / n - avgContrast * avgContrast);
@@ -248,9 +265,11 @@ export class SpeciesProfiler {
     const lateBrightness = this.lateCount > 0 ? this.lateBrightness / this.lateCount : avgBrightness;
     const lateMelodyFocus = this.lateCount > 0 ? this.lateMelodyFocus / this.lateCount : avgMelodyFocus;
     const sectionContrast = clamp01(
-      Math.abs(lateCentroid - earlyCentroid) * 0.9 +
-        Math.abs(lateBrightness - earlyBrightness) * 0.75 +
-        Math.abs(lateMelodyFocus - earlyMelodyFocus) * 1.2,
+      Math.abs(lateCentroid - earlyCentroid) * 0.75 +
+        Math.abs(lateBrightness - earlyBrightness) * 0.6 +
+        Math.abs(lateMelodyFocus - earlyMelodyFocus) * 0.95 +
+        Math.sqrt(Math.max(0, softRatio) * Math.max(0, loudRatio)) * 2.4 +
+        contrastVar * 0.55,
     );
     return {
       avgDensity,
@@ -308,6 +327,9 @@ export class SpeciesProfiler {
     this.sumOverall += bands.overall;
     if (bands.overall > 0.66) {
       this.loudSampleCount += 1;
+    }
+    if (bands.overall < 0.18) {
+      this.softSampleCount += 1;
     }
     this.sumDensitySq += input.density * input.density;
     this.sumTensionSq += input.tension * input.tension;
@@ -402,24 +424,26 @@ export const speciesMorphTargets = (
   const o = sp.organic;
   const a = sp.aggressive;
   const r = sp.rhythmic;
-  const hardness = clamp01(0.5 + (a - o) * 0.7);
+  const hardness = clamp01(0.5 + (a - o) * 0.9 + smoothstep(0.4, 0.55, a) * 0.18);
   const softness = 1 - hardness;
-  // soft: 高 organic → coral（膜）、中 soft → diabolo（曲線の芯）
-  const coralGate = smoothstep(0.38, 0.62, o);
-  const coralWeight = softness * coralGate;
-  const diaboloWeight = softness * (1 - coralGate * 0.65);
-  // hard: 攻撃の尖り → spindle、塊 → monolith
-  const tipGate = smoothstep(0.4, 0.7, a) * (0.45 + smoothstep(0.3, 0.5, r) * 0.55);
+  // soft: 高 organic → coral（ゲートを少し厳しくして偏りを抑える）
+  const coralGate = smoothstep(0.38, 0.64, o);
+  const coralWeight = softness * coralGate * (0.85 + o * 0.35);
+  const diaboloWeight = softness * (1 - coralGate * 0.75) * (0.72 + (1 - a) * 0.16);
+  // hard: tip → spindle、塊 → monolith
+  const tipGate = smoothstep(0.35, 0.65, a) * (0.4 + smoothstep(0.28, 0.55, r) * 0.6);
   const spindleWeight = hardness * tipGate;
-  const monolithWeight = hardness * (1 - tipGate * 0.75);
-  // pulse / ループ感 → torus（硬柔どちらからも拾う）
-  const torusWeight = r * (0.6 + hardness * 0.25 + softness * 0.2);
+  const monolithWeight = hardness * (1 - tipGate * 0.7) * (0.95 + smoothstep(0.4, 0.55, a) * 0.25);
+  // 柔らかい高 rhythmic では torus を残し、硬い種では抑える
+  const torusWeight =
+    (r * (0.62 + hardness * 0.15 + softness * 0.28) + smoothstep(0.52, 0.82, r) * 0.28) *
+    (1 - hardness * 0.5);
 
   return {
-    diabolo: fibUnit(3, 21) + diaboloWeight * fibUnit(13, 21) + r * fibUnit(3, 34),
-    coral: fibUnit(1, 34) + coralWeight * fibUnit(13, 21) + o * fibUnit(5, 21),
-    monolith: fibUnit(2, 21) + monolithWeight * fibUnit(13, 21) + (1 - o) * fibUnit(3, 21),
-    spindle: fibUnit(1, 34) + spindleWeight * fibUnit(13, 21) + a * fibUnit(5, 21),
-    torus: fibUnit(2, 21) + torusWeight * fibUnit(13, 21),
+    diabolo: fibUnit(2, 21) + diaboloWeight * fibUnit(13, 21) + r * fibUnit(2, 34),
+    coral: fibUnit(1, 34) + coralWeight * fibRatio(8, 5) + o * fibUnit(8, 21),
+    monolith: fibUnit(1, 21) + monolithWeight * fibRatio(8, 5) + (1 - o) * fibUnit(5, 21),
+    spindle: fibUnit(1, 34) + spindleWeight * fibRatio(8, 5) + a * fibUnit(8, 21),
+    torus: fibUnit(1, 21) + torusWeight * fibRatio(8, 5) + r * fibUnit(5, 21),
   };
 };

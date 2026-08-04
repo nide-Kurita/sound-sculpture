@@ -99,3 +99,5 @@ npm run preview
 ## Notes
 
 音入力はリアルタイム解析のため、同じ曲でも入力環境や音量によって結果が変わる可能性があります。
+
+開発の前提ルールは [`.cursor/rules/project-principles.mdc`](.cursor/rules/project-principles.mdc)、作業リストは [`docs/WORKLIST.md`](docs/WORKLIST.md) を参照。

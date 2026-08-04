@@ -226,7 +226,7 @@ export const buildDeterministicTimeline = (
     const sub = bandAverage(mags, sampleRate, 30, 120);
     const low = bandAverage(mags, sampleRate, 120, 400);
     const mid = bandAverage(mags, sampleRate, 400, 2000);
-    const melody = bandAverage(mags, sampleRate, 700, 1500);
+    const melody = bandAverage(mags, sampleRate, 500, 1800);
     const presence = bandHybrid(mags, sampleRate, 1800, 6500);
     const air = bandHybrid(mags, sampleRate, 5000, 18000);
     const high = presence * 0.38 + air * 0.62;
@@ -234,7 +234,8 @@ export const buildDeterministicTimeline = (
     const spectralTotal = sub + low + mid + high + melody * 0.35 + 0.0001;
     const centroid = bandCentroid(mags, sampleRate, 24, 9000);
     const bassFocus = (sub + low) / spectralTotal;
-    const melodyFocus = melody / spectralTotal;
+    const melodyFocus =
+      melody / (sub * 0.55 + low * 0.7 + mid * 0.85 + high + melody * 0.4 + 0.0001);
     const brightness = high / spectralTotal;
     const contrast =
       (Math.abs(sub - mid) +

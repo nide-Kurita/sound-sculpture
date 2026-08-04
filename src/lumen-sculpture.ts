@@ -29,12 +29,16 @@ const defaultRhythm = (): RhythmEvents => ({
   snare: 0,
   hat: 0,
   transient: 0,
+  chop: 0,
+  salience: 0,
   beat: 0,
   beatIndex: 0,
   kickIndex: 0,
   snareIndex: 0,
   hatIndex: 0,
   transientIndex: 0,
+  chopIndex: 0,
+  salienceIndex: 0,
   downbeat: false,
   bpm: 0,
   pulsePhase: 0,
@@ -47,6 +51,7 @@ const defaultRhythm = (): RhythmEvents => ({
   kickRing: 0,
   snareRing: 0,
   hatRing: 0,
+  melodyOnset: 0,
   subLevel: 0,
   wavePeak: 0,
   waveEnergy: 0,
@@ -408,10 +413,18 @@ export class LumenSculpture implements SculptureExperience {
     this.emitSprayBurst(localPoint, 0.7, 50);
   }
   nudgeClayColorOnClick() {}
+  applyWeatherClayTint(
+    _snapshot: import("./live-weather").LiveWeatherSnapshot | null,
+    _hour = 12,
+  ) {}
   applyAlgoMorphBias() {}
   holdShapeForCompletion() {
     this.heldForm = this.forming;
   }
+  evolveSongColors(
+    _profile: import("./audio-palette").AudioProfileSummary | null,
+    _deltaTime: number,
+  ) {}
   prepareCompletion(_palette: SculpturePalette, _species?: SpeciesProfile) {
     this.heldForm = this.forming;
   }

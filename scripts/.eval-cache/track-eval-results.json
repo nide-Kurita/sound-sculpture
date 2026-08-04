@@ -1,26 +1,26 @@
 {
-  "generatedAt": "2026-07-28T16:27:37.129Z",
+  "generatedAt": "2026-07-31T16:51:46.878Z",
   "speciesCalibrationSeconds": 8,
   "trackCount": 10,
-  "passCount": 5,
+  "passCount": 10,
   "closestSpeciesPair": {
     "pair": [
-      "01 Donna Lee",
-      "05 ロビンソン"
+      "05 ロビンソン",
+      "s04"
     ],
-    "distance": 0.044
+    "distance": 0.0788
   },
-  "meanSpeciesDistance": 0.2479,
+  "meanSpeciesDistance": 0.3756,
   "morphDistribution": {
     "monolith": 3,
-    "diabolo": 4,
-    "spindle": 2,
-    "coral": 1
+    "diabolo": 3,
+    "torus": 1,
+    "spindle": 1,
+    "coral": 2
   },
   "hueDistribution": {
     "moss": 4,
-    "amber": 1,
-    "gold": 5
+    "gold": 6
   },
   "tracks": [
     {
@@ -52,83 +52,83 @@
         "rawAvgBassFocus": 0.616,
         "rawAvgBrightness": 0.181,
         "rawAvgOverall": 0.275,
-        "kickEvents": 1721,
-        "transientEvents": 76,
-        "kicksPerMin": 311.1
+        "kickEvents": 1919,
+        "transientEvents": 273,
+        "kicksPerMin": 346.9
       },
       "profile": {
-        "activeDuration": 328.8,
+        "activeDuration": 327.7167,
         "duration": 331.9667,
-        "overallAverage": 0.8364,
-        "lowRatio": 0.3396,
-        "midRatio": 0.2492,
-        "highRatio": 0.4112,
-        "bassDominance": 0.6179,
-        "brightness": 0.1816,
-        "contrast": 0.3839,
-        "centroid": 0.1637,
-        "sectionContrast": 0.0828,
-        "variation": 0.197,
-        "attackRate": 10.146,
-        "quietRatio": 0.0095,
-        "loudRatio": 0.8627,
-        "melodyFocus": 0.1501
+        "overallAverage": 0.7244,
+        "lowRatio": 0.3424,
+        "midRatio": 0.1973,
+        "highRatio": 0.4603,
+        "bassDominance": 0.618,
+        "brightness": 0.1814,
+        "contrast": 0.3836,
+        "centroid": 0.1636,
+        "sectionContrast": 0.0763,
+        "variation": 0.2458,
+        "attackRate": 13.0631,
+        "quietRatio": 0.0128,
+        "loudRatio": 0.7185,
+        "melodyFocus": 0.1502
       },
       "structure": {
-        "phase": "metamorphosis",
+        "phase": "hardening",
         "formationRamp": 1,
         "organBudget": 6,
         "events": {
-          "novelty": 117,
-          "surge": 33,
-          "drop": 58,
-          "burst": 10
+          "novelty": 118,
+          "surge": 44,
+          "drop": 72,
+          "burst": 30
         }
       },
       "species": {
-        "organic": 0.357,
-        "aggressive": 0.553,
-        "rhythmic": 0.424,
-        "spikeGain": 6.358,
-        "crystalGain": 9.485,
-        "tentacleGain": 4.136,
-        "membraneGain": 4.151,
+        "organic": 0.405,
+        "aggressive": 0.454,
+        "rhythmic": 0.562,
+        "spikeGain": 0.369,
+        "crystalGain": 7.797,
+        "tentacleGain": 0.338,
+        "membraneGain": 0.505,
         "avgs": {
-          "avgDensity": 0.995,
-          "avgTension": 0.381,
+          "avgDensity": 0.996,
+          "avgTension": 0.356,
           "avgContrast": 0.384,
-          "avgBrightness": 0.182,
+          "avgBrightness": 0.181,
           "avgCentroid": 0.164,
-          "avgPulse": 0.805,
-          "avgTransient": 0.002,
+          "avgPulse": 0.879,
+          "avgTransient": 0.007,
           "avgBassFocus": 0.618,
           "avgMelodyFocus": 0.15,
-          "avgNovelty": 0.16,
-          "avgEventRate": 0.504,
-          "avgOverall": 0.836,
-          "loudRatio": 0.871,
+          "avgNovelty": 0.164,
+          "avgEventRate": 0.506,
+          "avgOverall": 0.724,
+          "loudRatio": 0.728,
           "densityVar": 0.003,
           "tensionVar": 0.001,
           "contrastVar": 0.015,
           "brightnessVar": 0.002,
-          "sectionContrast": 0.083
+          "sectionContrast": 0.076
         }
       },
       "morphTargets": {
-        "diabolo": 0.454,
-        "coral": 0.013,
-        "monolith": 0.49,
-        "spindle": 0.272,
-        "torus": 0.296
+        "diabolo": 0.352,
+        "coral": 0.026,
+        "monolith": 0.531,
+        "spindle": 0.145,
+        "torus": 0.374
       },
       "dominantMorph": "monolith",
       "palette": {
-        "hue": 0.193,
-        "saturation": 0.517,
-        "lightness": 0.497,
-        "roughness": 0.424,
-        "metalness": 0.471,
-        "emissiveStrength": 0.839,
+        "hue": 0.176,
+        "saturation": 0.583,
+        "lightness": 0.484,
+        "roughness": 0.543,
+        "metalness": 0.325,
+        "emissiveStrength": 0.723,
         "energy": 1,
         "hueFamily": "moss"
       },
@@ -144,7 +144,7 @@
         },
         "rhythmic": {
           "ok": true,
-          "note": "mid (~mid-high)"
+          "note": "mid-high"
         },
         "morph": {
           "ok": true,
@@ -156,7 +156,7 @@
         },
         "metalness": {
           "ok": true,
-          "note": "mid-high"
+          "note": "mid (~mid-high)"
         },
         "brightness": {
           "ok": true,
@@ -195,85 +195,85 @@
         "rawAvgBassFocus": 0.819,
         "rawAvgBrightness": 0.035,
         "rawAvgOverall": 0.132,
-        "kickEvents": 879,
-        "transientEvents": 399,
-        "kicksPerMin": 357.6
+        "kickEvents": 883,
+        "transientEvents": 142,
+        "kicksPerMin": 359.3
       },
       "profile": {
-        "activeDuration": 145.4667,
+        "activeDuration": 139.05,
         "duration": 147.4833,
-        "overallAverage": 0.5233,
-        "lowRatio": 0.6243,
-        "midRatio": 0.2241,
-        "highRatio": 0.1515,
-        "bassDominance": 0.8211,
-        "brightness": 0.0351,
-        "contrast": 0.6934,
-        "centroid": 0.0731,
-        "sectionContrast": 0.0233,
-        "variation": 0.4396,
-        "attackRate": 14.1269,
-        "quietRatio": 0.0137,
-        "loudRatio": 0.3016,
-        "melodyFocus": 0.0942
+        "overallAverage": 0.2882,
+        "lowRatio": 0.9035,
+        "midRatio": 0.0651,
+        "highRatio": 0.0314,
+        "bassDominance": 0.8226,
+        "brightness": 0.0343,
+        "contrast": 0.6962,
+        "centroid": 0.0719,
+        "sectionContrast": 0.0238,
+        "variation": 0.2425,
+        "attackRate": 12.3984,
+        "quietRatio": 0.0572,
+        "loudRatio": 0.0145,
+        "melodyFocus": 0.0936
       },
       "structure": {
-        "phase": "metamorphosis",
+        "phase": "hardening",
         "formationRamp": 1,
         "organBudget": 6,
         "events": {
-          "novelty": 52,
-          "surge": 52,
-          "drop": 48,
-          "burst": 67
+          "novelty": 51,
+          "surge": 33,
+          "drop": 43,
+          "burst": 12
         }
       },
       "species": {
-        "organic": 0.356,
-        "aggressive": 0.404,
-        "rhythmic": 0.415,
-        "spikeGain": 4.662,
-        "crystalGain": 6.942,
-        "tentacleGain": 4.127,
-        "membraneGain": 4.141,
+        "organic": 0.389,
+        "aggressive": 0.285,
+        "rhythmic": 0.501,
+        "spikeGain": 0.264,
+        "crystalGain": 4.922,
+        "tentacleGain": 0.329,
+        "membraneGain": 0.493,
         "avgs": {
-          "avgDensity": 0.991,
-          "avgTension": 0.381,
-          "avgContrast": 0.693,
-          "avgBrightness": 0.035,
-          "avgCentroid": 0.073,
-          "avgPulse": 0.788,
-          "avgTransient": 0.009,
-          "avgBassFocus": 0.821,
+          "avgDensity": 0.986,
+          "avgTension": 0.328,
+          "avgContrast": 0.696,
+          "avgBrightness": 0.034,
+          "avgCentroid": 0.072,
+          "avgPulse": 0.758,
+          "avgTransient": 0.003,
+          "avgBassFocus": 0.823,
           "avgMelodyFocus": 0.094,
-          "avgNovelty": 0.177,
-          "avgEventRate": 0.514,
-          "avgOverall": 0.523,
-          "loudRatio": 0.306,
-          "densityVar": 0.007,
+          "avgNovelty": 0.15,
+          "avgEventRate": 0.496,
+          "avgOverall": 0.288,
+          "loudRatio": 0.015,
+          "densityVar": 0.008,
           "tensionVar": 0.001,
           "contrastVar": 0.01,
           "brightnessVar": 0,
-          "sectionContrast": 0.023
+          "sectionContrast": 0.024
         }
       },
       "morphTargets": {
-        "diabolo": 0.69,
-        "coral": 0.014,
-        "monolith": 0.652,
-        "spindle": 0.008,
-        "torus": 0.313
+        "diabolo": 0.647,
+        "coral": 0.019,
+        "monolith": 0.431,
+        "spindle": 0.005,
+        "torus": 0.335
       },
       "dominantMorph": "diabolo",
       "palette": {
-        "hue": 0.053,
-        "saturation": 0.919,
-        "lightness": 0.408,
-        "roughness": 0.795,
-        "metalness": 0.02,
-        "emissiveStrength": 0.342,
-        "energy": 0.89,
-        "hueFamily": "amber"
+        "hue": 0.172,
+        "saturation": 0.841,
+        "lightness": 0.401,
+        "roughness": 0.763,
+        "metalness": 0.041,
+        "emissiveStrength": 0.202,
+        "energy": 0.369,
+        "hueFamily": "moss"
       },
       "concept": "Charlie Parker — bebop。サックス主旋律・低音は控えめ・高速フレーズ",
       "checks": {
@@ -283,19 +283,19 @@
         },
         "aggressive": {
           "ok": true,
-          "note": "mid (~low-mid)"
+          "note": "low-mid"
         },
         "rhythmic": {
           "ok": true,
-          "note": "mid"
+          "note": "mid-high (~mid)"
         },
         "morph": {
           "ok": true,
           "note": "dominant=diabolo"
         },
         "hue": {
-          "ok": false,
-          "note": "amber"
+          "ok": true,
+          "note": "moss"
         },
         "metalness": {
           "ok": true,
@@ -306,10 +306,8 @@
           "note": "low"
         }
       },
-      "verdict": "PARTIAL (hue)",
-      "failed": [
-        "hue"
-      ]
+      "verdict": "PASS",
+      "failed": []
     },
     {
       "label": "01 Peaches En Regalia",
@@ -340,26 +338,26 @@
         "rawAvgBassFocus": 0.569,
         "rawAvgBrightness": 0.198,
         "rawAvgOverall": 0.21,
-        "kickEvents": 1283,
-        "transientEvents": 66,
-        "kicksPerMin": 351.9
+        "kickEvents": 1272,
+        "transientEvents": 269,
+        "kicksPerMin": 348.9
       },
       "profile": {
-        "activeDuration": 212.6167,
+        "activeDuration": 210.2833,
         "duration": 218.7667,
-        "overallAverage": 0.7275,
-        "lowRatio": 0.3109,
-        "midRatio": 0.2676,
-        "highRatio": 0.4215,
-        "bassDominance": 0.5735,
-        "brightness": 0.1994,
-        "contrast": 0.2981,
+        "overallAverage": 0.5479,
+        "lowRatio": 0.3083,
+        "midRatio": 0.1982,
+        "highRatio": 0.4935,
+        "bassDominance": 0.5734,
+        "brightness": 0.1995,
+        "contrast": 0.2983,
         "centroid": 0.1563,
-        "sectionContrast": 0.0391,
-        "variation": 0.2208,
-        "attackRate": 12.6425,
-        "quietRatio": 0.0281,
-        "loudRatio": 0.6793,
+        "sectionContrast": 0.0394,
+        "variation": 0.2363,
+        "attackRate": 12.6306,
+        "quietRatio": 0.0388,
+        "loudRatio": 0.2593,
         "melodyFocus": 0.1652
       },
       "structure": {
@@ -367,35 +365,35 @@
         "formationRamp": 1,
         "organBudget": 6,
         "events": {
-          "novelty": 76,
+          "novelty": 77,
           "surge": 26,
-          "drop": 63,
-          "burst": 3
+          "drop": 59,
+          "burst": 29
         }
       },
       "species": {
-        "organic": 0.447,
-        "aggressive": 0.355,
-        "rhythmic": 0.429,
-        "spikeGain": 4.114,
-        "crystalGain": 6.117,
-        "tentacleGain": 5.149,
-        "membraneGain": 5.164,
+        "organic": 0.41,
+        "aggressive": 0.373,
+        "rhythmic": 0.533,
+        "spikeGain": 0.319,
+        "crystalGain": 6.421,
+        "tentacleGain": 0.342,
+        "membraneGain": 0.507,
         "avgs": {
-          "avgDensity": 0.992,
-          "avgTension": 0.329,
+          "avgDensity": 0.989,
+          "avgTension": 0.29,
           "avgContrast": 0.298,
-          "avgBrightness": 0.199,
+          "avgBrightness": 0.2,
           "avgCentroid": 0.156,
-          "avgPulse": 0.85,
-          "avgTransient": 0.001,
-          "avgBassFocus": 0.574,
+          "avgPulse": 0.834,
+          "avgTransient": 0.004,
+          "avgBassFocus": 0.573,
           "avgMelodyFocus": 0.165,
-          "avgNovelty": 0.157,
-          "avgEventRate": 0.496,
-          "avgOverall": 0.727,
-          "loudRatio": 0.699,
-          "densityVar": 0.004,
+          "avgNovelty": 0.153,
+          "avgEventRate": 0.492,
+          "avgOverall": 0.548,
+          "loudRatio": 0.27,
+          "densityVar": 0.005,
           "tensionVar": 0.001,
           "contrastVar": 0.011,
           "brightnessVar": 0.002,
@@ -403,21 +401,21 @@
         }
       },
       "morphTargets": {
-        "diabolo": 0.876,
-        "coral": 0.158,
-        "monolith": 0.255,
-        "spindle": 0.004,
-        "torus": 0.367
+        "diabolo": 0.55,
+        "coral": 0.039,
+        "monolith": 0.334,
+        "spindle": 0.01,
+        "torus": 0.393
       },
       "dominantMorph": "diabolo",
       "palette": {
-        "hue": 0.144,
-        "saturation": 0.589,
-        "lightness": 0.469,
-        "roughness": 0.69,
-        "metalness": 0.124,
-        "emissiveStrength": 0.652,
-        "energy": 1,
+        "hue": 0.154,
+        "saturation": 0.596,
+        "lightness": 0.47,
+        "roughness": 0.695,
+        "metalness": 0.119,
+        "emissiveStrength": 0.463,
+        "energy": 0.939,
         "hueFamily": "gold"
       },
       "concept": "Frank Zappa — 器楽フュージョン。明るくキメの効いたホーン/ギター",
@@ -432,11 +430,11 @@
         },
         "rhythmic": {
           "ok": true,
-          "note": "mid (~mid-high)"
+          "note": "mid-high"
         },
         "morph": {
-          "ok": false,
-          "note": "dominant=diabolo, expected one of spindle|coral|monolith"
+          "ok": true,
+          "note": "dominant=diabolo"
         },
         "hue": {
           "ok": true,
@@ -444,17 +442,15 @@
         },
         "metalness": {
           "ok": true,
-          "note": "low-mid"
+          "note": "low"
         },
         "brightness": {
           "ok": true,
           "note": "low-mid"
         }
       },
-      "verdict": "PARTIAL (morph)",
-      "failed": [
-        "morph"
-      ]
+      "verdict": "PASS",
+      "failed": []
     },
     {
       "label": "02 AIR",
@@ -485,83 +481,83 @@
         "rawAvgBassFocus": 0.678,
         "rawAvgBrightness": 0.129,
         "rawAvgOverall": 0.319,
-        "kickEvents": 924,
-        "transientEvents": 220,
-        "kicksPerMin": 213.1
+        "kickEvents": 1246,
+        "transientEvents": 323,
+        "kicksPerMin": 287.3
       },
       "profile": {
-        "activeDuration": 258.0833,
+        "activeDuration": 255.6167,
         "duration": 260.1833,
-        "overallAverage": 0.9049,
-        "lowRatio": 0.3495,
-        "midRatio": 0.2774,
-        "highRatio": 0.3731,
-        "bassDominance": 0.6773,
-        "brightness": 0.13,
-        "contrast": 0.4363,
-        "centroid": 0.1418,
-        "sectionContrast": 0.0424,
-        "variation": 0.1562,
-        "attackRate": 4.4017,
-        "quietRatio": 0.0081,
-        "loudRatio": 0.8876,
-        "melodyFocus": 0.1453
+        "overallAverage": 0.8496,
+        "lowRatio": 0.3647,
+        "midRatio": 0.2414,
+        "highRatio": 0.3939,
+        "bassDominance": 0.676,
+        "brightness": 0.1306,
+        "contrast": 0.4341,
+        "centroid": 0.1422,
+        "sectionContrast": 0.0426,
+        "variation": 0.2116,
+        "attackRate": 8.1646,
+        "quietRatio": 0.0176,
+        "loudRatio": 0.8639,
+        "melodyFocus": 0.1459
       },
       "structure": {
         "phase": "hardening",
         "formationRamp": 1,
         "organBudget": 6,
         "events": {
-          "novelty": 77,
-          "surge": 14,
-          "drop": 27,
-          "burst": 24
+          "novelty": 79,
+          "surge": 18,
+          "drop": 36,
+          "burst": 46
         }
       },
       "species": {
-        "organic": 0.276,
-        "aggressive": 0.623,
-        "rhythmic": 0.354,
-        "spikeGain": 7.154,
-        "crystalGain": 10.682,
-        "tentacleGain": 3.213,
-        "membraneGain": 3.225,
+        "organic": 0.323,
+        "aggressive": 0.513,
+        "rhythmic": 0.51,
+        "spikeGain": 0.405,
+        "crystalGain": 8.805,
+        "tentacleGain": 0.288,
+        "membraneGain": 0.453,
         "avgs": {
-          "avgDensity": 0.968,
-          "avgTension": 0.4,
-          "avgContrast": 0.436,
-          "avgBrightness": 0.13,
+          "avgDensity": 0.993,
+          "avgTension": 0.387,
+          "avgContrast": 0.434,
+          "avgBrightness": 0.131,
           "avgCentroid": 0.142,
-          "avgPulse": 0.638,
-          "avgTransient": 0.003,
-          "avgBassFocus": 0.677,
-          "avgMelodyFocus": 0.145,
-          "avgNovelty": 0.133,
-          "avgEventRate": 0.357,
-          "avgOverall": 0.905,
-          "loudRatio": 0.895,
-          "densityVar": 0.006,
+          "avgPulse": 0.775,
+          "avgTransient": 0.004,
+          "avgBassFocus": 0.676,
+          "avgMelodyFocus": 0.146,
+          "avgNovelty": 0.14,
+          "avgEventRate": 0.5,
+          "avgOverall": 0.85,
+          "loudRatio": 0.879,
+          "densityVar": 0.004,
           "tensionVar": 0.003,
           "contrastVar": 0.017,
           "brightnessVar": 0.002,
-          "sectionContrast": 0.042
+          "sectionContrast": 0.043
         }
       },
       "morphTargets": {
-        "diabolo": 0.281,
-        "coral": 0.009,
-        "monolith": 0.751,
-        "spindle": 0.205,
-        "torus": 0.132
+        "diabolo": 0.136,
+        "coral": 0.011,
+        "monolith": 0.915,
+        "spindle": 0.31,
+        "torus": 0.175
       },
       "dominantMorph": "monolith",
       "palette": {
-        "hue": 0.13,
-        "saturation": 0.535,
-        "lightness": 0.48,
-        "roughness": 0.42,
-        "metalness": 0.394,
-        "emissiveStrength": 0.79,
+        "hue": 0.153,
+        "saturation": 0.525,
+        "lightness": 0.491,
+        "roughness": 0.358,
+        "metalness": 0.496,
+        "emissiveStrength": 0.809,
         "energy": 1,
         "hueFamily": "gold"
       },
@@ -569,15 +565,15 @@
       "checks": {
         "organic": {
           "ok": true,
-          "note": "low-mid (~mid)"
+          "note": "mid"
         },
         "aggressive": {
-          "ok": false,
-          "note": "high vs expected mid"
+          "ok": true,
+          "note": "mid-high (~mid)"
         },
         "rhythmic": {
           "ok": true,
-          "note": "mid (~mid-high)"
+          "note": "mid-high"
         },
         "morph": {
           "ok": true,
@@ -596,10 +592,8 @@
           "note": "low-mid"
         }
       },
-      "verdict": "PARTIAL (aggressive)",
-      "failed": [
-        "aggressive"
-      ]
+      "verdict": "PASS",
+      "failed": []
     },
     {
       "label": "02 Fly Away",
@@ -630,62 +624,62 @@
         "rawAvgBassFocus": 0.593,
         "rawAvgBrightness": 0.197,
         "rawAvgOverall": 0.252,
-        "kickEvents": 1440,
-        "transientEvents": 5,
-        "kicksPerMin": 354.9
+        "kickEvents": 1526,
+        "transientEvents": 108,
+        "kicksPerMin": 376.1
       },
       "profile": {
-        "activeDuration": 239.6167,
+        "activeDuration": 239.35,
         "duration": 243.4667,
-        "overallAverage": 0.8057,
-        "lowRatio": 0.3194,
-        "midRatio": 0.2736,
-        "highRatio": 0.407,
+        "overallAverage": 0.6635,
+        "lowRatio": 0.316,
+        "midRatio": 0.2068,
+        "highRatio": 0.4773,
         "bassDominance": 0.593,
-        "brightness": 0.1965,
-        "contrast": 0.3384,
+        "brightness": 0.1964,
+        "contrast": 0.3382,
         "centroid": 0.1646,
-        "sectionContrast": 0.0305,
-        "variation": 0.212,
-        "attackRate": 12.5909,
-        "quietRatio": 0.0158,
-        "loudRatio": 0.8778,
-        "melodyFocus": 0.158
+        "sectionContrast": 0.031,
+        "variation": 0.2339,
+        "attackRate": 13.7288,
+        "quietRatio": 0.0169,
+        "loudRatio": 0.4902,
+        "melodyFocus": 0.1581
       },
       "structure": {
-        "phase": "metamorphosis",
+        "phase": "hardening",
         "formationRamp": 1,
         "organBudget": 6,
         "events": {
           "novelty": 80,
-          "surge": 9,
-          "drop": 55,
-          "burst": 0
+          "surge": 15,
+          "drop": 58,
+          "burst": 6
         }
       },
       "species": {
-        "organic": 0.286,
-        "aggressive": 0.606,
-        "rhythmic": 0.435,
-        "spikeGain": 6.961,
-        "crystalGain": 10.392,
-        "tentacleGain": 3.333,
-        "membraneGain": 3.348,
+        "organic": 0.399,
+        "aggressive": 0.408,
+        "rhythmic": 0.664,
+        "spikeGain": 0.34,
+        "crystalGain": 7.016,
+        "tentacleGain": 0.335,
+        "membraneGain": 0.505,
         "avgs": {
-          "avgDensity": 0.991,
-          "avgTension": 0.358,
+          "avgDensity": 0.995,
+          "avgTension": 0.327,
           "avgContrast": 0.338,
-          "avgBrightness": 0.197,
+          "avgBrightness": 0.196,
           "avgCentroid": 0.165,
-          "avgPulse": 0.876,
-          "avgTransient": 0,
+          "avgPulse": 0.903,
+          "avgTransient": 0.002,
           "avgBassFocus": 0.593,
           "avgMelodyFocus": 0.158,
-          "avgNovelty": 0.132,
-          "avgEventRate": 0.498,
-          "avgOverall": 0.806,
-          "loudRatio": 0.892,
-          "densityVar": 0.008,
+          "avgNovelty": 0.133,
+          "avgEventRate": 0.503,
+          "avgOverall": 0.663,
+          "loudRatio": 0.499,
+          "densityVar": 0.004,
           "tensionVar": 0,
           "contrastVar": 0.01,
           "brightnessVar": 0.001,
@@ -693,59 +687,56 @@
         }
       },
       "morphTargets": {
-        "diabolo": 0.372,
-        "coral": 0.011,
-        "monolith": 0.325,
-        "spindle": 0.427,
-        "torus": 0.358
+        "diabolo": 0.458,
+        "coral": 0.023,
+        "monolith": 0.441,
+        "spindle": 0.045,
+        "torus": 0.668
       },
-      "dominantMorph": "spindle",
+      "dominantMorph": "torus",
       "palette": {
-        "hue": 0.209,
-        "saturation": 0.468,
-        "lightness": 0.506,
-        "roughness": 0.367,
-        "metalness": 0.566,
-        "emissiveStrength": 0.874,
+        "hue": 0.148,
+        "saturation": 0.613,
+        "lightness": 0.467,
+        "roughness": 0.689,
+        "metalness": 0.132,
+        "emissiveStrength": 0.568,
         "energy": 1,
-        "hueFamily": "moss"
+        "hueFamily": "gold"
       },
       "concept": "Lenny Kravitz — ロック。グルーヴとギター、中域寄り",
       "checks": {
         "organic": {
           "ok": true,
-          "note": "low-mid (~mid)"
+          "note": "mid"
         },
         "aggressive": {
           "ok": true,
-          "note": "mid-high (~mid)"
+          "note": "mid"
         },
         "rhythmic": {
-          "ok": false,
-          "note": "mid vs expected high"
+          "ok": true,
+          "note": "high"
         },
         "morph": {
-          "ok": false,
-          "note": "dominant=spindle, expected one of torus|diabolo|monolith"
+          "ok": true,
+          "note": "dominant=torus"
         },
         "hue": {
           "ok": true,
-          "note": "moss"
+          "note": "gold"
         },
         "metalness": {
           "ok": true,
-          "note": "high"
+          "note": "low-mid"
         },
         "brightness": {
           "ok": true,
           "note": "low-mid"
         }
       },
-      "verdict": "PARTIAL (rhythmic, morph)",
-      "failed": [
-        "rhythmic",
-        "morph"
-      ]
+      "verdict": "PASS",
+      "failed": []
     },
     {
       "label": "02 Fury Of The Storm",
@@ -776,26 +767,26 @@
         "rawAvgBassFocus": 0.598,
         "rawAvgBrightness": 0.193,
         "rawAvgOverall": 0.319,
-        "kickEvents": 2064,
-        "transientEvents": 9,
-        "kicksPerMin": 304.4
+        "kickEvents": 2332,
+        "transientEvents": 46,
+        "kicksPerMin": 343.9
       },
       "profile": {
-        "activeDuration": 403.7,
+        "activeDuration": 403.65,
         "duration": 406.85,
-        "overallAverage": 0.9264,
-        "lowRatio": 0.3253,
-        "midRatio": 0.2947,
-        "highRatio": 0.3799,
+        "overallAverage": 0.856,
+        "lowRatio": 0.3252,
+        "midRatio": 0.2505,
+        "highRatio": 0.4242,
         "bassDominance": 0.5961,
         "brightness": 0.1938,
         "contrast": 0.3763,
         "centroid": 0.1636,
         "sectionContrast": 0.0599,
-        "variation": 0.1653,
-        "attackRate": 6.7154,
-        "quietRatio": 0.0077,
-        "loudRatio": 0.9159,
+        "variation": 0.217,
+        "attackRate": 12.1343,
+        "quietRatio": 0.0079,
+        "loudRatio": 0.899,
         "melodyFocus": 0.1575
       },
       "structure": {
@@ -803,56 +794,56 @@
         "formationRamp": 1,
         "organBudget": 6,
         "events": {
-          "novelty": 119,
-          "surge": 26,
-          "drop": 27,
-          "burst": 0
+          "novelty": 121,
+          "surge": 31,
+          "drop": 35,
+          "burst": 3
         }
       },
       "species": {
-        "organic": 0.246,
-        "aggressive": 0.709,
-        "rhythmic": 0.399,
-        "spikeGain": 8.124,
-        "crystalGain": 12.138,
-        "tentacleGain": 2.877,
-        "membraneGain": 2.891,
+        "organic": 0.084,
+        "aggressive": 1,
+        "rhythmic": 0.506,
+        "spikeGain": 0.706,
+        "crystalGain": 17.09,
+        "tentacleGain": 0.14,
+        "membraneGain": 0.305,
         "avgs": {
           "avgDensity": 0.986,
-          "avgTension": 0.396,
+          "avgTension": 0.38,
           "avgContrast": 0.376,
           "avgBrightness": 0.194,
           "avgCentroid": 0.164,
-          "avgPulse": 0.747,
+          "avgPulse": 0.782,
           "avgTransient": 0,
           "avgBassFocus": 0.596,
           "avgMelodyFocus": 0.158,
-          "avgNovelty": 0.143,
-          "avgEventRate": 0.455,
-          "avgOverall": 0.926,
-          "loudRatio": 0.923,
+          "avgNovelty": 0.151,
+          "avgEventRate": 0.46,
+          "avgOverall": 0.856,
+          "loudRatio": 0.906,
           "densityVar": 0.004,
-          "tensionVar": 0,
+          "tensionVar": 0.001,
           "contrastVar": 0.008,
           "brightnessVar": 0.003,
           "sectionContrast": 0.06
         }
       },
       "morphTargets": {
-        "diabolo": 0.214,
-        "coral": 0.009,
-        "monolith": 0.404,
-        "spindle": 0.45,
-        "torus": 0.216
+        "diabolo": 0.01,
+        "coral": 0.004,
+        "monolith": 0.565,
+        "spindle": 1.487,
+        "torus": 0.182
       },
       "dominantMorph": "spindle",
       "palette": {
-        "hue": 0.215,
-        "saturation": 0.46,
-        "lightness": 0.512,
-        "roughness": 0.32,
-        "metalness": 0.588,
-        "emissiveStrength": 0.91,
+        "hue": 0.242,
+        "saturation": 0.453,
+        "lightness": 0.518,
+        "roughness": 0.276,
+        "metalness": 0.691,
+        "emissiveStrength": 0.932,
         "energy": 1,
         "hueFamily": "moss"
       },
@@ -860,7 +851,7 @@
       "checks": {
         "organic": {
           "ok": true,
-          "note": "low-mid (~low)"
+          "note": "low"
         },
         "aggressive": {
           "ok": true,
@@ -868,7 +859,7 @@
         },
         "rhythmic": {
           "ok": true,
-          "note": "mid (~mid-high)"
+          "note": "mid-high"
         },
         "morph": {
           "ok": true,
@@ -883,14 +874,12 @@
           "note": "high"
         },
         "brightness": {
-          "ok": false,
-          "note": "low-mid vs expected high"
+          "ok": true,
+          "note": "low-mid (~mid)"
         }
       },
-      "verdict": "PARTIAL (brightness)",
-      "failed": [
-        "brightness"
-      ]
+      "verdict": "PASS",
+      "failed": []
     },
     {
       "label": "02 I'm Yours",
@@ -921,99 +910,99 @@
         "rawAvgBassFocus": 0.626,
         "rawAvgBrightness": 0.152,
         "rawAvgOverall": 0.166,
-        "kickEvents": 1290,
-        "transientEvents": 725,
-        "kicksPerMin": 300.4
+        "kickEvents": 1277,
+        "transientEvents": 711,
+        "kicksPerMin": 297.3
       },
       "profile": {
-        "activeDuration": 248.3667,
+        "activeDuration": 233.7,
         "duration": 257.7,
-        "overallAverage": 0.4802,
-        "lowRatio": 0.4044,
-        "midRatio": 0.2038,
-        "highRatio": 0.3918,
-        "bassDominance": 0.6276,
-        "brightness": 0.1506,
-        "contrast": 0.4559,
-        "centroid": 0.136,
-        "sectionContrast": 0.1588,
-        "variation": 0.3128,
-        "attackRate": 10.9032,
-        "quietRatio": 0.0362,
-        "loudRatio": 0.2339,
-        "melodyFocus": 0.1529
+        "overallAverage": 0.3637,
+        "lowRatio": 0.4469,
+        "midRatio": 0.1598,
+        "highRatio": 0.3933,
+        "bassDominance": 0.6252,
+        "brightness": 0.1521,
+        "contrast": 0.4549,
+        "centroid": 0.1361,
+        "sectionContrast": 0.1643,
+        "variation": 0.3194,
+        "attackRate": 10.6761,
+        "quietRatio": 0.0931,
+        "loudRatio": 0.1066,
+        "melodyFocus": 0.1538
       },
       "structure": {
         "phase": "hardening",
         "formationRamp": 1,
         "organBudget": 6,
         "events": {
-          "novelty": 102,
-          "surge": 85,
-          "drop": 87,
-          "burst": 123
+          "novelty": 103,
+          "surge": 81,
+          "drop": 85,
+          "burst": 125
         }
       },
       "species": {
-        "organic": 0.57,
-        "aggressive": 0.306,
-        "rhythmic": 0.444,
-        "spikeGain": 3.554,
-        "crystalGain": 5.273,
-        "tentacleGain": 6.55,
-        "membraneGain": 6.566,
+        "organic": 0.621,
+        "aggressive": 0.199,
+        "rhythmic": 0.565,
+        "spikeGain": 0.211,
+        "crystalGain": 3.458,
+        "tentacleGain": 0.472,
+        "membraneGain": 0.638,
         "avgs": {
           "avgDensity": 0.994,
-          "avgTension": 0.327,
-          "avgContrast": 0.456,
-          "avgBrightness": 0.151,
+          "avgTension": 0.299,
+          "avgContrast": 0.455,
+          "avgBrightness": 0.152,
           "avgCentroid": 0.136,
-          "avgPulse": 0.845,
+          "avgPulse": 0.87,
           "avgTransient": 0.016,
-          "avgBassFocus": 0.628,
-          "avgMelodyFocus": 0.153,
-          "avgNovelty": 0.212,
-          "avgEventRate": 0.513,
-          "avgOverall": 0.48,
-          "loudRatio": 0.243,
-          "densityVar": 0.005,
+          "avgBassFocus": 0.625,
+          "avgMelodyFocus": 0.154,
+          "avgNovelty": 0.203,
+          "avgEventRate": 0.518,
+          "avgOverall": 0.364,
+          "loudRatio": 0.118,
+          "densityVar": 0.004,
           "tensionVar": 0.001,
           "contrastVar": 0.019,
           "brightnessVar": 0.007,
-          "sectionContrast": 0.159
+          "sectionContrast": 0.164
         }
       },
       "morphTargets": {
-        "diabolo": 0.49,
-        "coral": 1.087,
-        "monolith": 0.231,
-        "spindle": 0.004,
-        "torus": 0.356
+        "diabolo": 0.278,
+        "coral": 1.873,
+        "monolith": 0.071,
+        "spindle": 0.002,
+        "torus": 0.574
       },
       "dominantMorph": "coral",
       "palette": {
-        "hue": 0.116,
-        "saturation": 0.755,
-        "lightness": 0.458,
-        "roughness": 0.776,
+        "hue": 0.11,
+        "saturation": 0.762,
+        "lightness": 0.46,
+        "roughness": 0.784,
         "metalness": 0.02,
-        "emissiveStrength": 0.386,
-        "energy": 0.791,
+        "emissiveStrength": 0.319,
+        "energy": 0.541,
         "hueFamily": "gold"
       },
       "concept": "Jason Mraz — アコースティック・ポップ。柔らかくメロディ中心・低アタック",
       "checks": {
         "organic": {
           "ok": true,
-          "note": "mid-high (~high)"
+          "note": "high"
         },
         "aggressive": {
           "ok": true,
-          "note": "low-mid (~low)"
+          "note": "low"
         },
         "rhythmic": {
           "ok": true,
-          "note": "mid"
+          "note": "mid-high (~mid)"
         },
         "morph": {
           "ok": true,
@@ -1064,83 +1053,83 @@
         "rawAvgBassFocus": 0.63,
         "rawAvgBrightness": 0.156,
         "rawAvgOverall": 0.265,
-        "kickEvents": 1185,
-        "transientEvents": 181,
-        "kicksPerMin": 272.4
+        "kickEvents": 1326,
+        "transientEvents": 452,
+        "kicksPerMin": 304.8
       },
       "profile": {
-        "activeDuration": 254.0833,
+        "activeDuration": 252.5833,
         "duration": 261.05,
-        "overallAverage": 0.8168,
-        "lowRatio": 0.3576,
-        "midRatio": 0.2437,
-        "highRatio": 0.3986,
-        "bassDominance": 0.6341,
-        "brightness": 0.1577,
-        "contrast": 0.3687,
-        "centroid": 0.1491,
-        "sectionContrast": 0.0225,
-        "variation": 0.1655,
-        "attackRate": 7.6353,
-        "quietRatio": 0.0267,
-        "loudRatio": 0.8074,
-        "melodyFocus": 0.153
+        "overallAverage": 0.7024,
+        "lowRatio": 0.3692,
+        "midRatio": 0.1972,
+        "highRatio": 0.4337,
+        "bassDominance": 0.6339,
+        "brightness": 0.1583,
+        "contrast": 0.3676,
+        "centroid": 0.1495,
+        "sectionContrast": 0.0213,
+        "variation": 0.2188,
+        "attackRate": 9.3237,
+        "quietRatio": 0.0324,
+        "loudRatio": 0.635,
+        "melodyFocus": 0.1527
       },
       "structure": {
-        "phase": "metamorphosis",
+        "phase": "hardening",
         "formationRamp": 1,
         "organBudget": 6,
         "events": {
-          "novelty": 93,
-          "surge": 14,
-          "drop": 71,
-          "burst": 22
+          "novelty": 92,
+          "surge": 29,
+          "drop": 76,
+          "burst": 65
         }
       },
       "species": {
-        "organic": 0.388,
-        "aggressive": 0.434,
-        "rhythmic": 0.419,
-        "spikeGain": 5.007,
-        "crystalGain": 7.458,
-        "tentacleGain": 4.486,
-        "membraneGain": 4.5,
+        "organic": 0.46,
+        "aggressive": 0.266,
+        "rhythmic": 0.55,
+        "spikeGain": 0.253,
+        "crystalGain": 4.601,
+        "tentacleGain": 0.373,
+        "membraneGain": 0.539,
         "avgs": {
-          "avgDensity": 0.989,
-          "avgTension": 0.365,
-          "avgContrast": 0.369,
+          "avgDensity": 0.994,
+          "avgTension": 0.34,
+          "avgContrast": 0.368,
           "avgBrightness": 0.158,
           "avgCentroid": 0.149,
-          "avgPulse": 0.824,
-          "avgTransient": 0.005,
+          "avgPulse": 0.868,
+          "avgTransient": 0.012,
           "avgBassFocus": 0.634,
           "avgMelodyFocus": 0.153,
-          "avgNovelty": 0.148,
-          "avgEventRate": 0.488,
-          "avgOverall": 0.817,
-          "loudRatio": 0.83,
-          "densityVar": 0.006,
+          "avgNovelty": 0.15,
+          "avgEventRate": 0.501,
+          "avgOverall": 0.702,
+          "loudRatio": 0.656,
+          "densityVar": 0.004,
           "tensionVar": 0.001,
-          "contrastVar": 0.014,
+          "contrastVar": 0.013,
           "brightnessVar": 0.001,
-          "sectionContrast": 0.022
+          "sectionContrast": 0.021
         }
       },
       "morphTargets": {
-        "diabolo": 0.728,
-        "coral": 0.017,
-        "monolith": 0.505,
-        "spindle": 0.012,
-        "torus": 0.247
+        "diabolo": 0.657,
+        "coral": 0.237,
+        "monolith": 0.239,
+        "spindle": 0.003,
+        "torus": 0.41
       },
       "dominantMorph": "diabolo",
       "palette": {
-        "hue": 0.117,
-        "saturation": 0.564,
-        "lightness": 0.468,
-        "roughness": 0.573,
-        "metalness": 0.217,
-        "emissiveStrength": 0.707,
+        "hue": 0.105,
+        "saturation": 0.633,
+        "lightness": 0.456,
+        "roughness": 0.697,
+        "metalness": 0.066,
+        "emissiveStrength": 0.58,
         "energy": 1,
         "hueFamily": "gold"
       },
@@ -1148,15 +1137,15 @@
       "checks": {
         "organic": {
           "ok": true,
-          "note": "mid"
+          "note": "mid-high"
         },
         "aggressive": {
           "ok": true,
-          "note": "mid"
+          "note": "low-mid"
         },
         "rhythmic": {
           "ok": true,
-          "note": "mid"
+          "note": "mid-high"
         },
         "morph": {
           "ok": true,
@@ -1168,7 +1157,7 @@
         },
         "metalness": {
           "ok": true,
-          "note": "low-mid"
+          "note": "low"
         },
         "brightness": {
           "ok": true,
@@ -1207,26 +1196,26 @@
         "rawAvgBassFocus": 0.606,
         "rawAvgBrightness": 0.182,
         "rawAvgOverall": 0.355,
-        "kickEvents": 512,
-        "transientEvents": 39,
-        "kicksPerMin": 120.9
+        "kickEvents": 759,
+        "transientEvents": 125,
+        "kicksPerMin": 179.2
       },
       "profile": {
         "activeDuration": 252.0667,
         "duration": 254.1333,
-        "overallAverage": 0.9646,
-        "lowRatio": 0.347,
-        "midRatio": 0.2903,
-        "highRatio": 0.3627,
+        "overallAverage": 0.9209,
+        "lowRatio": 0.3579,
+        "midRatio": 0.2579,
+        "highRatio": 0.3843,
         "bassDominance": 0.6049,
         "brightness": 0.1827,
         "contrast": 0.3434,
         "centroid": 0.1621,
         "sectionContrast": 0.0309,
-        "variation": 0.1063,
-        "attackRate": 3.6736,
+        "variation": 0.1577,
+        "attackRate": 6.4308,
         "quietRatio": 0.0081,
-        "loudRatio": 0.9726,
+        "loudRatio": 0.9305,
         "melodyFocus": 0.1555
       },
       "structure": {
@@ -1234,56 +1223,56 @@
         "formationRamp": 1,
         "organBudget": 6,
         "events": {
-          "novelty": 82,
-          "surge": 7,
-          "drop": 20,
-          "burst": 2
+          "novelty": 83,
+          "surge": 13,
+          "drop": 28,
+          "burst": 13
         }
       },
       "species": {
-        "organic": 0.223,
-        "aggressive": 0.775,
-        "rhythmic": 0.337,
-        "spikeGain": 8.867,
-        "crystalGain": 13.253,
-        "tentacleGain": 2.618,
-        "membraneGain": 2.629,
+        "organic": 0.132,
+        "aggressive": 0.885,
+        "rhythmic": 0.392,
+        "spikeGain": 0.636,
+        "crystalGain": 15.139,
+        "tentacleGain": 0.17,
+        "membraneGain": 0.33,
         "avgs": {
-          "avgDensity": 0.67,
-          "avgTension": 0.397,
+          "avgDensity": 0.926,
+          "avgTension": 0.387,
           "avgContrast": 0.343,
           "avgBrightness": 0.183,
           "avgCentroid": 0.162,
-          "avgPulse": 0.595,
-          "avgTransient": 0.001,
+          "avgPulse": 0.59,
+          "avgTransient": 0.003,
           "avgBassFocus": 0.605,
           "avgMelodyFocus": 0.156,
-          "avgNovelty": 0.133,
-          "avgEventRate": 0.345,
-          "avgOverall": 0.965,
-          "loudRatio": 0.981,
-          "densityVar": 0.102,
-          "tensionVar": 0,
+          "avgNovelty": 0.142,
+          "avgEventRate": 0.312,
+          "avgOverall": 0.921,
+          "loudRatio": 0.938,
+          "densityVar": 0.015,
+          "tensionVar": 0.001,
           "contrastVar": 0.012,
           "brightnessVar": 0.002,
           "sectionContrast": 0.031
         }
       },
       "morphTargets": {
-        "diabolo": 0.124,
-        "coral": 0.008,
-        "monolith": 0.71,
-        "spindle": 0.347,
-        "torus": 0.138
+        "diabolo": 0.008,
+        "coral": 0.005,
+        "monolith": 1.222,
+        "spindle": 0.7,
+        "torus": 0.076
       },
       "dominantMorph": "monolith",
       "palette": {
-        "hue": 0.192,
-        "saturation": 0.405,
-        "lightness": 0.508,
-        "roughness": 0.284,
-        "metalness": 0.617,
-        "emissiveStrength": 0.933,
+        "hue": 0.2,
+        "saturation": 0.425,
+        "lightness": 0.51,
+        "roughness": 0.291,
+        "metalness": 0.611,
+        "emissiveStrength": 0.911,
         "energy": 1,
         "hueFamily": "moss"
       },
@@ -1291,7 +1280,7 @@
       "checks": {
         "organic": {
           "ok": true,
-          "note": "low-mid (~mid)"
+          "note": "low (~low-mid)"
         },
         "aggressive": {
           "ok": true,
@@ -1350,27 +1339,27 @@
         "rawAvgBassFocus": 0.638,
         "rawAvgBrightness": 0.101,
         "rawAvgOverall": 0.215,
-        "kickEvents": 432,
-        "transientEvents": 281,
-        "kicksPerMin": 259.2
+        "kickEvents": 425,
+        "transientEvents": 253,
+        "kicksPerMin": 255
       },
       "profile": {
-        "activeDuration": 96.15,
+        "activeDuration": 94.4833,
         "duration": 100,
-        "overallAverage": 0.5984,
-        "lowRatio": 0.365,
-        "midRatio": 0.3201,
-        "highRatio": 0.3149,
-        "bassDominance": 0.6449,
-        "brightness": 0.0958,
-        "contrast": 0.5276,
-        "centroid": 0.0913,
-        "sectionContrast": 0.1051,
-        "variation": 0.3151,
-        "attackRate": 6.3131,
-        "quietRatio": 0.0385,
-        "loudRatio": 0.47,
-        "melodyFocus": 0.1806
+        "overallAverage": 0.5005,
+        "lowRatio": 0.4095,
+        "midRatio": 0.2831,
+        "highRatio": 0.3074,
+        "bassDominance": 0.6471,
+        "brightness": 0.0957,
+        "contrast": 0.5263,
+        "centroid": 0.0918,
+        "sectionContrast": 0.1042,
+        "variation": 0.3354,
+        "attackRate": 6.3609,
+        "quietRatio": 0.0552,
+        "loudRatio": 0.3057,
+        "melodyFocus": 0.1791
       },
       "structure": {
         "phase": "hardening",
@@ -1380,54 +1369,54 @@
           "novelty": 43,
           "surge": 46,
           "drop": 37,
-          "burst": 48
+          "burst": 44
         }
       },
       "species": {
-        "organic": 0.499,
-        "aggressive": 0.366,
-        "rhythmic": 0.418,
-        "spikeGain": 4.236,
-        "crystalGain": 6.297,
-        "tentacleGain": 5.741,
-        "membraneGain": 5.756,
+        "organic": 0.533,
+        "aggressive": 0.256,
+        "rhythmic": 0.522,
+        "spikeGain": 0.246,
+        "crystalGain": 4.419,
+        "tentacleGain": 0.418,
+        "membraneGain": 0.583,
         "avgs": {
           "avgDensity": 0.98,
-          "avgTension": 0.378,
-          "avgContrast": 0.528,
+          "avgTension": 0.354,
+          "avgContrast": 0.526,
           "avgBrightness": 0.096,
-          "avgCentroid": 0.091,
-          "avgPulse": 0.758,
-          "avgTransient": 0.044,
-          "avgBassFocus": 0.645,
-          "avgMelodyFocus": 0.181,
+          "avgCentroid": 0.092,
+          "avgPulse": 0.781,
+          "avgTransient": 0.038,
+          "avgBassFocus": 0.647,
+          "avgMelodyFocus": 0.179,
           "avgNovelty": 0.266,
           "avgEventRate": 0.514,
-          "avgOverall": 0.598,
-          "loudRatio": 0.489,
+          "avgOverall": 0.5,
+          "loudRatio": 0.324,
           "densityVar": 0.016,
           "tensionVar": 0.001,
           "contrastVar": 0.024,
           "brightnessVar": 0.004,
-          "sectionContrast": 0.105
+          "sectionContrast": 0.104
         }
       },
       "morphTargets": {
-        "diabolo": 0.645,
-        "coral": 0.457,
-        "monolith": 0.414,
-        "spindle": 0.004,
-        "torus": 0.23
+        "diabolo": 0.441,
+        "coral": 0.859,
+        "monolith": 0.223,
+        "spindle": 0.003,
+        "torus": 0.329
       },
-      "dominantMorph": "diabolo",
+      "dominantMorph": "coral",
       "palette": {
-        "hue": 0.089,
-        "saturation": 0.802,
-        "lightness": 0.438,
-        "roughness": 0.797,
+        "hue": 0.099,
+        "saturation": 0.81,
+        "lightness": 0.439,
+        "roughness": 0.801,
         "metalness": 0.02,
-        "emissiveStrength": 0.447,
-        "energy": 1,
+        "emissiveStrength": 0.369,
+        "energy": 0.86,
         "hueFamily": "gold"
       },
       "concept": "開発用テスト音源（100秒）。基準トラック",
@@ -1438,15 +1427,15 @@
         },
         "aggressive": {
           "ok": true,
-          "note": "mid"
+          "note": "low-mid"
         },
         "rhythmic": {
           "ok": true,
-          "note": "mid"
+          "note": "mid-high"
         },
         "morph": {
           "ok": true,
-          "note": "dominant=diabolo"
+          "note": "dominant=coral"
         },
         "hue": {
           "ok": true,

@@ -12,7 +12,7 @@ export type AudioBands = {
   low: number;
   /** 中域 (ドラムボディ・ハイハット胴) 400–2000 Hz */
   mid: number;
-  /** メロディ中域 (ボーカル・主旋律) 700–1500 Hz */
+  /** メロディ／リード中域 (ボーカル・主旋律・目立つギターリフ) 500–1800 Hz */
   melody: number;
   /** 高域 (アタック 2–6 kHz + 輝き・空気感 5–18 kHz) */
   high: number;
@@ -31,12 +31,24 @@ export type RhythmEvents = {
   hat: number;
   /** シンバル・大きな波形スパイクなどの瞬間反応 */
   transient: number;
+  /**
+   * 中域／メロディの細かいチョップ（メタルのジャジャジャ・カッティング）。
+   * キックやハットではないが、聴感上のリズム核になることが多い。
+   */
+  chop: number;
+  /**
+   * ドラム／チョップに分類できなかったが、波形上はっきりしたアタック。
+   * 「強く鳴っているのに無反応」を防ぐ聴感用の逃げ道。
+   */
+  salience: number;
   beat: number;
   beatIndex: number;
   kickIndex: number;
   snareIndex: number;
   hatIndex: number;
   transientIndex: number;
+  chopIndex: number;
+  salienceIndex: number;
   downbeat: boolean;
   /** 推定テンポ (BPM)。ビートが検出できない間は直近値を維持。 */
   bpm: number;
@@ -59,6 +71,11 @@ export type RhythmEvents = {
   kickRing: number;
   snareRing: number;
   hatRing: number;
+  /**
+   * メロディ帯のオンセット量（人がフレーズ頭で感じるアタック）。
+   * 持続レベルではなく「立ち上がり」— 聴感反応の主役に使う。
+   */
+  melodyOnset: number;
   /** オシロ表示用 */
   subLevel: number;
   wavePeak: number;
@@ -78,6 +95,14 @@ export type SculptureExperience = {
   applyLiveTuningNow(): void;
   /** 完成直前に、録音音声から導出したパレットと種プロファイルを渡す（対応するモードのみ） */
   prepareCompletion?(palette: SculpturePalette, species?: SpeciesProfile): void;
+  /**
+   * 再生中: 蓄積プロファイルから色を徐々に完成色へ寄せる。
+   * 天気・時刻は別途 applyWeatherClayTint で更新し、ここでも加味する。
+   */
+  evolveSongColors?(
+    profile: import("./audio-palette").AudioProfileSummary | null,
+    deltaTime: number,
+  ): void;
   /** vita 等: 無音時のタッチ反応（クリックでホヨッと動く） */
   pokeIdle?(): void;
   /** クリック位置で表面が少し反発する（完成後も有効） */
@@ -85,6 +110,16 @@ export type SculptureExperience = {
   pokeSurface?(localPoint: THREE.Vector3): void;
   /** クリック毎に粘土色を少しずらす（全モード共通の色条件） */
   nudgeClayColorOnClick?(): void;
+  /** 天気に合わせて粘土（内側含む）の色を更新 */
+  applyWeatherClayTint?(
+    snapshot: {
+      condition: string;
+      cloudCover: number;
+      rainIntensity: number;
+      lightningIntensity: number;
+    } | null,
+    hour?: number,
+  ): void;
   /** 成長アルゴリズム切替時にシルエット偏りを更新 */
   applyAlgoMorphBias?(): void;
   /** 曲終了後〜完成までの形凍結 */

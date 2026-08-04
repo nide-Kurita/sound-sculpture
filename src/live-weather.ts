@@ -392,7 +392,8 @@ export const createWeatherPreviewSnapshot = (
         condition: "cloudy",
         label: "WINDY",
         temperatureC: 20,
-        cloudCover: 0.35,
+        // 強風は雲も多めにして動きが見えるように
+        cloudCover: 0.72,
         precipitation: 0,
         windSpeed: 14,
         windDirectionDeg: 270,

@@ -26,6 +26,11 @@ export type GrowthEventFlags = {
 export type StructureSnapshot = {
   energyLong: number;
   energyMid: number;
+  /**
+   * 直近が曲の長期基準より相対的に盛り上がっているか 0〜1。
+   * 静か＝低、サビ／サージ＝高。帯域正規化後でも相対差でセクションを刻む。
+   */
+  sectionLift: number;
   tension: number;
   density: number;
   novelty: number;
@@ -247,9 +252,15 @@ export class StructureTracker {
     const formationRamp = Math.max(timeRamp, energyRamp);
     const detailRamp = smoothstep(8, 72, this.activeSeconds) * smoothstep(0.06, 0.28, this.energyLong);
 
+    // 長期基準との相対差 + 絶対レベル。常に大きい曲でも「一段上がった瞬間」が残る
+    // 静区間は低めに張り付き、動区間との差が完成形の刻みに乗るようゲートを強める
+    const absGate = smoothstep(0.04, 0.36, this.energyShort);
+    const sectionLift = clamp01((0.32 + energyDelta * 3.4) * (0.2 + absGate * 0.8));
+
     return {
       energyLong: this.energyLong,
       energyMid: this.energyMid,
+      sectionLift,
       tension: this.tension,
       density,
       novelty: noveltyClamped,

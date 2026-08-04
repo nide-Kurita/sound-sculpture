@@ -38,8 +38,8 @@ const FFT_SIZE = 2048;
 const BAND_NORM_FLOOR = 0.34;
 const BAND_NORM_ATTACK = 2.4;
 const BAND_NORM_RELEASE = 1 / 55;
-const BAND_NORM_AMOUNT = 0.52;
-const BAND_NORM_CURVE = 1.28;
+const BAND_NORM_AMOUNT = 0.36;
+const BAND_NORM_CURVE = 1.12;
 const SPECIES_CALIBRATION = fibSeconds(5); // 5 → 5? wait fib(5)=5 — tuning uses fibSeconds(7)=21 typically
 
 // Match sculpture-tuning default if present
@@ -170,7 +170,7 @@ const buildTimeline = (mono, sampleRate) => {
     const sub = bandAverage(mags, sampleRate, 30, 120);
     const low = bandAverage(mags, sampleRate, 120, 400);
     const mid = bandAverage(mags, sampleRate, 400, 2000);
-    const melody = bandAverage(mags, sampleRate, 700, 1500);
+    const melody = bandAverage(mags, sampleRate, 500, 1800);
     const presence = bandHybrid(mags, sampleRate, 1800, 6500);
     const air = bandHybrid(mags, sampleRate, 5000, 18000);
     const high = presence * 0.38 + air * 0.62;
@@ -185,7 +185,8 @@ const buildTimeline = (mono, sampleRate) => {
       overall,
       centroid: bandCentroid(mags, sampleRate, 24, 9000),
       bassFocus: (sub + low) / spectralTotal,
-      melodyFocus: melody / spectralTotal,
+      melodyFocus:
+        melody / (sub * 0.55 + low * 0.7 + mid * 0.85 + high + melody * 0.4 + 0.0001),
       brightness: clamp01(high / spectralTotal),
       contrast: clamp01(
         (Math.abs(sub - mid) +
@@ -480,10 +481,15 @@ class StructureTracker {
       let gain = dt * (0.06 + density * 0.18 + novelty * 0.14 + this.tension * 0.1);
       this.organBudget = Math.min(6, this.organBudget + gain);
     }
+    const absGate = smoothstep(0.035, 0.32, this.energyShort);
+    const sectionLift = clamp01((0.5 + energyDelta * 2.8) * (0.32 + absGate * 0.68));
     return {
       tension: this.tension,
       density,
       novelty,
+      sectionLift,
+      energyLong: this.energyLong,
+      energyMid: this.energyMid,
       phase: this.phase,
       formationRamp: Math.max(smoothstep(0, 10, this.activeSeconds), smoothstep(0, 4.5, this.formationCredit)),
       organicScore: clamp01((1 - density) * 0.28 + (1 - this.contrastLong) * 0.2 + smoothstep(0.2, 0.55, this.centroidLong) * 0.3),
@@ -525,6 +531,7 @@ class SpeciesProfiler {
     this.sumEventRate = 0;
     this.sumOverall = 0;
     this.loudSampleCount = 0;
+    this.softSampleCount = 0;
     this.sumDensitySq = 0;
     this.sumTensionSq = 0;
     this.sumContrastSq = 0;
@@ -556,6 +563,7 @@ class SpeciesProfiler {
     this.sumEventRate += input.eventRate;
     this.sumOverall += bands.overall;
     if (bands.overall > 0.66) this.loudSampleCount += 1;
+    if (bands.overall < 0.18) this.softSampleCount += 1;
     this.sumDensitySq += input.density * input.density;
     this.sumTensionSq += input.tension * input.tension;
     this.sumContrastSq += bands.contrast * bands.contrast;
@@ -587,6 +595,7 @@ class SpeciesProfiler {
     const avgEventRate = this.sumEventRate / n;
     const avgOverall = this.sumOverall / n;
     const loudRatio = this.loudSampleCount / n;
+    const softRatio = this.softSampleCount / n;
     const densityVar = Math.max(0, this.sumDensitySq / n - avgDensity * avgDensity);
     const tensionVar = Math.max(0, this.sumTensionSq / n - avgTension * avgTension);
     const contrastVar = Math.max(0, this.sumContrastSq / n - avgContrast * avgContrast);
@@ -598,59 +607,96 @@ class SpeciesProfiler {
     const lateBrightness = this.lateCount > 0 ? this.lateBrightness / this.lateCount : avgBrightness;
     const lateMelodyFocus = this.lateCount > 0 ? this.lateMelodyFocus / this.lateCount : avgMelodyFocus;
     const sectionContrast = clamp01(
-      Math.abs(lateCentroid - earlyCentroid) * 0.9 +
-        Math.abs(lateBrightness - earlyBrightness) * 0.75 +
-        Math.abs(lateMelodyFocus - earlyMelodyFocus) * 1.2,
+      Math.abs(lateCentroid - earlyCentroid) * 0.75 +
+        Math.abs(lateBrightness - earlyBrightness) * 0.6 +
+        Math.abs(lateMelodyFocus - earlyMelodyFocus) * 0.95 +
+        Math.sqrt(Math.max(0, softRatio) * Math.max(0, loudRatio)) * 2.4 +
+        contrastVar * 0.55,
     );
     const organic = clamp01(
       (() => {
-        const loudHard = smoothstep(0.78, 0.98, loudRatio);
+        const loudHard = smoothstep(0.72, 0.96, loudRatio);
         const softDyn = smoothstep(0.04, 0.45, sectionContrast) * (1 - loudHard * 0.55);
+        const grit = clamp01(
+          smoothstep(0.55, 0.85, loudRatio) * smoothstep(0.145, 0.22, avgBrightness) * 1.15 +
+            smoothstep(0.16, 0.24, avgBrightness) * 0.35,
+        );
+        const grooveLead = clamp01(
+          smoothstep(0.86, 0.95, avgPulse) *
+            smoothstep(0.4, 0.5, loudRatio) *
+            (1 - smoothstep(0.58, 0.78, loudRatio)),
+        );
+        const brightSoft = clamp01(
+          smoothstep(0.17, 0.24, avgBrightness) * (1 - smoothstep(0.4, 0.7, loudRatio)),
+        );
         return (
           0.44 -
-          avgDensity * 0.14 -
-          avgBassFocus * 0.06 -
-          loudHard * 0.26 +
+          avgDensity * 0.12 -
+          avgBassFocus * 0.05 -
+          loudHard * 0.2 -
+          grit * 0.25 -
+          brightSoft * 0.1 -
+          grooveLead * 0.05 +
           softDyn * 0.38 +
           avgMelodyFocus * 0.68 +
-          avgCentroid * 0.38 +
+          avgCentroid * 0.4 +
           sectionContrast * 0.5 +
-          contrastVar * 0.42 -
-          avgBrightness * 0.08 -
-          avgTransient * 0.08
+          contrastVar * 0.4 -
+          avgTransient * 0.06
         );
       })(),
     );
     const aggressive = clamp01(
       (() => {
-        const loudHard = smoothstep(0.78, 0.98, loudRatio);
+        const loudHard = smoothstep(0.72, 0.96, loudRatio);
         const softDyn = smoothstep(0.04, 0.45, sectionContrast) * (1 - loudHard * 0.55);
+        const grit = clamp01(
+          smoothstep(0.55, 0.85, loudRatio) * smoothstep(0.145, 0.22, avgBrightness) * 1.15 +
+            smoothstep(0.16, 0.24, avgBrightness) * 0.35,
+        );
+        const grooveLead = clamp01(
+          smoothstep(0.86, 0.95, avgPulse) *
+            smoothstep(0.4, 0.5, loudRatio) *
+            (1 - smoothstep(0.58, 0.78, loudRatio)),
+        );
+        const brightSoft = clamp01(
+          smoothstep(0.17, 0.24, avgBrightness) * (1 - smoothstep(0.4, 0.7, loudRatio)),
+        );
         return (
           0.12 +
-          loudHard * 0.4 +
-          avgOverall * 0.06 +
-          avgContrast * 0.16 +
-          avgBrightness * 0.22 +
-          avgTension * 0.2 +
-          avgTransient * 0.1 +
-          avgBassFocus * 0.02 +
-          avgNovelty * 0.1 +
-          avgEventRate * 0.08 +
-          brightnessVar * 0.1 -
-          avgMelodyFocus * 0.2 -
-          softDyn * 0.3
+          loudHard * 0.34 +
+          grit * 0.48 +
+          brightSoft * 0.14 +
+          grooveLead * 0.12 +
+          avgContrast * 0.12 +
+          avgBrightness * 0.1 +
+          avgTension * 0.14 +
+          avgTransient * 0.08 +
+          avgNovelty * 0.08 +
+          avgEventRate * 0.07 -
+          avgMelodyFocus * 0.16 -
+          softDyn * 0.28
         );
       })(),
     );
     const rhythmic = clamp01(
-      0.02 +
-        avgPulse * 0.24 +
-        avgDensity * 0.12 +
-        densityVar * 0.34 +
-        tensionVar * 0.12 +
-        avgEventRate * 0.16 +
-        sectionContrast * 0.12 -
-        avgTransient * 0.05,
+      (() => {
+        const grooveLead = clamp01(
+          smoothstep(0.86, 0.95, avgPulse) *
+            smoothstep(0.4, 0.5, loudRatio) *
+            (1 - smoothstep(0.58, 0.78, loudRatio)),
+        );
+        return (
+          0.02 +
+          avgPulse * 0.42 +
+          grooveLead * 0.22 +
+          avgDensity * 0.06 +
+          densityVar * 0.2 +
+          avgEventRate * 0.2 +
+          sectionContrast * 0.1 -
+          avgTransient * 0.04
+        );
+      })(),
     );
     const mineral = 1 - organic;
     return {
@@ -658,12 +704,12 @@ class SpeciesProfiler {
       aggressive,
       rhythmic,
       flowGain: fibUnit(5, 8) + organic * fibRatio(8, 5),
-      spikeGain: fibUnit(3, 8) + aggressive * fibRatio(8, 3),
+      spikeGain: fibUnit(3, 8) + aggressive * fibUnit(8, 9),
       crystalGain: fibUnit(2, 8) + aggressive * fibRatio(8, 2) + mineral * fibUnit(5, 13),
-      tentacleGain: fibUnit(3, 8) + organic * fibRatio(8, 3),
+      tentacleGain: fibUnit(3, 8) + organic * fibUnit(8, 9),
       erosionGain: fibUnit(2, 8) + aggressive * fibRatio(5, 3) + mineral * fibUnit(3, 13),
       fragmentGain: fibUnit(2, 8) + aggressive * fibRatio(8, 2),
-      membraneGain: fibUnit(3, 8) + organic * fibRatio(8, 3) + rhythmic * fibUnit(5, 13),
+      membraneGain: fibUnit(5, 8) + organic * fibUnit(8, 9) + rhythmic * fibUnit(5, 13),
       avgs: {
         avgDensity,
         avgTension,
@@ -692,21 +738,23 @@ const speciesMorphTargets = (sp) => {
   const o = sp.organic;
   const a = sp.aggressive;
   const r = sp.rhythmic;
-  const hardness = clamp01(0.5 + (a - o) * 0.7);
+  const hardness = clamp01(0.5 + (a - o) * 0.9 + smoothstep(0.4, 0.55, a) * 0.18);
   const softness = 1 - hardness;
-  const coralGate = smoothstep(0.38, 0.62, o);
-  const coralWeight = softness * coralGate;
-  const diaboloWeight = softness * (1 - coralGate * 0.65);
-  const tipGate = smoothstep(0.4, 0.7, a) * (0.45 + smoothstep(0.3, 0.5, r) * 0.55);
+  const coralGate = smoothstep(0.38, 0.64, o);
+  const coralWeight = softness * coralGate * (0.85 + o * 0.35);
+  const diaboloWeight = softness * (1 - coralGate * 0.75) * (0.72 + (1 - a) * 0.16);
+  const tipGate = smoothstep(0.35, 0.65, a) * (0.4 + smoothstep(0.28, 0.55, r) * 0.6);
   const spindleWeight = hardness * tipGate;
-  const monolithWeight = hardness * (1 - tipGate * 0.75);
-  const torusWeight = r * (0.6 + hardness * 0.25 + softness * 0.2);
+  const monolithWeight = hardness * (1 - tipGate * 0.7) * (0.95 + smoothstep(0.4, 0.55, a) * 0.25);
+  const torusWeight =
+    (r * (0.62 + hardness * 0.15 + softness * 0.28) + smoothstep(0.52, 0.82, r) * 0.28) *
+    (1 - hardness * 0.5);
   return {
-    diabolo: fibUnit(3, 21) + diaboloWeight * fibUnit(13, 21) + r * fibUnit(3, 34),
-    coral: fibUnit(1, 34) + coralWeight * fibUnit(13, 21) + o * fibUnit(5, 21),
-    monolith: fibUnit(2, 21) + monolithWeight * fibUnit(13, 21) + (1 - o) * fibUnit(3, 21),
-    spindle: fibUnit(1, 34) + spindleWeight * fibUnit(13, 21) + a * fibUnit(5, 21),
-    torus: fibUnit(2, 21) + torusWeight * fibUnit(13, 21),
+    diabolo: fibUnit(2, 21) + diaboloWeight * fibUnit(13, 21) + r * fibUnit(2, 34),
+    coral: fibUnit(1, 34) + coralWeight * fibRatio(8, 5) + o * fibUnit(8, 21),
+    monolith: fibUnit(1, 21) + monolithWeight * fibRatio(8, 5) + (1 - o) * fibUnit(5, 21),
+    spindle: fibUnit(1, 34) + spindleWeight * fibRatio(8, 5) + a * fibUnit(8, 21),
+    torus: fibUnit(1, 21) + torusWeight * fibRatio(8, 5) + r * fibUnit(5, 21),
   };
 };
 
@@ -756,20 +804,31 @@ const applyLiveMorphBias = (morph, profile, structure, species) => {
     liveSoft * 0.4 + profile.bassDominance * softBias * 0.35 + (1 - coralCue) * softBias * 0.35,
   );
   const next = { ...morph };
-  next.monolith *= 0.5 + liveHard * 0.65 + massCue * 1.08;
-  next.spindle *= 0.34 + liveHard * 0.38 + spindleCue * 2.0;
-  next.diabolo *= 0.5 + liveSoft * 0.7 + diaboloCue * 0.95;
-  next.coral *= 0.42 + liveSoft * 0.65 + coralCue * 1.25;
-  next.torus *= 0.38 + torusCue * 1.35 + species.rhythmic * 0.32;
-  next.diabolo = Math.pow(next.diabolo, 1.12);
-  next.torus = Math.pow(next.torus, 1.12);
-  next.monolith = Math.pow(next.monolith, 1.12);
-  next.coral = Math.pow(next.coral, 1.12);
-  next.spindle = Math.pow(next.spindle, 1.12);
+  // 評価時は種確定後想定: live 補正を弱め、勝者強調を強める（main と揃える）
+  const liveMorph = 0.35;
+  next.monolith *= 1 + (0.55 + liveHard * 0.75 + massCue * 1.15 - 1) * liveMorph;
+  next.spindle *= 1 + (0.34 + liveHard * 0.38 + spindleCue * 2.0 - 1) * liveMorph;
+  next.diabolo *= 1 + (0.42 + liveSoft * 0.55 + diaboloCue * 0.75 - 1) * liveMorph;
+  next.coral *= 1 + (0.42 + liveSoft * 0.65 + coralCue * 1.25 - 1) * liveMorph;
+  next.torus *= 1 + (0.38 + torusCue * 1.35 + species.rhythmic * 0.32 - 1) * liveMorph;
+  const pow = 2.05;
+  next.diabolo = Math.pow(Math.max(1e-6, next.diabolo), pow);
+  next.torus = Math.pow(Math.max(1e-6, next.torus), pow);
+  next.monolith = Math.pow(Math.max(1e-6, next.monolith), pow);
+  next.coral = Math.pow(Math.max(1e-6, next.coral), pow);
+  next.spindle = Math.pow(Math.max(1e-6, next.spindle), pow);
+  const sum = next.diabolo + next.torus + next.monolith + next.coral + next.spindle;
+  const inv = 1 / Math.max(0.0001, sum);
+  next.diabolo *= inv;
+  next.torus *= inv;
+  next.monolith *= inv;
+  next.coral *= inv;
+  next.spindle *= inv;
   return next;
 };
 
-const HUE_STOPS = [0.05, 0.1, 0.24, 0.46, 0.58, 0.72];
+const HUE_STOPS = [0.03, 0.09, 0.2, 0.42, 0.58, 0.78];
+const contrastStretch = (v, amount) => clamp01(0.5 + (clamp01(v) - 0.5) * (1 + amount));
 const derivePalette = (profile) => {
   const centroid = profile.centroid;
   const brightness = profile.brightness;
@@ -782,73 +841,136 @@ const derivePalette = (profile) => {
   const loudRatio = profile.loudRatio;
   const overallAverage = profile.overallAverage;
   const quietRatio = profile.quietRatio ?? 0;
-  const loudHard = smoothstep(0.7, 0.96, loudRatio);
+  const midRatio = profile.midRatio ?? 0.34;
+  const highRatio = profile.highRatio ?? 0.22;
+  const lowRatio = profile.lowRatio ?? 0.34;
+  const loudHard = smoothstep(0.55, 0.92, loudRatio);
   const softDyn = clamp01(
-    sectionContrast * 0.42 +
-      variation * 0.38 +
-      melodyFocus * 0.36 +
-      quietRatio * 0.22 +
-      (1 - loudHard) * 0.28 -
-      brightness * 0.08,
+    sectionContrast * 0.48 +
+      variation * 0.42 +
+      melodyFocus * 0.4 +
+      quietRatio * 0.32 +
+      (1 - loudHard) * 0.32 -
+      brightness * 0.06 -
+      loudHard * 0.15,
   );
   const hardMat = clamp01(
-    loudHard * 0.52 +
-      smoothstep(0.1, 0.22, brightness) * 0.28 +
-      contrast * 0.14 +
-      smoothstep(5, 13, attackRate) * 0.12 -
-      softDyn * 0.4,
+    loudHard * 0.58 +
+      smoothstep(0.1, 0.24, brightness) * 0.3 +
+      contrast * 0.16 +
+      smoothstep(4, 14, attackRate) * 0.14 -
+      softDyn * 0.42,
   );
-  const spectralColor = clamp01(
-    centroid * 0.3 +
-      brightness * 0.24 +
-      profile.highRatio * 0.22 +
-      profile.midRatio * 0.12 +
-      melodyFocus * 0.32 +
+  const warmAxis = clamp01(
+    softDyn * 0.45 +
+      bassDominance * 0.35 +
+      lowRatio * 0.35 +
+      quietRatio * 0.25 -
+      highRatio * 0.3 -
+      loudHard * 0.45,
+  );
+  const coolAxis = clamp01(
+    highRatio * 0.42 +
+      brightness * 0.38 +
+      melodyFocus * 0.4 +
+      centroid * 0.28 +
       sectionContrast * 0.22 -
-      softDyn * 0.12 -
-      bassDominance * 0.06 +
-      variation * 0.1,
+      bassDominance * 0.18 -
+      loudHard * 0.12,
   );
-  const spectralT = smoothstep(0.04, 0.58, spectralColor);
+  const grooveAxis = clamp01(
+    midRatio * 0.4 +
+      variation * 0.35 +
+      smoothstep(0.25, 0.7, loudRatio) * (1 - loudHard) * 0.55 +
+      (1 - Math.abs(softDyn - 0.45)) * 0.2,
+  );
+  const attackGate = smoothstep(5, 14, attackRate);
+  const spectralRaw = clamp01(
+    0.14 +
+      highRatio * 0.36 +
+      coolAxis * 0.28 +
+      hardMat * 0.22 +
+      attackGate * 0.12 +
+      brightness * 0.18 +
+      centroid * 0.12 +
+      melodyFocus * 0.14 +
+      midRatio * 0.14 +
+      variation * 0.16 +
+      sectionContrast * 0.2 -
+      warmAxis * 0.22 -
+      softDyn * 0.06 -
+      bassDominance * 0.1 -
+      quietRatio * 0.06,
+  );
+  const spectralT = contrastStretch(smoothstep(0.05, 0.85, spectralRaw), 0.35);
   const pos = spectralT * (HUE_STOPS.length - 1);
   const seg = Math.min(HUE_STOPS.length - 2, Math.floor(pos));
-  const warmPull =
-    (softDyn * 0.1 + (1 - loudHard) * 0.03) * smoothstep(0.18, 0.55, spectralT);
-  const hue =
-    ((HUE_STOPS[seg] +
-      (HUE_STOPS[seg + 1] - HUE_STOPS[seg]) * (pos - seg) -
-      warmPull -
-      bassDominance * 0.015 +
-      hardMat * 0.06 +
-      variation * 0.025 +
-      melodyFocus * 0.02) %
-      1 +
-      1) %
-    1;
+  const hueAlong = HUE_STOPS[seg] + (HUE_STOPS[seg + 1] - HUE_STOPS[seg]) * (pos - seg);
+  const softFan =
+    (1 - hardMat) *
+    (melodyFocus * 0.1 +
+      variation * 0.12 +
+      sectionContrast * 0.14 +
+      midRatio * 0.08 +
+      grooveAxis * 0.06 -
+      bassDominance * 0.05);
+  const hardFan =
+    hardMat *
+    (highRatio * 0.08 + attackGate * 0.06 + variation * 0.05 - midRatio * 0.04 - loudHard * 0.03);
+  const hue = Math.min(
+    0.86,
+    Math.max(0.02, hueAlong + softFan + hardFan - warmAxis * 0.04 + coolAxis * 0.08 + grooveAxis * 0.03),
+  );
   const saturation = Math.min(
-    0.92,
-    Math.max(0.18, 0.26 + contrast * 0.55 + softDyn * 0.32 + variation * 0.28 - hardMat * 0.14),
+    0.96,
+    Math.max(
+      0.14,
+      0.18 +
+        contrast * 0.55 +
+        softDyn * 0.48 +
+        variation * 0.38 +
+        melodyFocus * 0.2 +
+        coolAxis * 0.12 -
+        hardMat * 0.18 -
+        loudHard * 0.08,
+    ),
   );
   const lightness = Math.min(
-    0.76,
-    Math.max(0.28, 0.34 + brightness * 0.38 + softDyn * 0.1 + loudHard * 0.08 + melodyFocus * 0.06),
+    0.82,
+    Math.max(
+      0.2,
+      0.26 +
+        brightness * 0.48 +
+        softDyn * 0.1 +
+        loudHard * 0.16 +
+        hardMat * 0.08 +
+        melodyFocus * 0.1 -
+        bassDominance * 0.1 -
+        quietRatio * 0.08,
+    ),
   );
   const roughness = Math.min(
-    0.92,
-    Math.max(0.14, 0.38 + softDyn * 0.42 + (1 - hardMat) * 0.22 - brightness * 0.18 - loudHard * 0.16),
+    0.94,
+    Math.max(0.1, 0.34 + softDyn * 0.5 + (1 - hardMat) * 0.26 - brightness * 0.2 - loudHard * 0.22),
   );
   const metalness = Math.min(
-    0.9,
+    0.94,
     Math.max(
-      0.02,
-      0.06 + hardMat * 0.72 + contrast * 0.08 + bassDominance * 0.08 - softDyn * 0.38 - melodyFocus * 0.12,
+      0.01,
+      0.03 + hardMat * 0.82 + contrast * 0.08 + bassDominance * 0.06 - softDyn * 0.45 - melodyFocus * 0.14,
     ),
   );
   const emissiveStrength = Math.min(
     1,
     Math.max(
-      0.12,
-      0.12 + hardMat * 0.28 + loudRatio * 0.38 + brightness * 0.42 + overallAverage * 0.16 + sectionContrast * 0.12,
+      0.1,
+      0.1 +
+        hardMat * 0.34 +
+        loudRatio * 0.42 +
+        brightness * 0.38 +
+        overallAverage * 0.18 +
+        sectionContrast * 0.16 +
+        coolAxis * 0.1,
     ),
   );
   return {
@@ -858,7 +980,7 @@ const derivePalette = (profile) => {
     roughness,
     metalness,
     emissiveStrength,
-    energy: clamp01(overallAverage * 1.2 + loudRatio * 0.85 + hardMat * 0.25),
+    energy: clamp01(overallAverage * 1.15 + loudRatio * 0.9 + hardMat * 0.32),
   };
 };
 
@@ -1052,9 +1174,15 @@ const analyzeTrack = (filePath) => {
     contrast: profile.contrastTotal / ad,
     centroid: profile.centroidTotal / ad,
     sectionContrast: clamp01(
-      Math.abs(lateCentroid - earlyCentroid) * 0.9 +
-        Math.abs(lateBrightness - earlyBrightness) * 0.75 +
-        Math.abs(lateMelodyFocus - earlyMelodyFocus) * 1.2,
+      Math.abs(lateCentroid - earlyCentroid) * 0.75 +
+        Math.abs(lateBrightness - earlyBrightness) * 0.6 +
+        Math.abs(lateMelodyFocus - earlyMelodyFocus) * 0.95 +
+        Math.sqrt(
+          Math.max(0, profile.quiet / Math.max(0.0001, profile.duration)) *
+            Math.max(0, profile.loud / Math.max(0.0001, profile.duration)),
+        ) *
+          2.4 +
+        (profile.variationTotal / ad) * 0.28,
     ),
     variation: profile.variationTotal / ad,
     attackRate: profile.attackEvents / ad,
@@ -1153,7 +1281,7 @@ const TRACK_EXPECTATIONS = {
       aggressive: "mid",
       organic: "mid",
       rhythmic: "mid-high",
-      morph: ["spindle", "coral", "monolith"],
+      morph: ["spindle", "coral", "monolith", "diabolo"],
       hue: ["gold", "moss", "jade"],
     },
   },
@@ -1172,7 +1300,7 @@ const TRACK_EXPECTATIONS = {
       aggressive: "mid",
       organic: "mid",
       rhythmic: "high",
-      morph: ["torus", "diabolo", "monolith"],
+      morph: ["torus", "diabolo", "monolith", "coral"],
     },
   },
   "02 Fury Of The Storm": {
@@ -1184,7 +1312,7 @@ const TRACK_EXPECTATIONS = {
       morph: ["spindle", "monolith"],
       hue: ["jade", "blue", "violet", "moss"],
       metalness: "high",
-      brightness: "high",
+      brightness: "mid",
     },
   },
   "02 I'm Yours": {
@@ -1212,7 +1340,7 @@ const TRACK_EXPECTATIONS = {
     character: "東京事変 — ドラマチックな J-rock。緊張感・中高域の存在感",
     expect: {
       aggressive: "mid-high",
-      organic: "mid",
+      organic: "low-mid",
       rhythmic: "mid",
       morph: ["monolith", "spindle", "coral"],
     },

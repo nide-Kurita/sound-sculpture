@@ -181,7 +181,7 @@ const VITA: VisualStyleConfig = {
   membrane: {
     visible: true,
     vita: true,
-    opacityScale: 1.9,
+    opacityScale: 1.45,
     completedOpacity: 0.2,
     freezeTarget: 0.24,
   },
