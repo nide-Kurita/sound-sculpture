@@ -302,10 +302,9 @@ const pearlColorMix = {
  *
  * 曲の音色軸 `SpeciesProfile.mineral`（0=丸み, 1=鉱物）で、結晶ファセット・鋭い稜・棘を
  * 桁で増減する。丸み端（axis≈0）は現状 vita 完成形を基準に崩さない。
- * **仮値。無音で決めない**（handoff の鉄則。ブルーム・肌理とも無音仮値が実機で倍以上変わっている）。
- * dev パネル「音色で形（鉱物/丸み）」で曲を鳴らしながら決め、DEFAULT_* へ焼き込む。
+ * 2026-08-18、実機で曲を鳴らして 1.45 に確定。
  */
-const DEFAULT_MINERAL_FACET_STRENGTH = 1;
+const DEFAULT_MINERAL_FACET_STRENGTH = 1.45;
 const mineralMix = {
   /** 音色軸の上書き。< 0 で自動（曲の mineral を使う）、0..1 で強制（dev 検証用）。 */
   axisOverride: -1,
@@ -334,6 +333,8 @@ const mineralDebug = {
   aggressive: 0,
   /** dev パネルで軸を固定しているか */
   override: false,
+  /** いま結晶になっている面の枚数（0〜18）。LIVE で鉱物が読めるかの実体 */
+  crystalFaces: 0,
   /** 以下は calibration 用の生の曲平均（合成軸のように飽和しない） */
   loudRatio: 0,
   brightness: 0,
@@ -2320,6 +2321,12 @@ class SoundSculpture {
   private static readonly MATURITY_LOUD_GAIN = 1.5;
   /** 蓄積量は序盤で急に伸びるので、凸変換で進行度に近い曲線へ寄せる */
   private static readonly MATURITY_POWER = 1.7;
+  /**
+   * 結晶面の**床**（[P1] 2026-08-17）。軸が上がった時点で最終枚数のこの割合までは
+   * LIVE で開く。0 にすると `軸 × 熟成度` に戻り、**LIVE で鉱物が読めなくなる**。
+   * 1 にすると曲が進んでも枚数が増えない（軌跡が消える）。**実機で詰める値。**
+   */
+  private static readonly GEM_FACE_FLOOR = 0.55;
 
   /** プール済み Points の未使用頂点を描画しない（初期のゴミ粒対策） */
   private static parkPointsGeometry(geometry: THREE.BufferGeometry) {
@@ -2483,6 +2490,8 @@ class SoundSculpture {
    * **単調増加**（下がると「戻った」に見えるし、蓄積の原則に反する）。
    */
   private maturity = 0;
+  /** Complete を押した時点の熟成度。完成アニメーションはここから 1 へ補間する */
+  private maturityAtComplete = 0;
   private spectralPhase = 0;
   private carvingPhase = 0;
   private formStretch = 0;
@@ -3054,10 +3063,11 @@ class SoundSculpture {
    */
   private updateMaturity(deltaTime: number) {
     if (this.completed) {
-      // 完成: 上限 → 1 を完成アニメーションに乗せる（瞬間の段差を作らない）
-      const target =
-        SoundSculpture.MATURITY_LIVE_CEILING +
-        (1 - SoundSculpture.MATURITY_LIVE_CEILING) * smoothstep(0, 1, this.completionProgress);
+      // 完成: **押した時点の熟成度**から 1 へ、完成アニメーションに乗せて上げる。
+      // 以前は `0.9 + 0.1*ease` を target にしていたので、10 秒で Complete した場合に
+      // 熟成度 0.07 → 0.9 が**最初の 1 フレームで**起きていた（2026-08-17 の実機指摘の原因2）。
+      const start = this.maturityAtComplete;
+      const target = start + (1 - start) * smoothstep(0, 1, this.completionProgress);
       this.maturity = Math.max(this.maturity, target);
       return;
     }
@@ -4098,6 +4108,14 @@ class SoundSculpture {
     this.speciesProfile = species;
     // 熟成度は**どの状態でも**進める（形の凍結中・完成後も含む）。[P1]
     this.updateMaturity(deltaTime);
+    // **結晶面の選択もどの状態でも毎フレーム更新する。**
+    // 2026-08-17 まで `syncGemFacets()` の呼び出しは dev パネル用の `applyLiveTuningNow()` と
+    // 完成後の `updateAfterlife()` にしか無く、**通常の再生中は一度も呼ばれていなかった**。
+    // そのため軸が 1.0 まで上がっても結晶面は 0 枚のままで、
+    // 「LIVE で鉱物感がまったく出ない／完了した瞬間に一気に鉱物化する」の**真の原因**だった
+    // （2026-08-12 に「宝石強度を 2 にしても変わらない」と実測していたのも同じ理由）。
+    // ワールド法線（`uGemPlanesWorld`）も毎フレーム更新が要るので、ここが正しい呼び場所。
+    this.syncGemFacets();
     this.liveAfterlife = deriveAfterlifeMaterial(
       this.completionPalette ?? this.liveSongPalette ?? NEUTRAL_SCULPTURE_PALETTE,
       species,
@@ -4779,6 +4797,8 @@ class SoundSculpture {
     this.shapeHold = false;
     this.completionProgress = 0;
     this.completionSettle = 0;
+    // 完成アニメーションの始点。**固定値から始めない**（10 秒 Complete で段差になる）
+    this.maturityAtComplete = this.maturity;
     // **呼吸はリセットしない**（[P1]）。形成中から `updateLiveBreath` が同じ位相で回していて、
     // 膜の地がそこへ寄せてある。ここで 0 に戻すと完成の瞬間に呼吸の位相が飛ぶ。
     const bpm = latestRhythm.bpm;
@@ -5153,6 +5173,7 @@ class SoundSculpture {
     this.activeFormingTime = 0;
     this.soundExposure = 0;
     this.maturity = 0;
+    this.maturityAtComplete = 0;
     this.spectralPhase = 0;
     this.carvingPhase = 0;
     this.formStretch = 0;
@@ -6066,9 +6087,17 @@ class SoundSculpture {
    * ここで回してから渡し、シェーダ側は `viewMatrix` でビュー空間へ落とす。
    */
   private syncGemFacets() {
-    // 軸＝**最終的に**結晶になる面の枚数 / 熟成度＝いま何枚目まで結晶化したか（[P1] step 2）。
-    // 軸だけだと 10〜40 秒で飽和して枚数が序盤で止まる（Fury は 40 秒で 18 面すべて）。
-    const axis = this.getMineralAxis() * (this.style.membrane.vita ? this.getMaturity() : 1);
+    // 軸＝**その曲が最終的にどれだけ鉱物か** / 熟成度＝そこへ向かう進み具合。
+    //
+    // **`軸 × 熟成度` の素掛けにしてはいけない**（2026-08-17 の実機指摘の直接原因）。
+    // Fury を 10 秒で Complete したとき、軸が 0.96 まで上がっていても熟成度が 0.07 だったので
+    // 実効 0.067 ＝ **結晶面 0.0/18**。LIVE で鉱物がまったく読めず、完成の瞬間に全面が開いて
+    // 「一気に鉱物化」して見えていた（実測は handoff 3章）。
+    // そこで**床**を持たせる: 軸が上がった時点で最終枚数の `FLOOR` ぶんは LIVE で開き、
+    // 残りを熟成度で開く。軸 0 の曲は掛け算なので**枚数 0 のまま＝完全な恒等**を保つ。
+    const faceGate = SoundSculpture.GEM_FACE_FLOOR +
+      (1 - SoundSculpture.GEM_FACE_FLOOR) * this.getMaturity();
+    const axis = this.getMineralAxis() * (this.style.membrane.vita ? faceGate : 1);
     const planes = gemUniforms.uGemPlanes.value;
     const world = gemUniforms.uGemPlanesWorld.value;
     gemUniforms.uMineral.value = axis;
@@ -6095,6 +6124,14 @@ class SoundSculpture {
   }
 
   /** 結晶になっている面の割合 0..1（完成時の磨きの量に使う）。 */
+  /**
+   * いま結晶になっている面の枚数（0〜18。部分的に開いた面は小数）。
+   * dev 表示・`mineral_short_complete.js` 用。**LIVE で鉱物が読めるかは枚数で測る。**
+   */
+  getCrystalFaceCount(): number {
+    return this.getCrystalFaceRatio() * SoundSculpture.facetCount;
+  }
+
   private getCrystalFaceRatio(): number {
     let sum = 0;
     for (let k = 0; k < SoundSculpture.facetCount; k += 1) {
@@ -12142,6 +12179,8 @@ const advanceSculptureSimulation = (
     mineralDebug.organic = speciesProfile.organic;
     mineralDebug.aggressive = speciesProfile.aggressive;
     mineralDebug.override = mineralMix.axisOverride >= 0;
+    mineralDebug.crystalFaces =
+      (sculpture as { getCrystalFaceCount?: () => number }).getCrystalFaceCount?.() ?? 0;
     const raw = speciesProfiler.getMineralInputs();
     mineralDebug.loudRatio = raw.loudRatio;
     mineralDebug.brightness = raw.brightness;
@@ -12190,9 +12229,21 @@ const render = () => {
   let speciesProfile = speciesProfiler.getProfile();
   let waveform: Uint8Array | null = null;
   let bandMeters: BandMeterSnapshot | null = null;
-  // 完成すると advanceSculptureSimulation を通らなくなるので、完成フラグはここで拾う
-  // （[P1] step 0 の計測用。`maturity_probe.js` が曲の終わりを検出できないと止まらない）。
+  // **完成すると advanceSculptureSimulation を通らない**ので、完成後も動く値はここで拾う。
+  // これを忘れると完成後の読み出しが LIVE 最終フレームのまま固まり、
+  // 「完成後も熟成度 0.07・結晶面 0/18」という嘘の数字を見て判断することになる
+  // （2026-08-17 に実際そうなった）。
   maturityDebug.completed = isComplete;
+  if (devSurface) {
+    const s = sculpture as {
+      getMaturity?: () => number;
+      getCrystalFaceCount?: () => number;
+      getMineralAxis?: () => number;
+    };
+    maturityDebug.maturity = s.getMaturity?.() ?? maturityDebug.maturity;
+    mineralDebug.crystalFaces = s.getCrystalFaceCount?.() ?? mineralDebug.crystalFaces;
+    mineralDebug.axis = s.getMineralAxis?.() ?? mineralDebug.axis;
+  }
 
   if (isAudioReady && !isComplete && audioInput.isDeterministic()) {
     const steps = audioInput.drainSimulationSteps();
@@ -13473,6 +13524,7 @@ const initMineralPanel = () => {
       `軸 ${mineralDebug.axis.toFixed(2)}（${mineralDebug.override ? "固定" : "自動"}）` +
       ` / グリット平均 ${mineralDebug.gritAvg.toFixed(3)}` +
       ` / 曲の軸 ${mineralDebug.mineral.toFixed(2)}` +
+      ` / 結晶面 ${mineralDebug.crystalFaces.toFixed(1)}/18` +
       ` / organic ${mineralDebug.organic.toFixed(2)}`;
     requestAnimationFrame(refreshReadout);
   };

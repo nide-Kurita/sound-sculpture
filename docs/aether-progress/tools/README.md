@@ -244,3 +244,10 @@ node maturity_fit.js /tmp/mat scalarMean
 # **第2引数 0 で「曲を最後まで聴いてから」**。途中で Complete を押すと熟成度が低いままで判定にならない
 node maturity_sweep.js /tmp/matsweep 0 Fury 4
 ```
+
+```sh
+# **ユーザーの実機手順の再現**: 曲を N 秒だけ鳴らして Complete を押す（既定 10 秒）。
+# 軸 / 熟成度 / **結晶面の枚数** の時系列と、LIVE・完成+1秒・完成+12秒の指標を出す。
+# 「LIVE で鉱物が出ない／完了で一気に出る」系はまずこれ。曲を最後まで流す計測では見えない経路
+node mineral_short_complete.js /tmp/short 10 Fury 4
+```

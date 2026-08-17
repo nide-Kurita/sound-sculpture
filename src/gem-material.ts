@@ -33,14 +33,14 @@ export const DEFAULT_GEM_BODY_DARK = 0.45;
 /** 面の境界（稜）の明線の強さ */
 export const DEFAULT_GEM_RIDGE = 1.1;
 
-/** 分散（fire）の色づき。0 で白のみ＝色は完全に脇役 */
-export const DEFAULT_GEM_FIRE = 0.35;
+/** 分散（fire）の色づき。2026-08-18 実機確定 */
+export const DEFAULT_GEM_FIRE = 1;
 
 /** 面の閃き（ビュー空間固定のキーライト2灯による鋭いスペキュラ） */
 export const DEFAULT_GEM_SPARKLE = 1;
 
-/** 透過っぽい回り込み光（水晶らしさ）。地を暗くしたぶんをここで「透けて」見せる */
-export const DEFAULT_GEM_THROUGH = 0.5;
+/** 透過っぽい回り込み光（水晶らしさ）。2026-08-18 実機確定 */
+export const DEFAULT_GEM_THROUGH = 1.5;
 
 /** 結晶面の roughness 倍率（小さいほど鋭い映り込み） */
 export const DEFAULT_GEM_ROUGHNESS_MUL = 0.12;
