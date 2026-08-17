@@ -3,7 +3,7 @@ import type { StructureSnapshot } from "./structure-tracker";
 import type { SpeciesProfile } from "./species-profile";
 import type { SculpturePalette } from "./audio-palette";
 
-export type SculptureMode = "classic" | "lumen";
+export type SculptureMode = "classic" | "lumen" | "volume" | "aether";
 
 export type AudioBands = {
   /** サブ低域 (キック胴・フロアタム) 30–120 Hz */
@@ -76,6 +76,14 @@ export type RhythmEvents = {
    * 持続レベルではなく「立ち上がり」— 聴感反応の主役に使う。
    */
   melodyOnset: number;
+  /**
+   * 帯域ごとに「直近の自分自身」と比べてどれだけ目立つ攻撃かを表す 0–1。
+   * kick/snare/hat/chop のような楽器別分類とは独立に、ジャンルを問わず
+   * low/mid/high それぞれの「今の瞬間の主役」を拾うための汎用トップアップ。
+   */
+  salienceLow: number;
+  salienceMid: number;
+  salienceHigh: number;
   /** オシロ表示用 */
   subLevel: number;
   wavePeak: number;

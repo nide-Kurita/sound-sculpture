@@ -44,6 +44,43 @@ export type SculpturePalette = {
  */
 const HUE_STOPS = [0.03, 0.09, 0.2, 0.42, 0.58, 0.78];
 
+/**
+ * 曲による色の振れ幅（2026-08-10 追加）。
+ *
+ * 経緯: 実曲4曲の完成形を並べたところ、**一番目立つ差が色になっていた**
+ * （緑 / 淡青 / 淡青 / 橙。実測の色相の広がりは 0.436 で、0.5 = 補色）。
+ * ユーザーはこれを明確に非とした:
+ * 「色が前に出過ぎている。色は脇役です。色の目的は気候や時間、作った環境で変化を出すこと。」
+ *
+ * ただし**曲による色差を消すのは誤り**（「曲ごとに色の違いが出るのは面白い」とも言っている。
+ * 天気 / 時間 / 音楽性による色変化を殺すのは過去に却下されている禁止事項）。
+ * そこで HUE_STOPS のマッピング自体は触らず、**アンカーへ向けて畳む**。
+ * 曲どうしの前後関係（どの曲がどちら寄りか）は保たれ、振れ幅だけが縮む。
+ *
+ * SPAN = 1 で従来どおり、0 で曲による差が消える。
+ * dev パネル（`?surface=dev` の「曲の色の幅」）で実機調整できる。
+ */
+export const DEFAULT_SONG_HUE_SPAN = 0.4;
+/** 彩度の振れ幅。色相だけ縮めてもビビッドさの差が残ると色が前に出る */
+export const DEFAULT_SONG_SAT_SPAN = 0.55;
+
+/**
+ * 畳む中心。**無音時のフォールバック（`deriveSculpturePalette(null)`）の値と一致させてある**
+ * ので、SPAN を 0 にすると「音が無いときの色」にちょうど落ちる。
+ * 値は null 時の既定入力から計算して求めた（hue 0.1263 / saturation 0.6468）。
+ * `HUE_STOPS` や null 時の既定入力を変えたらここも計算し直すこと。
+ */
+const SONG_HUE_ANCHOR = 0.1263;
+const SONG_SAT_ANCHOR = 0.6468;
+
+/** dev パネルと共有する現在値（実機で決めた値は DEFAULT_* へ焼き込む） */
+export const songColorSpan = {
+  hue: DEFAULT_SONG_HUE_SPAN,
+  sat: DEFAULT_SONG_SAT_SPAN,
+};
+const SONG_HUE_SPAN_REF = () => songColorSpan.hue;
+const SONG_SAT_SPAN_REF = () => songColorSpan.sat;
+
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const clampRange = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
@@ -155,13 +192,16 @@ export const deriveSculpturePalette = (
     hardMat *
     (highRatio * 0.08 + attackGate * 0.06 + variation * 0.05 - midRatio * 0.04 - loudHard * 0.03);
 
-  const hue = clampRange(
+  const hueFull = clampRange(
     hueAlong + softFan + hardFan - warmAxis * 0.04 + coolAxis * 0.08 + grooveAxis * 0.03,
     0.02,
     0.86,
   );
+  // 曲による色差を「脇役」の幅へ畳む。曲どうしの前後関係（明るい曲ほど寒色側 など）は
+  // そのまま保ち、振れ幅だけを縮める。詳細は SONG_HUE_SPAN のコメント。
+  const hue = wrapHue(SONG_HUE_ANCHOR + (hueFull - SONG_HUE_ANCHOR) * SONG_HUE_SPAN_REF());
 
-  const saturation = clampRange(
+  const saturationFull = clampRange(
     0.18 +
       contrast * 0.55 +
       softDyn * 0.48 +
@@ -170,6 +210,13 @@ export const deriveSculpturePalette = (
       coolAxis * 0.12 -
       hardMat * 0.18 -
       loudHard * 0.08,
+    0.14,
+    0.96,
+  );
+  // 彩度も同じ考え方で畳む。色相だけ縮めても、ビビッドさが曲ごとに大きく違うと
+  // やはり色が第一印象を持っていく。
+  const saturation = clampRange(
+    SONG_SAT_ANCHOR + (saturationFull - SONG_SAT_ANCHOR) * SONG_SAT_SPAN_REF(),
     0.14,
     0.96,
   );

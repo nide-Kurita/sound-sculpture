@@ -2,3 +2,10 @@ node_modules/
 dist/
 .DS_Store
 *.local
+
+# Dev Audio 用の WAV。原曲は music-original/ に置いてあり、そこから再生成できる。
+# headless の Chrome for Testing は proprietary codec を持たないので m4a / mp3 が再生できず、
+# 検証には WAV が要る。ただし全曲ぶんで 435MB あるので commit しない。
+#   for f in music-original/*; do b=$(basename "$f"); \
+#     afconvert -f WAVE -d LEI16@44100 "$f" "src/music/${b%.*}.wav"; done
+src/music/*.wav

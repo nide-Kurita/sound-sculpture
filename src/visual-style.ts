@@ -3,19 +3,28 @@
  * URL は `?style=` で切替え。デフォルトは vita。
  *
  * 公開: vita / metamorphosis / monolith
- * DEV のみ: dither / lumen（`?style=`）
+ * DEV のみ: dither / lumen / volume / aether（`?style=`）
  *
  * - vita:          生命に振り切る。暗い環境で膜が真珠光沢に輝き、完成後も呼吸を続ける（基本）
  * - metamorphosis: 形成中は生命体、音が止まると石化・結晶化して彫刻として完成する
  * - monolith:      彫刻に振り切る。膜なし・素材感重視、完成でギャラリー照明が灯る
  * - dither:        黒背景に Ordered Dither（網点）の有機ブロブ。vitekvisuals 系の見た目
  * - lumen:         闇の虚空で音が物質を削る。低域＝質量、高域＝輪郭、トランジェント＝剥離
+ * - volume:        球を捨て、密度場へ音を堆積させて等値面を彫刻にする（穴・枝・空洞が出る）
+ * - aether:        半透明の光の体積。音を密度場へ堆積しレイマーチで描く（vita 雰囲気を継承）
  */
 
 import { isDevSurface } from "./app-surface";
 import type { SculptureMode } from "./sculpture-types";
 
-export type VisualStyleId = "metamorphosis" | "vita" | "monolith" | "dither" | "lumen";
+export type VisualStyleId =
+  | "metamorphosis"
+  | "vita"
+  | "monolith"
+  | "dither"
+  | "lumen"
+  | "volume"
+  | "aether";
 
 /** 統合された作品モード ID（URL `style` パラメータ） */
 export type ExperienceId = VisualStyleId;
@@ -54,7 +63,15 @@ export type VisualStyleEnv = {
   ambient: number;
   ambientComplete: number;
   stars: boolean;
+  /** PMREM(RoomEnvironment) を `scene.environment` に入れる（monolith 系）。vita では使わない */
   environmentMap: boolean;
+  /**
+   * 彫刻のマテリアルにだけ差す暗い自作環境（vita）。`scene.environment` には入れない。
+   * RoomEnvironment を使うと暗い配色が白く洗われるため、その代替（vita-environment.ts）。
+   */
+  abyssEnvironment?: boolean;
+  /** `abyssEnvironment` の映り込み量。未指定なら vita-environment.ts の既定値 */
+  envMapIntensity?: number;
   pedestal: boolean;
   spotlight: boolean;
   spotlightIntensity: number;
@@ -111,8 +128,28 @@ export type VisualStyleConfig = {
   completion: {
     mode: "petrify" | "breathe" | "monolith";
     seconds: number;
+    /**
+     * 完成フェーズでだけ立ち上げる質感（形成中は使わない）。
+     * 演奏中と完成後を「別のフェーズ」にするための層。
+     * 形成中に clearcoat / sheen / iridescence を足すと回転時に色が飛ぶため、
+     * ここは完成後（形が確定して動きが止まったあと）専用に扱う。
+     * 未指定のスタイルは従来どおり completion.mode の処理だけが効く。
+     */
+    finish?: CompletionFinish;
   };
   env: VisualStyleEnv;
+};
+
+/** 完成フェーズの質感。値は ease（0→1）と種プロファイルで立ち上がる */
+export type CompletionFinish = {
+  clearcoat?: number;
+  clearcoatRoughness?: number;
+  sheen?: number;
+  sheenRoughness?: number;
+  iridescence?: number;
+  iridescenceIOR?: number;
+  /** 完成時に roughness をこの値へ寄せる（未指定なら mode 側の値を維持） */
+  roughness?: number;
 };
 
 /** 全スタイル共通のイントロコピー（index.html の初期文言・改行と一致） */
@@ -203,7 +240,21 @@ const VITA: VisualStyleConfig = {
     clearcoat: 0,
     pearlVariation: 0.82,
   },
-  completion: { mode: "breathe", seconds: 6 },
+  completion: {
+    mode: "breathe",
+    seconds: 6,
+    // 完成すると膜の真珠光沢が粘土側へ移り、「生きもの」から「作品」へ質が変わる。
+    // clearcoatRoughness / sheenRoughness は高めに保ち、回転時のスペキュラ白飛びを避ける。
+    finish: {
+      clearcoat: 0.42,
+      clearcoatRoughness: 0.62,
+      sheen: 0.55,
+      sheenRoughness: 0.8,
+      iridescence: 0.34,
+      iridescenceIOR: 1.32,
+      roughness: 0.78,
+    },
+  },
   env: {
     background: 0x082838,
     backgroundComplete: 0x0a2030,
@@ -217,6 +268,10 @@ const VITA: VisualStyleConfig = {
     ambientComplete: 0.58,
     stars: true,
     environmentMap: false,
+    // 明るい部屋（RoomEnvironment）ではなく、背景と同じ暗さの自作環境を彫刻にだけ映す
+    abyssEnvironment: true,
+    // 2026-08-10 にユーザーが実機で曲を鳴らして確定した値
+    envMapIntensity: 0.74,
     pedestal: false,
     spotlight: false,
     spotlightIntensity: 0,
@@ -395,12 +450,143 @@ const LUMEN: VisualStyleConfig = {
   },
 };
 
+/**
+ * volume: 密度場ベース。造形は VolumeSculpture 側が持つので、
+ * ここでは背景・ライティングなど環境まわりだけを定義する。
+ */
+const VOLUME: VisualStyleConfig = {
+  id: "volume",
+  label: "体積 — Sound Accretes Matter",
+  themeDark: true,
+  membrane: {
+    visible: false,
+    vita: false,
+    opacityScale: 0,
+    completedOpacity: 0,
+    freezeTarget: 0.3,
+  },
+  particlesVisible: false,
+  idleWobble: 0,
+  core: {
+    color: 0x9aa6c4,
+    innerColor: 0x3e4a62,
+    roughness: 0.86,
+    hueBase: 0.6,
+    hslSatBase: 0.22,
+    hslLightBase: 0.52,
+    shiftScale: 0.5,
+    emissiveScale: 0.6,
+    sheen: 0,
+    sheenColor: 0x9fd9ff,
+    iridescence: 0,
+    clearcoat: 0,
+    pearlVariation: 0,
+  },
+  completion: { mode: "breathe", seconds: 6 },
+  env: {
+    background: 0x0a1a26,
+    backgroundComplete: 0x0c1e2c,
+    exposure: 1.06,
+    key: 1.5,
+    keyComplete: 1.35,
+    fill: 0.55,
+    fillComplete: 0.48,
+    ambient: 0.75,
+    ambientComplete: 0.65,
+    stars: true,
+    // 等値面は素材感が主役になるので、反射する環境を与える
+    environmentMap: true,
+    pedestal: false,
+    spotlight: false,
+    spotlightIntensity: 0,
+    cameraFar: 220,
+    hemisphereGround: 0x020609,
+    fillColor: 0x2a5a78,
+    rimLightIntensity: 0.34,
+    rimLightColor: 0x6ecfff,
+    backgroundProfile: {
+      domeVariant: "abyss",
+      openVoid: true,
+      biolumeMotes: true,
+      fogDensity: 0.0016,
+    },
+  },
+};
+
+/**
+ * aether: 半透明の光体積。造形は AetherSculpture 側。
+ * 目標見た目は参考動画 画面収録 2026-08-07 0.53.09（明るいミント地に柔らかい光の塊）。
+ * 天気・時刻のフックは残すが、背景は vita の深海ではなく参考動画の淡色平面に合わせる。
+ */
+const AETHER: VisualStyleConfig = {
+  id: "aether",
+  label: "光体積 — Soft Volume Light",
+  themeDark: false,
+  membrane: {
+    visible: false,
+    vita: false,
+    opacityScale: 0,
+    completedOpacity: 0,
+    freezeTarget: 0.3,
+  },
+  particlesVisible: false,
+  idleWobble: 0,
+  core: {
+    color: 0xff7a4a,
+    innerColor: 0x0a1020,
+    roughness: 1,
+    hueBase: 0.055,
+    hslSatBase: 0.55,
+    hslLightBase: 0.55,
+    shiftScale: 0.45,
+    emissiveScale: 1.2,
+    sheen: 0,
+    sheenColor: 0xffffff,
+    iridescence: 0,
+    clearcoat: 0,
+    pearlVariation: 0,
+  },
+  completion: { mode: "breathe", seconds: 6 },
+  env: {
+    // 参考動画 0.53.09: フラットな淡ミント／オフホワイト。
+    // 実測すると参考の背景は #d4e8e1。0xc5ddd6 は一段暗く、塊の淡い縁が
+    // 背景より明るくなって輪郭が浮いていた（aether-sculpture.ts の pale と対で使う）
+    background: 0xd4e8e1,
+    backgroundComplete: 0xc4d8d1,
+    exposure: 1.0,
+    // 体積は自己発光。外部ライトは最小限
+    key: 0.12,
+    keyComplete: 0.1,
+    fill: 0.18,
+    fillComplete: 0.14,
+    ambient: 0.9,
+    ambientComplete: 0.75,
+    stars: false,
+    environmentMap: false,
+    pedestal: false,
+    spotlight: false,
+    spotlightIntensity: 0,
+    cameraFar: 80,
+    hemisphereGround: 0xa8c4be,
+    fillColor: 0xd0e8e2,
+    rimLightIntensity: 0,
+    rimLightColor: 0xffffff,
+    backgroundProfile: {
+      openVoid: true,
+      noStars: true,
+      fogDensity: 0.00035,
+    },
+  },
+};
+
 export const VISUAL_STYLE_CATALOG: readonly VisualStyleConfig[] = [
   VITA,
   METAMORPHOSIS,
   MONOLITH,
   DITHER,
   LUMEN,
+  VOLUME,
+  AETHER,
 ];
 
 export type ExperienceEntry = {
@@ -467,6 +653,28 @@ export const EXPERIENCE_CATALOG: readonly ExperienceEntry[] = [
     introDescriptionEn:
       "In a dark void, sound carves matter. Bass is mass, treble is edge, transients flake away the surface.",
   },
+  {
+    id: "volume",
+    label: VOLUME.label,
+    sculptureMode: "volume",
+    visualStyleId: "volume",
+    introTitle: "体積の彫刻",
+    introDescription:
+      "音が空間そのものへ堆積する。\n低音は塊を育て、中音は枝を伸ばし、\n高音は孔を穿ちます。",
+    introDescriptionEn:
+      "Sound accretes into space itself. Bass grows mass, mids extend branches, highs bore holes.",
+  },
+  {
+    id: "aether",
+    label: AETHER.label,
+    sculptureMode: "aether",
+    visualStyleId: "aether",
+    introTitle: "光の体積",
+    introDescription:
+      "音が空間に光の質量を積み上げる。\n低音は中心の塊、中音は伸びる筋、\n高音は粒立つ輝きとして残ります。",
+    introDescriptionEn:
+      "Sound stacks luminous mass into space. Bass grows the core, mids draw filaments, highs leave grained glow.",
+  },
 ];
 
 /** 公開 UI・公開 URL で使うカタログ（生命 / 変容 / 彫刻） */
@@ -496,6 +704,8 @@ export const parseExperienceId = (): ExperienceId => {
   else if (style === "monolith") id = "monolith";
   else if (style === "dither") id = "dither";
   else if (style === "lumen") id = "lumen";
+  else if (style === "volume") id = "volume";
+  else if (style === "aether") id = "aether";
 
   if (!isDevSurface() && !isPublicExperienceId(id)) {
     return "vita";

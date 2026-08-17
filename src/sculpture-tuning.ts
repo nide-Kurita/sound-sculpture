@@ -244,11 +244,145 @@ export const TUNING_SLIDER_SPECS: TuningSliderSpec[] = [
   },
 ];
 
+/** vita のブルーム（`SimpleBloomPass`）の現在値。パネルで追い込んだ値を報告に含めるため */
+export type BloomTuningSnapshot = {
+  enabled: boolean;
+  threshold: number;
+  strength: number;
+};
+
+/** vita の映り込み（`vita-environment.ts` の暗い環境マップ）の現在値 */
+export type EnvTuningSnapshot = {
+  enabled: boolean;
+  intensity: number;
+};
+
+/** vita の粘土の肌理（`clay-grain.ts` の法線摂動）の現在値 */
+export type ClayGrainTuningSnapshot = {
+  strength: number;
+  scale: number;
+};
+
+/** 曲による色の振れ幅（`audio-palette.ts` の songColorSpan）の現在値 */
+export type SongColorTuningSnapshot = {
+  hueSpan: number;
+  satSpan: number;
+};
+
+/** vita の膜の折り重なりほどき（`main.ts` の membraneRelax）の現在値 */
+export type MembraneRelaxTuningSnapshot = {
+  enabled: boolean;
+  iterations: number;
+  strength: number;
+};
+
+/** vita の面内混色（`main.ts` の pearlColorMix）の現在値 */
+export type PearlColorMixTuningSnapshot = {
+  enabled: boolean;
+  spread: number;
+  balance: number;
+};
+
+/**
+ * vita の宝石（鉱物）の面（`gem-material.ts` の gemUniforms）の現在値。
+ * `axis` は**そのとき鳴っていた曲の音色軸**（自動なら曲が決めた値）。
+ * 強度を判断するには軸がいくつだったかが要る（軸 0 なら何をしても出ない）。
+ */
+export type GemTuningSnapshot = {
+  axis: number;
+  axisOverride: boolean;
+  facetStrength: number;
+  gem: number;
+  bodyDark: number;
+  ridge: number;
+  sparkle: number;
+  through: number;
+  fire: number;
+};
+
 export const formatSculptureTuningForAgent = (
   knobs: SculptureTuning = sculptureTuning,
   runtime: RuntimeSculptureTuning = runtimeTuning,
   growthAlgorithm = "fibonacci",
+  bloom: BloomTuningSnapshot | null = null,
+  environment: EnvTuningSnapshot | null = null,
+  clayGrain: ClayGrainTuningSnapshot | null = null,
+  songColor: SongColorTuningSnapshot | null = null,
+  membraneRelax: MembraneRelaxTuningSnapshot | null = null,
+  pearlColorMix: PearlColorMixTuningSnapshot | null = null,
+  gem: GemTuningSnapshot | null = null,
 ) => {
+  const bloomLines = bloom
+    ? [
+        "",
+        "ブルーム（vita・bloom-pass.ts の DEFAULT_BLOOM_* へ焼き込む値）:",
+        "",
+        "```json",
+        JSON.stringify(bloom, null, 2),
+        "```",
+      ]
+    : [];
+  const environmentLines = environment
+    ? [
+        "",
+        "映り込み（vita・visual-style.ts の VITA.env.envMapIntensity へ焼き込む値）:",
+        "",
+        "```json",
+        JSON.stringify(environment, null, 2),
+        "```",
+      ]
+    : [];
+  const clayGrainLines = clayGrain
+    ? [
+        "",
+        "粘土の肌理（vita・clay-grain.ts の DEFAULT_CLAY_GRAIN_* へ焼き込む値）:",
+        "",
+        "```json",
+        JSON.stringify(clayGrain, null, 2),
+        "```",
+      ]
+    : [];
+  const songColorLines = songColor
+    ? [
+        "",
+        "曲の色の幅（audio-palette.ts の DEFAULT_SONG_*_SPAN へ焼き込む値）:",
+        "",
+        "```json",
+        JSON.stringify(songColor, null, 2),
+        "```",
+      ]
+    : [];
+  const membraneRelaxLines = membraneRelax
+    ? [
+        "",
+        "膜の折り重なり（vita・main.ts の DEFAULT_MEMBRANE_RELAX_* へ焼き込む値）:",
+        "",
+        "```json",
+        JSON.stringify(membraneRelax, null, 2),
+        "```",
+      ]
+    : [];
+  const pearlColorMixLines = pearlColorMix
+    ? [
+        "",
+        "混色の広がり（vita・main.ts の DEFAULT_PEARL_MIX_* へ焼き込む値）:",
+        "",
+        "```json",
+        JSON.stringify(pearlColorMix, null, 2),
+        "```",
+      ]
+    : [];
+  const gemLines = gem
+    ? [
+        "",
+        "宝石の面（vita・gem-material.ts の DEFAULT_GEM_* へ焼き込む値）:",
+        "**axis は鳴らしていた曲の音色軸。0 なら結晶の面が1枚も無いので、何を上げても出ない。**",
+        "",
+        "```json",
+        JSON.stringify(gem, null, 2),
+        "```",
+      ]
+    : [];
   const lines = [
     "Sound Sculpture — 開発チューニング（AI agent 用）",
     "",
@@ -275,6 +409,13 @@ export const formatSculptureTuningForAgent = (
     "- mineral: 棘・結晶",
     "",
     `スライダー中央 F₈/F₉ ≈ ${FIB_SLIDER_DEFAULT.toFixed(3)} で従来の既定挙動。`,
+    ...bloomLines,
+    ...environmentLines,
+    ...clayGrainLines,
+    ...songColorLines,
+    ...membraneRelaxLines,
+    ...pearlColorMixLines,
+    ...gemLines,
   ];
   return lines.join("\n");
 };

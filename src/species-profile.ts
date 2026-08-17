@@ -5,6 +5,11 @@ export type SpeciesProfile = {
   organic: number;
   aggressive: number;
   rhythmic: number;
+  /**
+   * 音色の角ばり軸（0=有機/丸み, 1=鉱物/角・結晶）。グリット（歪み）× 明るさで作る。
+   * **vita ではこれが「結晶になる面の枚数」を決める**（強度ではない）。`computeMineral` 参照。
+   */
+  mineral: number;
   flowGain: number;
   spikeGain: number;
   crystalGain: number;
@@ -32,6 +37,8 @@ export const DEFAULT_SPECIES_PROFILE: SpeciesProfile = {
   organic: fibUnit(8, 13),
   aggressive: fibUnit(5, 13),
   rhythmic: fibUnit(5, 8),
+  // ウォームアップ中は結晶を出さない（≈0.034）。ここを上げると全曲の出だしで結晶が出る。
+  mineral: fibUnit(5, 13),
   flowGain: 1,
   spikeGain: 1,
   crystalGain: 1,
@@ -43,24 +50,51 @@ export const DEFAULT_SPECIES_PROFILE: SpeciesProfile = {
   confidence: 0,
 };
 
+/**
+ * 音色の角ばり軸（0=生物/丸み, 1=鉱物/結晶）。
+ * **グリット（プレゼンス帯のスペクトル平坦度＝歪み・ザラつき）× 明るさ**だけで作る。
+ * 歪んだギターは平坦度も高域も高く、アコースティックはどちらも低い。
+ *
+ * 2026-08-12 に 9 曲の実測から組み直した。**旧式は `- organic*0.4` を含んでいたが、
+ * organic は合成軸で 0/1 に飽和する**（6:00 と AIR が organic 1.0 に張り付き、
+ * grit が高いのに軸が 0 に潰れていた）。飽和しない生の曲平均だけで作ること。
+ *
+ * 実測（110 秒・自動軸）の grit×brightness:
+ *   Fury 0.171 / Fly Away 0.162 / 修羅場 0.140 / 6:00 0.135 ‖
+ *   Peaches 0.093 / AIR 0.088 / ロビンソン 0.082 ‖ I'm Yours 0.023 / Donna Lee 0.000
+ * 3 つの塊に分かれるので、下の 3 定数だけで目標帯へ写る。
+ * 再測は `docs/aether-progress/tools/mineral_axis_probe.js`（**逐次で回すこと**）。
+ */
+/** Fury（実測の上端）で 1 になる正規化 */
+const MINERAL_GRIT_REF = 0.17;
+/** これ以下は生物のまま（I'm Yours / Donna Lee） */
+const MINERAL_GRIT_LO = 0.12;
+/** これ以上は鉱石（Fury / Fly Away / 6:00） */
+const MINERAL_GRIT_HI = 0.9;
+const computeMineral = (grit: number, brightness: number): number =>
+  smoothstep(MINERAL_GRIT_LO, MINERAL_GRIT_HI, (grit * brightness) / MINERAL_GRIT_REF);
+
 const applyGains = (
   organic: number,
   aggressive: number,
   rhythmic: number,
+  mineral: number,
   finalized: boolean,
   confidence: number,
 ): SpeciesProfile => {
-  const mineral = 1 - organic;
+  // 既存 gains 用の「有機の逆」= 従来どおり 1-organic（音色軸 mineral とは別物）。
+  const mineralGain = 1 - organic;
 
   return {
     organic,
     aggressive,
     rhythmic,
+    mineral,
     flowGain: fibUnit(5, 8) + organic * fibRatio(8, 5),
     spikeGain: fibUnit(3, 8) + aggressive * fibUnit(8, 9),
-    crystalGain: fibUnit(2, 8) + aggressive * fibRatio(8, 2) + mineral * fibUnit(5, 13),
+    crystalGain: fibUnit(2, 8) + aggressive * fibRatio(8, 2) + mineralGain * fibUnit(5, 13),
     tentacleGain: fibUnit(3, 8) + organic * fibUnit(8, 9),
-    erosionGain: fibUnit(2, 8) + aggressive * fibRatio(5, 3) + mineral * fibUnit(3, 13),
+    erosionGain: fibUnit(2, 8) + aggressive * fibRatio(5, 3) + mineralGain * fibUnit(3, 13),
     fragmentGain: fibUnit(2, 8) + aggressive * fibRatio(8, 2),
     membraneGain: fibUnit(5, 8) + organic * fibUnit(8, 9) + rhythmic * fibUnit(5, 13),
     finalized,
@@ -159,6 +193,8 @@ export type SpeciesSampleInput = {
   transientRate: number;
   novelty: number;
   eventRate: number;
+  /** グリット（歪み/ザラつき）= プレゼンス帯のスペクトル平坦度。音色軸の主信号。 */
+  grit: number;
 };
 
 export class SpeciesProfiler {
@@ -178,6 +214,7 @@ export class SpeciesProfiler {
   private sumNovelty = 0;
   private sumEventRate = 0;
   private sumOverall = 0;
+  private sumGrit = 0;
   private loudSampleCount = 0;
   private softSampleCount = 0;
   private sumDensitySq = 0;
@@ -219,6 +256,7 @@ export class SpeciesProfiler {
     this.sumOverall = 0;
     this.loudSampleCount = 0;
     this.softSampleCount = 0;
+    this.sumGrit = 0;
     this.sumDensitySq = 0;
     this.sumTensionSq = 0;
     this.sumContrastSq = 0;
@@ -238,6 +276,32 @@ export class SpeciesProfiler {
     return this.profile;
   }
 
+  /**
+   * 曲全体のグリット平均 ＝ 音色軸 `mineral` の実際の主入力。
+   * dev 読み出し・calibration（9 曲の実測）で使う。
+   */
+  getAverageGrit(): number {
+    return this.sampleCount > 0 ? this.sumGrit / this.sampleCount : 0;
+  }
+
+  /**
+   * 音色軸の calibration に使う**生の**曲平均。
+   * `organic` / `aggressive` は合成軸で 0 や 1 に飽和する（6:00 と AIR が organic 1.0 に
+   * 張り付いて軸が潰れていた）ので、軸はこちらの生値から組む。
+   */
+  getMineralInputs() {
+    const a = this.getAverages();
+    return {
+      grit: a.avgGrit,
+      loudRatio: a.loudRatio,
+      brightness: a.avgBrightness,
+      melodyFocus: a.avgMelodyFocus,
+      centroid: a.avgCentroid,
+      transient: a.avgTransient,
+      density: a.avgDensity,
+    };
+  }
+
   private getAverages() {
     const n = Math.max(1, this.sampleCount);
     const avgDensity = this.sumDensity / n;
@@ -252,6 +316,7 @@ export class SpeciesProfiler {
     const avgNovelty = this.sumNovelty / n;
     const avgEventRate = this.sumEventRate / n;
     const avgOverall = this.sumOverall / n;
+    const avgGrit = this.sumGrit / n;
     const loudRatio = this.loudSampleCount / n;
     const softRatio = this.softSampleCount / n;
     const densityVar = Math.max(0, this.sumDensitySq / n - avgDensity * avgDensity);
@@ -284,6 +349,7 @@ export class SpeciesProfiler {
       avgNovelty,
       avgEventRate,
       avgOverall,
+      avgGrit,
       loudRatio,
       densityVar,
       tensionVar,
@@ -297,13 +363,20 @@ export class SpeciesProfiler {
     return smoothstep(this.warmupSeconds, this.warmupSeconds + 8, this.activeSeconds);
   }
 
-  private applyTargets(organic: number, aggressive: number, rhythmic: number, deltaTime: number) {
+  private applyTargets(
+    organic: number,
+    aggressive: number,
+    rhythmic: number,
+    mineral: number,
+    deltaTime: number,
+  ) {
     const confidence = this.getConfidence();
     const rate = Math.min(1, deltaTime * SPECIES_EMA_RATE * 3);
     const nextOrganic = this.profile.organic + (organic - this.profile.organic) * rate;
     const nextAggressive = this.profile.aggressive + (aggressive - this.profile.aggressive) * rate;
     const nextRhythmic = this.profile.rhythmic + (rhythmic - this.profile.rhythmic) * rate;
-    this.profile = applyGains(nextOrganic, nextAggressive, nextRhythmic, false, confidence);
+    const nextMineral = this.profile.mineral + (mineral - this.profile.mineral) * rate;
+    this.profile = applyGains(nextOrganic, nextAggressive, nextRhythmic, nextMineral, false, confidence);
   }
 
   update(input: SpeciesSampleInput, bands: BandLevels, deltaTime: number, isActive: boolean) {
@@ -325,6 +398,7 @@ export class SpeciesProfiler {
     this.sumNovelty += input.novelty;
     this.sumEventRate += input.eventRate;
     this.sumOverall += bands.overall;
+    this.sumGrit += input.grit;
     if (bands.overall > 0.66) {
       this.loudSampleCount += 1;
     }
@@ -374,7 +448,8 @@ export class SpeciesProfiler {
       avgs.brightnessVar,
       avgs.sectionContrast,
     );
-    this.applyTargets(organic, aggressive, rhythmic, deltaTime);
+    const mineral = computeMineral(avgs.avgGrit, avgs.avgBrightness);
+    this.applyTargets(organic, aggressive, rhythmic, mineral, deltaTime);
   }
 
   /**
@@ -412,7 +487,8 @@ export class SpeciesProfiler {
       avgs.brightnessVar,
       avgs.sectionContrast,
     );
-    this.profile = applyGains(organic, aggressive, rhythmic, true, 1);
+    const mineral = computeMineral(avgs.avgGrit, avgs.avgBrightness);
+    this.profile = applyGains(organic, aggressive, rhythmic, mineral, true, 1);
     return this.profile;
   }
 }

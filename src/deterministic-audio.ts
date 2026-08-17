@@ -19,6 +19,13 @@ export type DeterministicSpectralFrame = {
   melodyFocus: number;
   brightness: number;
   contrast: number;
+  /**
+   * プレゼンス帯（1.5–7kHz）のスペクトル平坦度＝歪み・ザラつきの「グリット」。
+   * 音色軸（鉱物 vs 生物）の主信号。**ライブ analyser の `readSpectralFlatness` と同じ式**
+   * （2026-08-12 追加。それ以前はここに平坦度が無く、`main.ts` 側で brightness/contrast から
+   * 代用していたため、Dev Audio の曲は歪みを一度も測れていなかった）。
+   */
+  flatness: number;
   peak: number;
   rms: number;
 };
@@ -159,6 +166,48 @@ const bandHybrid = (
   return sum / count * 0.28 + peak * 0.72;
 };
 
+const smoothstep = (edge0: number, edge1: number, value: number) => {
+  const x = Math.min(1, Math.max(0, (value - edge0) / (edge1 - edge0)));
+  return x * x * (3 - 2 * x);
+};
+
+/**
+ * スペクトル平坦度（幾何平均 / 算術平均）。トーナルな音は 0 に近く、広帯域のノイズ・歪みは
+ * 1 に近い。`AudioInput.readSpectralFlatness` と同じ式・同じゲート
+ * （帯域がほぼ無音のときは微小ノイズで 1 に張り付くのでエネルギーで殺す）。
+ */
+const bandFlatness = (
+  mags: Float32Array,
+  sampleRate: number,
+  minHz: number,
+  maxHz: number,
+) => {
+  const nyquist = sampleRate / 2;
+  const bins = mags.length;
+  const start = Math.max(0, Math.floor((minHz / nyquist) * bins));
+  const end = Math.min(bins - 1, Math.ceil((maxHz / nyquist) * bins));
+  if (end < start) {
+    return 0;
+  }
+  let logSum = 0;
+  let sum = 0;
+  let count = 0;
+  for (let i = start; i <= end; i += 1) {
+    // +イプシロンで log(0) を避ける。mags は Analyser の byte/255 相当のスケール。
+    const v = mags[i] + 1e-4;
+    logSum += Math.log(v);
+    sum += v;
+    count += 1;
+  }
+  if (count === 0 || sum <= 0) {
+    return 0;
+  }
+  const geoMean = Math.exp(logSum / count);
+  const arithMean = sum / count;
+  const flatness = Math.min(1, Math.max(0, geoMean / arithMean));
+  return flatness * smoothstep(0.02, 0.14, arithMean);
+};
+
 const bandCentroid = (
   mags: Float32Array,
   sampleRate: number,
@@ -233,6 +282,8 @@ export const buildDeterministicTimeline = (
     const overall = sub * 0.18 + low * 0.32 + mid * 0.2 + melody * 0.14 + high * 0.14;
     const spectralTotal = sub + low + mid + high + melody * 0.35 + 0.0001;
     const centroid = bandCentroid(mags, sampleRate, 24, 9000);
+    // 音色軸（鉱物 vs 生物）の主信号。歪みギターのグリットが乗るプレゼンス帯で測る。
+    const flatness = bandFlatness(mags, sampleRate, 1500, 7000);
     const bassFocus = (sub + low) / spectralTotal;
     const melodyFocus =
       melody / (sub * 0.55 + low * 0.7 + mid * 0.85 + high + melody * 0.4 + 0.0001);
@@ -256,6 +307,7 @@ export const buildDeterministicTimeline = (
       melodyFocus,
       brightness: Math.min(1, Math.max(0, brightness)),
       contrast: Math.min(1, Math.max(0, contrast)),
+      flatness,
       peak,
       rms: Math.sqrt(sumSq / fftSize),
     });
@@ -282,6 +334,7 @@ export const sampleDeterministicFrame = (
       melodyFocus: 0,
       brightness: 0,
       contrast: 0,
+      flatness: 0,
       peak: 0,
       rms: 0,
     };

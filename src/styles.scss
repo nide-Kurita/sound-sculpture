@@ -1017,22 +1017,43 @@ body {
   accent-color: #5a6e8c;
 }
 
-.light-rig-panel {
+.light-rig-panel,
+.bloom-panel,
+.env-panel,
+.grain-panel,
+.songcolor-panel,
+.capture-panel {
   margin: 0 0 1rem;
 }
 
-.light-rig-sliders {
+.light-rig-sliders,
+.bloom-sliders,
+.env-sliders,
+.grain-sliders,
+.songcolor-sliders {
   display: grid;
   gap: 0.45rem;
 }
 
-.light-rig-sliders .tuning-slider {
+.light-rig-sliders .tuning-slider,
+.bloom-sliders .tuning-slider,
+.env-sliders .tuning-slider,
+.grain-sliders .tuning-slider,
+.songcolor-sliders .tuning-slider {
   grid-template-columns: minmax(4.5rem, 0.9fr) minmax(0, 1.4fr) 2.6rem;
+}
+
+.capture-panel__note {
+  margin: 0 0 0.5rem;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  opacity: 0.72;
 }
 
 .daytime-preview__actions {
   display: flex;
   justify-content: flex-end;
+  gap: 0.4rem;
 }
 
 .daytime-preview__actions button {

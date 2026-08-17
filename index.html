@@ -228,7 +228,7 @@
           </div>
         </details>
 
-        <details class="control-group">
+        <details class="control-group" open>
           <summary class="control-group__summary">Settings</summary>
           <div class="control-group__body">
             <label class="sculpture-mode" id="experience-style-field">
@@ -360,6 +360,146 @@
               <div id="light-rig-sliders" class="light-rig-sliders"></div>
               <div class="daytime-preview__actions">
                 <button id="reset-light-rig" type="button">スタイル既定に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview bloom-panel" id="bloom-panel" hidden>
+              <p class="daytime-preview__label">
+                ブルーム（DEV・vitaのみ）
+                <span id="bloom-hint">即時反映</span>
+              </p>
+              <div id="bloom-sliders" class="bloom-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="toggle-bloom" type="button" data-label-on="ブルームOFF" data-label-off="ブルームON">
+                  ブルームOFF
+                </button>
+                <button id="reset-bloom" type="button">既定に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview env-panel" id="env-panel" hidden>
+              <p class="daytime-preview__label">
+                映り込み（DEV・vitaのみ）
+                <span id="env-hint">即時反映</span>
+              </p>
+              <div id="env-sliders" class="env-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="toggle-env" type="button" data-label-on="映り込みOFF" data-label-off="映り込みON">
+                  映り込みOFF
+                </button>
+                <button id="reset-env" type="button">既定に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview grain-panel" id="grain-panel" hidden>
+              <p class="daytime-preview__label">
+                粘土の肌理（DEV・vitaのみ）
+                <span id="grain-hint">即時反映</span>
+              </p>
+              <div id="grain-sliders" class="grain-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="toggle-grain" type="button" data-label-on="肌理OFF" data-label-off="肌理ON">
+                  肌理OFF
+                </button>
+                <button id="reset-grain" type="button">既定に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview grain-panel" id="membrane-panel" hidden>
+              <p class="daytime-preview__label">
+                膜の折り重なり（DEV・vitaのみ）
+                <span id="membrane-hint">即時反映</span>
+              </p>
+              <p class="capture-panel__note">
+                膜は core と同じ接線方向の変位を使うので、隣り合う頂点が別方向へ引かれると
+                面が交差して半透明の板が重なったように見えます。その高周波成分だけを
+                近傍平均で落とします。上げすぎると膜が真球に近づきます。
+              </p>
+              <div id="membrane-sliders" class="grain-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="toggle-membrane-relax" type="button" data-label-on="ほどきOFF" data-label-off="ほどきON">
+                  ほどきOFF
+                </button>
+                <button id="reset-membrane-relax" type="button">既定に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview songcolor-panel" id="songcolor-panel" hidden>
+              <p class="daytime-preview__label">
+                曲の色の幅（DEV）
+                <span id="songcolor-hint">次の完成から反映</span>
+              </p>
+              <p class="capture-panel__note">
+                曲による色の振れ幅。1 で従来（色相が色相環をほぼ一周する）、0 で曲による色差なし。
+                天気・時間・環境による色変化はこの値に関係なく効きます。
+                完成時の色を決める値なので、変えたら Reset して録り直してください。
+              </p>
+              <div id="songcolor-sliders" class="songcolor-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="reset-songcolor" type="button">既定に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview songcolor-panel" id="colormix-panel" hidden>
+              <p class="daytime-preview__label">
+                混色の広がり（DEV・vitaのみ）
+                <span id="colormix-hint">形成中は即時反映</span>
+              </p>
+              <p class="capture-panel__note">
+                時刻・天気・曲の色を面内で暖⇔寒の2極に開いて混ぜます。0 で従来（単色＋ノイズ）、
+                上げるほど1つの塊にオレンジと青が同居します。平均色は動かさないので、
+                天気・時間・曲による色変化はそのまま効きます。形成中の頂点カラー焼き直しで反映されます。
+              </p>
+              <div id="colormix-sliders" class="songcolor-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="toggle-colormix" type="button" data-label-on="混色OFF" data-label-off="混色ON">
+                  混色OFF
+                </button>
+                <button id="reset-colormix" type="button">既定に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview songcolor-panel" id="maturity-panel" hidden>
+              <p class="daytime-preview__label">
+                熟成度（LIVE→完成の軌跡・DEV・vitaのみ）
+                <span id="maturity-hint">即時反映</span>
+              </p>
+              <p class="capture-panel__note">
+                演奏中に完成の見た目へどれだけ寄っているかの度合いです。自動では曲の蓄積量
+                （彫られた量）と進行度で上がります。「固定」にすると曲を待たずに 0〜1 を
+                直接見られるので、軌跡の途中の見た目を A/B できます。
+              </p>
+              <div id="maturity-sliders" class="songcolor-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="toggle-maturity-override" type="button" data-label-on="熟成度=固定" data-label-off="熟成度=自動">
+                  熟成度=自動
+                </button>
+                <button id="reset-maturity" type="button">既定に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview songcolor-panel" id="mineral-panel" hidden>
+              <p class="daytime-preview__label">
+                音色で形（鉱物/丸み・DEV・vitaのみ）
+                <span id="mineral-hint">即時反映</span>
+              </p>
+              <p class="capture-panel__note">
+                曲の音色（歪み/グリット）で結晶ファセット・角・棘を増減します。「軸=固定」にすると
+                曲に依らず強制でき A/B に使えます（自動時は曲の音色で決まる）。丸み端(0)は現状の形。
+                形成中に軸を上げると結晶アンカーも出ます。シルエットのみ・色は変えません。
+              </p>
+              <div id="mineral-sliders" class="songcolor-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="toggle-mineral-override" type="button" data-label-on="軸=固定" data-label-off="軸=自動">
+                  軸=自動
+                </button>
+                <button id="reset-mineral" type="button">既定に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview capture-panel" id="capture-panel" hidden>
+              <p class="daytime-preview__label">
+                検証用キャプチャ（DEV）
+                <span id="capture-hint">完成後に押す</span>
+              </p>
+              <p class="capture-panel__note">
+                彫刻の向きを正面へ戻し、カメラの漂いを 0 にして、900×900 の同一画角で
+                3方向（0°/120°/240°）を保存します。曲ごとのシルエットを比べるための機能で、
+                これを使わずに撮った画像は形ではなくカメラ角度の差を測ることになります。
+              </p>
+              <div class="daytime-preview__actions">
+                <button id="capture-verify" type="button">3方向を保存</button>
               </div>
             </div>
             <p class="tuning-hint">

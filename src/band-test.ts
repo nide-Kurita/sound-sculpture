@@ -115,12 +115,15 @@ export const computeBandLiveWeights = (bands: BandLevels, solo: BandSoloMode = "
   const low = smoothstep(BAND_GATE_LOW, BAND_GATE_HIGH, lowRaw);
   const mid = smoothstep(BAND_GATE_LOW, BAND_GATE_HIGH, midRaw);
   const high = smoothstep(BAND_GATE_LOW, BAND_GATE_HIGH, highRaw);
-  const total = low + mid + high + 0.0001;
+  // L2 正規化（合計を1にする L1 ではなく二乗和のルートで割る）。
+  // 1帯域だけ強い通常時はほぼ変わらないが、修羅場のように3帯域が同時に
+  // 強く鳴るときの薄まりを緩和する（0.33前後 → 約0.577）。
+  const norm = Math.sqrt(low * low + mid * mid + high * high) + 0.0001;
 
   return {
-    low: clamp01(low / total),
-    mid: clamp01(mid / total),
-    high: clamp01(high / total),
+    low: clamp01(low / norm),
+    mid: clamp01(mid / norm),
+    high: clamp01(high / norm),
   };
 };
 
