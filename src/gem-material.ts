@@ -18,8 +18,15 @@
  *   拡散を落とさずに光だけ足すと「キラキラした粘土」にしかならない。
  */
 
+/**
+ * 結晶（水晶）の本数。**群晶**: 小さな六角柱が複数、共通の塊から頭を出す
+ * （2026-08-19 ユーザー選択）。1 本あたり 柱面 6 枚 ＋ 錐面 6 枚 = 12 枚。
+ */
+export const GEM_CRYSTAL_COUNT = 3;
+/** 1 本あたりの面数（柱 6 ＋ 錐 6） */
+export const GEM_FACES_PER_CRYSTAL = 12;
 /** 結晶平面の枚数。`SoundSculpture.facetCount` と**必ず一致させる**（GLSL 側は定数展開） */
-export const GEM_FACET_COUNT = 18;
+export const GEM_FACET_COUNT = GEM_CRYSTAL_COUNT * GEM_FACES_PER_CRYSTAL;
 
 /** 宝石光学の master 強度（0 で無効）。**仮値・実機で曲を鳴らして確定する** */
 export const DEFAULT_GEM_STRENGTH = 1;
@@ -27,8 +34,16 @@ export const DEFAULT_GEM_STRENGTH = 1;
 /** 結晶面の平ら化。1 で完全にその平面の法線になる（＝大きなカット面） */
 export const DEFAULT_GEM_FLATTEN = 0.9;
 
-/** 結晶面の地の暗さ（1 = 現状の粘土色のまま、0 = 真っ黒）。宝石に見える主因 */
-export const DEFAULT_GEM_BODY_DARK = 0.45;
+/**
+ * 結晶面の地の暗さ（1 = 現状の粘土色のまま、0 = 真っ黒）。
+ *
+ * **2026-08-18 に 0.45 → 0.72 へ。** 0.45 はニュートラルグレーに沈んで
+ * 「鉄・アルミっぽい」（ユーザー指摘 #4）の主因だった。水晶は暗いのではなく**淡い**。
+ * 暗さで宝石に見せるのをやめ、内部の条線・霧・縁の分散で見せる方針に変えた。
+ * **第3版の「地を暗く落として艶と稜で見せる」を一部手放している**ので、
+ * 元へ戻すときはこの値を 0.45 に戻す（dev パネルの「結晶面の地の暗さ」）。
+ */
+export const DEFAULT_GEM_BODY_DARK = 0.72;
 
 /** 面の境界（稜）の明線の強さ */
 export const DEFAULT_GEM_RIDGE = 1.1;
@@ -44,6 +59,25 @@ export const DEFAULT_GEM_THROUGH = 1.5;
 
 /** 結晶面の roughness 倍率（小さいほど鋭い映り込み） */
 export const DEFAULT_GEM_ROUGHNESS_MUL = 0.12;
+
+/**
+ * 水晶らしさ（2026-08-18・[P1] #4）。**金属ではなく鉱物に見せるための3本。**
+ *
+ * 「透明に見える」の主因は背景が透けることではない（vita の背景は暗い深海なので
+ * 透けても見えるものが無い）。**中に情報があること**＝内部の条線（劈開・成長条線）と
+ * 霧（インクルージョン）で、見る角度によって内部のコントラストが変わることで
+ * 「厚みのある透明体」として読める。
+ */
+/**
+ * 内部の条線（劈開）。面に平行な薄い明暗の縞。0 で無効。
+ * **2026-08-18 に 0.5 → 1.0**（同一個体で 0 / 0.5 / 1.2 を振った実測で、
+ * 0.5 では等倍でもほとんど読めず、1.2 で条線として読めた。1.0 はその手前）。
+ */
+export const DEFAULT_GEM_VEIN = 1.0;
+/** 内部の霧（インクルージョン）。斜めから見たとき（＝光路が長いとき）ほど濃く出る */
+export const DEFAULT_GEM_HAZE = 0.45;
+/** 縁の分散（虹の割れ）。**面の地には色を乗せず、縁と閃きだけに出す** */
+export const DEFAULT_GEM_DISPERSE = 0.5;
 
 /**
  * 結晶面の中の副次ディテール（微ファセット）の量。**主役ではない。**
@@ -76,8 +110,17 @@ export const gemUniforms = {
   uGemSparkle: { value: DEFAULT_GEM_SPARKLE },
   uGemThrough: { value: DEFAULT_GEM_THROUGH },
   uGemRoughnessMul: { value: DEFAULT_GEM_ROUGHNESS_MUL },
+  uGemVein: { value: DEFAULT_GEM_VEIN },
+  uGemHaze: { value: DEFAULT_GEM_HAZE },
+  uGemDisperse: { value: DEFAULT_GEM_DISPERSE },
   uGemSubFacet: { value: DEFAULT_GEM_SUBFACET },
   uGemFacetScale: { value: DEFAULT_GEM_FACET_SCALE },
+  /**
+   * 各面が属する結晶の**成長方向 xyz とコーンの cos w**。
+   * コーンの外の画素はその面へ吸着しない ＝ 結晶と結晶の間は粘土のまま残る
+   * （「鉱物の部分と生物の部分が同居する」ための仕掛け）。
+   */
+  uGemDomains: { value: new Float32Array(GEM_FACET_COUNT * 4) },
   uGemPlanes: { value: new Float32Array(GEM_FACET_COUNT * 4) },
   uGemPlanesWorld: { value: new Float32Array(GEM_FACET_COUNT * 3) },
 };
@@ -114,8 +157,12 @@ uniform float uGemFire;
 uniform float uGemSparkle;
 uniform float uGemThrough;
 uniform float uGemRoughnessMul;
+uniform float uGemVein;
+uniform float uGemHaze;
+uniform float uGemDisperse;
 uniform float uGemSubFacet;
 uniform float uGemFacetScale;
+uniform vec4 uGemDomains[${GEM_FACET_COUNT}];
 uniform vec4 uGemPlanes[${GEM_FACET_COUNT}];
 uniform vec3 uGemPlanesWorld[${GEM_FACET_COUNT}];
 
@@ -127,6 +174,10 @@ float gGemRidge;
 vec3 gGemFaceView;
 /** 面ごとの分散色（uGemFire で白へ寄せてある） */
 vec3 gGemFire;
+/** その面の法線（**オブジェクト空間**）。内部の条線は結晶に固定したいのでこちらを使う */
+vec3 gGemFaceObj;
+/** 面内の接線（オブジェクト空間）。条線の走る向き。面ごとに違う */
+vec3 gGemFaceTan;
 
 float gemHash13(vec3 p) {
   p = fract(p * 0.1031);
@@ -147,17 +198,26 @@ void gemResolveFace() {
   gGemRidge = 0.0;
   gGemFaceView = vec3(0.0, 0.0, 1.0);
   gGemFire = vec3(1.0);
+  gGemFaceObj = vec3(0.0, 0.0, 1.0);
+  gGemFaceTan = vec3(1.0, 0.0, 0.0);
   if (uGem <= 0.001) {
     return;
   }
   vec3 dir = normalize(vGemDir);
   float d1 = -2.0;
   float d2 = -2.0;
+  bool found = false;
   float f2 = 0.0;
   float idx = 0.0;
   vec4 best = uGemPlanes[0];
   vec3 bestWorld = uGemPlanesWorld[0];
   for (int k = 0; k < ${GEM_FACET_COUNT}; k += 1) {
+    // **その結晶のコーンの中だけ**（群晶。コーンの外は粘土のまま残す）
+    vec4 dom = uGemDomains[k];
+    if (dot(dir, dom.xyz) < dom.w) {
+      continue;
+    }
+    found = true;
     float d = dot(dir, uGemPlanes[k].xyz);
     if (d > d1) {
       d2 = d1;
@@ -171,13 +231,22 @@ void gemResolveFace() {
       f2 = uGemPlanes[k].w;
     }
   }
+  // どの結晶のコーンにも入っていない ＝ 結晶と結晶の間の粘土。宝石の光学を一切かけない。
+  if (!found) {
+    return;
+  }
   float gap = d1 - d2;
   // 面の境界だけ隣の面のフラグと混ぜて、結晶↔生物の境目がジャギらないようにする
   float blend = smoothstep(0.0, 0.035, gap);
   float flag = mix(mix(best.w, f2, 0.5), best.w, blend);
   gGemMask = clamp(flag * uGem, 0.0, 1.0);
-  gGemRidge = (1.0 - smoothstep(0.0, 0.022, gap)) * gGemMask;
+  // 稜は**細く鋭く**（2026-08-18: 0.022 → 0.011）。太い白線は金属の面取りに見える。
+  gGemRidge = (1.0 - smoothstep(0.0, 0.011, gap)) * gGemMask;
   gGemFaceView = normalize((viewMatrix * vec4(bestWorld, 0.0)).xyz);
+  gGemFaceObj = best.xyz;
+  // 面ごとに条線の向きを変える（全部同じ向きに揃うと布の縞に見える）
+  vec3 tanSeed = gemHash33(vec3(idx * 2.71 + 1.3, 5.7, 11.3)) - 0.5;
+  gGemFaceTan = normalize(cross(gGemFaceObj, normalize(tanSeed + vec3(0.001, 0.002, 0.003))));
   float h = gemHash13(vec3(idx * 1.37 + 0.5, 2.1, 7.3));
   vec3 hue = 0.62 + 0.38 * cos(6.28318 * (h + vec3(0.0, 0.33, 0.66)));
   // uGemFire 0 で完全な白＝色を主役にしない（原則「色は脇役」）
@@ -192,7 +261,28 @@ void gemResolveFace() {
  */
 export const GEM_FRAGMENT_BODY = /* glsl */ `
   gemResolveFace();
-  diffuseColor.rgb *= mix(1.0, uGemBodyDark, gGemMask);
+  if (gGemMask > 0.001) {
+    // (1) 地。**暗く沈めるのではなく淡くする**（暗いニュートラルグレー＝金属に見える主因）。
+    diffuseColor.rgb *= mix(1.0, uGemBodyDark, gGemMask);
+    vec3 gemDir = normalize(vGemDir);
+    // (2) 内部の条線（劈開・成長条線）。面内の接線方向に平行な薄い縞。
+    //     **オブジェクト空間で作る**ので結晶に貼り付いて動く（＝中の構造として読める）。
+    float gemS = dot(gemDir, gGemFaceTan);
+    float gemVeinWave = sin(gemS * 46.0) * 0.6 + sin(gemS * 113.0 + 1.7) * 0.4;
+    // 縞は「線」として出したいので、正の側だけを鋭く残す
+    float gemVein = pow(max(gemVeinWave, 0.0), 3.0);
+    // (3) 内部の霧（インクルージョン）。低周波のムラ。
+    float gemHazeN = gemHash13(floor(gemDir * 9.0) + 0.5) * 0.6
+      + gemHash13(floor(gemDir * 21.0) + 0.5) * 0.4;
+    // 斜めから見るほど光路が長い＝霧が濃い。これが「厚みのある透明体」の手がかりになる。
+    float gemGraze = 1.0 - abs(dot(normalize(vNormal), normalize(vViewPosition)));
+    vec3 gemInner = vec3(0.80, 0.90, 1.0);
+    diffuseColor.rgb = mix(
+      diffuseColor.rgb,
+      diffuseColor.rgb + gemInner * (gemVein * uGemVein * 0.28 + gemHazeN * gemGraze * uGemHaze * 0.35),
+      gGemMask
+    );
+  }
 `;
 
 /** `#include <roughnessmap_fragment>` の直後へ。結晶面だけ鋭い映り込みにする */
@@ -209,8 +299,35 @@ if (gGemMask > 0.001) {
   vec3 gemN = normalize(mix(normal, gGemFaceView, gGemMask * uGemFlatten));
   vec3 gemCell = floor(vGemDir * uGemFacetScale) + 0.5;
   gemN = normalize(gemN + (gemHash33(gemCell) - 0.5) * uGemSubFacet * gGemMask);
+  // **条線を法線にも入れる（2026-08-18）。**
+  // 面を平らにすると法線が面内で一定になり、鏡面が「面ごと一様に光る帯」になる
+  // （＝ブラシ仕上げの金属／プラスチックに見える。**グリントの指数を上げても帯は細くならない**）。
+  // 条線の勾配ぶんだけ法線を面内の接線方向へ倒すと、鏡面が細い縞に割れて水晶の条線になる。
+  float gemSn = dot(normalize(vGemDir), gGemFaceTan);
+  float gemVeinSlope = cos(gemSn * 46.0) * 27.6 + cos(gemSn * 113.0 + 1.7) * 45.2;
+  // 面内の接線をビュー空間へ（面法線と直交する向きを1つ作る）
+  vec3 gemTanView = normalize(cross(gGemFaceView, vec3(0.0, 1.0, 0.0)) + vec3(1e-4, 0.0, 0.0));
+  gemN = normalize(gemN + gemTanView * clamp(gemVeinSlope * 0.0012, -0.35, 0.35) * uGemVein * gGemMask);
   normal = gemN;
 }
+`;
+
+/**
+ * `#include <clearcoat_normal_fragment_begin>` の直後へ。
+ *
+ * **three の clearcoat 層は `nonPerturbedNormal` を使う**ので、`normal` に入れた
+ * 結晶の平ら化・条線・微ファセットが **clearcoat のスペキュラには一切効かない**。
+ * その結果、完成時に立ち上がる clearcoat（0.8 前後）のキーライト反射が
+ * **彫刻を斜めに横切る滑らかな白い帯**になり、「ブラシ仕上げの金属／プラスチック」に見えていた
+ * （2026-08-18 に特定。env を切っても宝石の閃きを 0 にしても帯が消えないことで切り分けた）。
+ * 結晶面だけ clearcoat の法線も宝石側へ差し替えると、帯が条線とカット面で割れる。
+ */
+export const GEM_FRAGMENT_CLEARCOAT_NORMAL = /* glsl */ `
+#ifdef USE_CLEARCOAT
+  if (gGemMask > 0.001) {
+    clearcoatNormal = normalize(mix(clearcoatNormal, normal, gGemMask));
+  }
+#endif
 `;
 
 /**
@@ -224,15 +341,24 @@ if (gGemMask > 0.001) {
   float gemNV = max(dot(normal, gemV), 0.0);
   vec3 gemL1 = normalize(vec3(0.35, 0.75, 0.55));
   vec3 gemL2 = normalize(vec3(-0.62, 0.22, 0.75));
-  // (1) 稜 — カットの角が線で光る。常に見える宝石の基調
-  vec3 gemRidgeLight = gGemFire * gGemRidge * uGemRidge * (0.3 + 0.7 * pow(1.0 - gemNV, 2.0));
-  // (2) 縁のフレネル — 透き通った結晶の縁
-  vec3 gemRim = gGemFire * pow(1.0 - gemNV, 3.5) * 0.5 * gGemMask;
-  // (3) 面の閃き — 回転で面ごとに光が走る
-  // 指数を上げすぎると数画素しか光らず「閃かない」。面全体が舐めるくらいが宝石に見える。
-  float gemG1 = pow(max(dot(normal, normalize(gemL1 + gemV)), 0.0), 26.0);
-  float gemG2 = pow(max(dot(normal, normalize(gemL2 + gemV)), 0.0), 60.0);
-  vec3 gemGlint = (gemG1 * vec3(1.0) + gemG2 * gGemFire) * uGemSparkle * gGemMask;
+  // (1) 稜 — カットの角が線で光る。常に見える宝石の基調。
+  //     **色は乗せない**（面ごとの虹色は金属の焼け色に見える）。細さは gGemRidge 側で決めている。
+  vec3 gemRidgeLight = vec3(1.0) * gGemRidge * uGemRidge * (0.3 + 0.7 * pow(1.0 - gemNV, 2.0));
+  // (2) 縁のフレネル — 透き通った結晶の縁。**分散はここに出す。**
+  //     R/G/B でフレネル指数をずらすと、縁で虹が割れる（水晶・ガラスの見え方）。
+  float gemFres = 1.0 - gemNV;
+  vec3 gemRimSpec = vec3(
+    pow(gemFres, 3.5 - uGemDisperse * 0.9),
+    pow(gemFres, 3.5),
+    pow(gemFres, 3.5 + uGemDisperse * 1.3)
+  );
+  vec3 gemRim = mix(vec3(pow(gemFres, 3.5)), gemRimSpec, uGemDisperse) * 0.5 * gGemMask;
+  // (3) 面の閃き — 回転で面ごとに光が走る。**2026-08-18 に鋭くした**（26/60 → 90/220）。
+  //     広いスイープは「ブラシ仕上げの金属」に見え、白飛びの主因でもあった。
+  float gemG1 = pow(max(dot(normal, normalize(gemL1 + gemV)), 0.0), 60.0);
+  float gemG2 = pow(max(dot(normal, normalize(gemL2 + gemV)), 0.0), 160.0);
+  vec3 gemGlint = (gemG1 * vec3(1.0) + gemG2 * mix(vec3(1.0), gGemFire, uGemDisperse))
+    * uGemSparkle * gGemMask;
   // (4) 透過 — 面の裏から回り込む光。暗く落とした地がここで「透ける」。
   // 指数を低くすると面全体に薄く乗って「白く霞む」だけになるので鋭めに保つ。
   float gemBack =

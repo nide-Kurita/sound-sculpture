@@ -101,7 +101,7 @@ const readout = (p) => p.evaluate(() => ({
     await new Promise((r) => setTimeout(r, 1000));
     const d = await readout(p);
     series.push({ t, ...d });
-    console.log(`t=${String(t).padStart(3)}s 軸=${d.axis.toFixed(3)} 結晶面=${d.faces.toFixed(1)}/18 ` +
+    console.log(`t=${String(t).padStart(3)}s 軸=${d.axis.toFixed(3)} 結晶面=${d.faces.toFixed(1)} ` +
       `熟成度=${d.maturity.toFixed(3)}（蓄積 ${d.fromAccum.toFixed(3)} / 進行度 ${d.progress.toFixed(3)}）`);
   }
 
@@ -115,7 +115,7 @@ const readout = (p) => p.evaluate(() => ({
     }
     const avg = (key) => acc.reduce((s, v) => s + v[key], 0) / acc.length;
     const d = await readout(p);
-    console.log(`${tag.padEnd(6)} 軸=${d.axis.toFixed(2)} 結晶面=${d.faces.toFixed(1)}/18 熟成度=${d.maturity.toFixed(2)} | ` +
+    console.log(`${tag.padEnd(6)} 軸=${d.axis.toFixed(2)} 結晶面=${d.faces.toFixed(1)} 熟成度=${d.maturity.toFixed(2)} | ` +
       `稜・鏡面=${(avg('hot') * 100).toFixed(2)}% 暗地=${(avg('dark') * 100).toFixed(1)}% ` +
       `輝度=${avg('meanL').toFixed(3)} 彩度=${avg('meanS').toFixed(3)} 面積=${(avg('area') * 100).toFixed(1)}%`);
     return { tag, ...d, hot: avg('hot'), dark: avg('dark'), meanL: avg('meanL'), meanS: avg('meanS'), area: avg('area') };

@@ -120,10 +120,13 @@ import {
 import {
   gemUniforms,
   GEM_FACET_COUNT,
+  GEM_CRYSTAL_COUNT,
+  GEM_FACES_PER_CRYSTAL,
   GEM_FRAGMENT_COMMON,
   GEM_FRAGMENT_BODY,
   GEM_FRAGMENT_ROUGHNESS,
   GEM_FRAGMENT_NORMAL,
+  GEM_FRAGMENT_CLEARCOAT_NORMAL,
   GEM_FRAGMENT_EMISSIVE,
   GEM_MEMBRANE_FRAGMENT,
   GEM_VERTEX_COMMON,
@@ -132,6 +135,9 @@ import {
   DEFAULT_GEM_BODY_DARK,
   DEFAULT_GEM_RIDGE,
   DEFAULT_GEM_FIRE,
+  DEFAULT_GEM_VEIN,
+  DEFAULT_GEM_HAZE,
+  DEFAULT_GEM_DISPERSE,
   DEFAULT_GEM_SPARKLE,
   DEFAULT_GEM_THROUGH,
 } from "./gem-material";
@@ -2517,6 +2523,11 @@ class SoundSculpture {
   private readonly facetAxes = new Float32Array(SoundSculpture.facetCount * 3);
   private readonly facetLevels = new Float32Array(SoundSculpture.facetCount);
   /**
+   * 面が属する結晶の成長方向（xyz）とコーンの cos（w）。**群晶**（2026-08-19）。
+   * その錐の中の頂点だけがその面へ吸着し、外は粘土のまま残る。
+   */
+  private readonly facetDomains = new Float32Array(SoundSculpture.facetCount * 4);
+  /**
    * 面ごとの「結晶になる順番」0..1（曲ごとに違う）。音色軸がこのランクを越えた面から
    * 順に結晶になる。**軸は強度ではなく結晶になる面の枚数を決める**（[P2] の設計の要）。
    */
@@ -2584,6 +2595,10 @@ class SoundSculpture {
   private readonly completionStartInnerColor = new THREE.Color();
   private completionStartRoughness = 0.94;
   private readonly _tmpColor = new THREE.Color();
+  /** 結晶（群晶）の基底を組むときだけ使う作業ベクトル。初期化時のみ・毎フレームではない */
+  private readonly _tmpVecA = new THREE.Vector3();
+  private readonly _tmpVecB = new THREE.Vector3();
+  private readonly _tmpVecC = new THREE.Vector3();
   private currentStructure: StructureSnapshot = defaultStructureSnapshot();
   private speciesProfile: SpeciesProfile = { ...DEFAULT_SPECIES_PROFILE };
   private lastNoveltySpawn = 0;
@@ -6058,20 +6073,70 @@ class SoundSculpture {
   /** 結晶ファセットの平面（軸＋距離）を morphologySeed から決める。曲ごとに向きが変わる。 */
   private initCrystalFacets() {
     const planes = gemUniforms.uGemPlanes.value;
-    for (let k = 0; k < SoundSculpture.facetCount; k += 1) {
-      const p = growthPlaceOnSphere(k, SoundSculpture.facetCount, this.morphologySeed + 71.3);
-      this.facetAxes[k * 3] = p.x;
-      this.facetAxes[k * 3 + 1] = p.y;
-      this.facetAxes[k * 3 + 2] = p.z;
-      // 面ごとに距離を少し散らす（規則正しい多面体を避け、曲固有の不揃いな結晶にする）。
-      this.facetLevels[k] = 0.9 + seededUnit(k + 1, this.morphologySeed + 88.1) * 0.28;
-      // 結晶になる順番。曲（morphologySeed）ごとにどの面から鉱物化するかが変わる。
-      this.facetRank[k] = seededUnit(k + 31, this.morphologySeed + 140.9);
-      this.facetCrystal[k] = 0;
-      planes[k * 4] = p.x;
-      planes[k * 4 + 1] = p.y;
-      planes[k * 4 + 2] = p.z;
-      planes[k * 4 + 3] = 0;
+    const domains = gemUniforms.uGemDomains.value;
+    // **群晶**（2026-08-19・[P1] #4）。小さな六角柱が数本、共通の塊から頭を出す。
+    // 1 本 = 柱面 6 枚（c 軸に垂直な向きで 60° ごと）＋ 錐面 6 枚（c 軸から傾けた面）。
+    // 各本にコーンを持たせ、**コーンの外は粘土のまま**にするので、結晶の頭のあいだに
+    // 有機の面が残る（「鉱物の部分と生物の部分が同居する」という設計の要）。
+    // **per-vertex の式は増えていない**（増えたのは面の枚数と、面ごとの early skip 1 回）。
+    const sp = this.getSpecies();
+    for (let c = 0; c < GEM_CRYSTAL_COUNT; c += 1) {
+      // 成長方向: 曲ごとに散らしつつ、作品の伸びの軸（morphAxis）へ少し引き寄せる
+      const g = growthPlaceOnSphere(c, GEM_CRYSTAL_COUNT, this.morphologySeed + 71.3);
+      this._tmpVecA
+        .set(g.x, g.y, g.z)
+        .lerp(this.morphAxis, 0.35 * seededUnit(c + 3, this.morphologySeed + 12.4))
+        .normalize();
+      const ax = this._tmpVecA.x;
+      const ay = this._tmpVecA.y;
+      const az = this._tmpVecA.z;
+      // c 軸に直交する 2 本（柱面と錐面を並べる基底）
+      const upx = Math.abs(ay) < 0.9 ? 0 : 1;
+      this._tmpVecB.set(upx, upx === 0 ? 1 : 0, 0).cross(this._tmpVecA).normalize();
+      this._tmpVecC.copy(this._tmpVecA).cross(this._tmpVecB).normalize();
+      // 柱の太さ・錐の鋭さ・向きのねじれを曲から（全曲が同じ六角柱にならないように）
+      const prismLevel = 0.72 + seededUnit(c + 7, this.morphologySeed + 33.1) * 0.3 - sp.aggressive * 0.06;
+      const tilt = 0.62 + seededUnit(c + 11, this.morphologySeed + 51.7) * 0.5; // 錐面の傾き（rad）
+      const twist = seededUnit(c + 17, this.morphologySeed + 77.9) * Math.PI;
+      const coneCos = Math.cos(1.05 + seededUnit(c + 23, this.morphologySeed + 91.3) * 0.35);
+      for (let f = 0; f < GEM_FACES_PER_CRYSTAL; f += 1) {
+        const k = c * GEM_FACES_PER_CRYSTAL + f;
+        const prism = f < 6;
+        const step = (prism ? f : f - 6) * (Math.PI / 3) + twist;
+        // 柱面 = c 軸に垂直／錐面 = c 軸から tilt だけ倒す（上下交互に）
+        const lift = prism ? 0 : (f % 2 === 0 ? Math.cos(tilt) : -Math.cos(tilt));
+        const radial = prism ? 1 : Math.sin(tilt);
+        const nx = (this._tmpVecB.x * Math.cos(step) + this._tmpVecC.x * Math.sin(step)) * radial + ax * lift;
+        const ny = (this._tmpVecB.y * Math.cos(step) + this._tmpVecC.y * Math.sin(step)) * radial + ay * lift;
+        const nz = (this._tmpVecB.z * Math.cos(step) + this._tmpVecC.z * Math.sin(step)) * radial + az * lift;
+        const inv = 1 / (Math.hypot(nx, ny, nz) || 1);
+        this.facetAxes[k * 3] = nx * inv;
+        this.facetAxes[k * 3 + 1] = ny * inv;
+        this.facetAxes[k * 3 + 2] = nz * inv;
+        // 面ごとの小さなジッタ。CG 的な完璧な六角柱にしない（曲固有の不揃いさ）
+        const jitter = seededUnit(k + 1, this.morphologySeed + 88.1) * 0.12;
+        this.facetLevels[k] = (prism ? prismLevel : prismLevel * 0.82) + jitter;
+        // 結晶化の順番: **柱が立ってから先端が尖る**。結晶ごとに時間差も付ける。
+        this.facetRank[k] =
+          clamp01(
+            (prism ? 0.05 : 0.45) +
+              c * (0.5 / GEM_CRYSTAL_COUNT) +
+              seededUnit(k + 31, this.morphologySeed + 140.9) * 0.28,
+          );
+        this.facetCrystal[k] = 0;
+        planes[k * 4] = this.facetAxes[k * 3];
+        planes[k * 4 + 1] = this.facetAxes[k * 3 + 1];
+        planes[k * 4 + 2] = this.facetAxes[k * 3 + 2];
+        planes[k * 4 + 3] = 0;
+        domains[k * 4] = ax;
+        domains[k * 4 + 1] = ay;
+        domains[k * 4 + 2] = az;
+        domains[k * 4 + 3] = coneCos;
+        this.facetDomains[k * 4] = ax;
+        this.facetDomains[k * 4 + 1] = ay;
+        this.facetDomains[k * 4 + 2] = az;
+        this.facetDomains[k * 4 + 3] = coneCos;
+      }
     }
     this.anyCrystalFace = 0;
   }
@@ -6170,14 +6235,26 @@ class SoundSculpture {
     const ny = y / r;
     const nz = z / r;
     let best = -2;
-    let bk = 0;
+    let bk = -1;
     for (let k = 0; k < SoundSculpture.facetCount; k += 1) {
+      // 群晶: その結晶のコーンの中だけ（外は粘土のまま。シェーダ側と同じ判定）
+      const dk = k * 4;
+      if (
+        nx * this.facetDomains[dk] + ny * this.facetDomains[dk + 1] + nz * this.facetDomains[dk + 2] <
+        this.facetDomains[dk + 3]
+      ) {
+        continue;
+      }
       const kk = k * 3;
       const d = nx * this.facetAxes[kk] + ny * this.facetAxes[kk + 1] + nz * this.facetAxes[kk + 2];
       if (d > best) {
         best = d;
         bk = k;
       }
+    }
+    // どの結晶のコーンにも入らない ＝ 結晶と結晶のあいだの粘土。触らない。
+    if (bk < 0) {
+      return { x, y, z };
     }
     // **その面が結晶になっているときだけ**、フル強度で平らにする。
     // 生物の面は一切スナップしない → 平らな結晶面と丸い生物面が同じ個体に同居する。
@@ -6216,13 +6293,21 @@ class SoundSculpture {
     sumDot.fill(0);
     cnt.fill(0);
     const n = this.accumulated.length;
+    // 群晶: コーンの外は -1（＝その頂点は粘土のまま）
     const nearestFacet = (x: number, y: number, z: number, r: number) => {
       const nx = x / r;
       const ny = y / r;
       const nz = z / r;
       let best = -2;
-      let bk = 0;
+      let bk = -1;
       for (let k = 0; k < K; k += 1) {
+        const dk = k * 4;
+        if (
+          nx * this.facetDomains[dk] + ny * this.facetDomains[dk + 1] + nz * this.facetDomains[dk + 2] <
+          this.facetDomains[dk + 3]
+        ) {
+          continue;
+        }
         const kk = k * 3;
         const d = nx * this.facetAxes[kk] + ny * this.facetAxes[kk + 1] + nz * this.facetAxes[kk + 2];
         if (d > best) {
@@ -6241,6 +6326,7 @@ class SoundSculpture {
       const r = Math.hypot(x, y, z);
       if (r < 1e-4) continue;
       const bk = nearestFacet(x, y, z, r);
+      if (bk < 0) continue;
       const kk = bk * 3;
       sumDot[bk] += x * this.facetAxes[kk] + y * this.facetAxes[kk + 1] + z * this.facetAxes[kk + 2];
       cnt[bk] += 1;
@@ -6254,6 +6340,7 @@ class SoundSculpture {
       const r = Math.hypot(x, y, z);
       if (r < 1e-4) continue;
       const bk = nearestFacet(x, y, z, r);
+      if (bk < 0) continue;
       const kk = bk * 3;
       const mkx = this.facetAxes[kk];
       const mky = this.facetAxes[kk + 1];
@@ -7484,6 +7571,15 @@ class SoundSculpture {
           ${GEM_FRAGMENT_NORMAL}
           `,
         )
+        // clearcoat は nonPerturbedNormal を使うので、結晶面だけ宝石側の法線へ差し替える。
+        // これが無いと clearcoat の反射が彫刻を横切る1本の白い帯になる（2026-08-18 に特定）。
+        .replace(
+          "#include <clearcoat_normal_fragment_begin>",
+          /* glsl */ `
+          #include <clearcoat_normal_fragment_begin>
+          ${GEM_FRAGMENT_CLEARCOAT_NORMAL}
+          `,
+        )
         .replace(
           "vec4 diffuseColor = vec4( diffuse, opacity );",
           /* glsl */ `
@@ -7508,7 +7604,7 @@ class SoundSculpture {
           `,
         );
     };
-    material.customProgramCacheKey = () => "vita-core-pierce-opaque-v20-live-settle";
+    material.customProgramCacheKey = () => "vita-core-pierce-opaque-v23-quartz-clearcoat";
     material.needsUpdate = true;
   }
 
@@ -13524,7 +13620,7 @@ const initMineralPanel = () => {
       `軸 ${mineralDebug.axis.toFixed(2)}（${mineralDebug.override ? "固定" : "自動"}）` +
       ` / グリット平均 ${mineralDebug.gritAvg.toFixed(3)}` +
       ` / 曲の軸 ${mineralDebug.mineral.toFixed(2)}` +
-      ` / 結晶面 ${mineralDebug.crystalFaces.toFixed(1)}/18` +
+      ` / 結晶面 ${mineralDebug.crystalFaces.toFixed(1)}/${GEM_FACET_COUNT}` +
       ` / organic ${mineralDebug.organic.toFixed(2)}`;
     requestAnimationFrame(refreshReadout);
   };
@@ -13639,6 +13735,45 @@ const initMineralPanel = () => {
       },
       reset: DEFAULT_GEM_FIRE,
     },
+    {
+      key: "gemVein" as const,
+      label: "内部の条線（水晶）",
+      help: "結晶の中を走る平行な縞（劈開・成長条線）。中に構造が見えることが「透明な鉱物」の主因。上げすぎると布の縞になる。",
+      min: 0,
+      max: 1.5,
+      step: 0.05,
+      get: () => gemUniforms.uGemVein.value,
+      set: (v: number) => {
+        gemUniforms.uGemVein.value = v;
+      },
+      reset: DEFAULT_GEM_VEIN,
+    },
+    {
+      key: "gemHaze" as const,
+      label: "内部の霧（水晶）",
+      help: "内部のインクルージョン。斜めから見る（光路が長い）ほど濃く出るので厚みが読める。上げすぎると曇る。",
+      min: 0,
+      max: 1.5,
+      step: 0.05,
+      get: () => gemUniforms.uGemHaze.value,
+      set: (v: number) => {
+        gemUniforms.uGemHaze.value = v;
+      },
+      reset: DEFAULT_GEM_HAZE,
+    },
+    {
+      key: "gemDisperse" as const,
+      label: "縁の分散（水晶）",
+      help: "縁で虹が割れる量（R/G/B のフレネル指数をずらす）。面の地には色を乗せないので「色が前に出る」にはなりにくい。",
+      min: 0,
+      max: 1,
+      step: 0.05,
+      get: () => gemUniforms.uGemDisperse.value,
+      set: (v: number) => {
+        gemUniforms.uGemDisperse.value = v;
+      },
+      reset: DEFAULT_GEM_DISPERSE,
+    },
   ];
 
   const inputs = new Map<string, HTMLInputElement>();
@@ -13709,6 +13844,9 @@ const initMineralPanel = () => {
     gemUniforms.uGemSparkle.value = DEFAULT_GEM_SPARKLE;
     gemUniforms.uGemThrough.value = DEFAULT_GEM_THROUGH;
     gemUniforms.uGemFire.value = DEFAULT_GEM_FIRE;
+    gemUniforms.uGemVein.value = DEFAULT_GEM_VEIN;
+    gemUniforms.uGemHaze.value = DEFAULT_GEM_HAZE;
+    gemUniforms.uGemDisperse.value = DEFAULT_GEM_DISPERSE;
     for (const spec of specs) {
       const input = inputs.get(spec.key);
       const valueLabel = valueLabels.get(spec.key);
