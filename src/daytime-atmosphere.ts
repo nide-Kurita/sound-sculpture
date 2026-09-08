@@ -427,6 +427,45 @@ export const uiTokensFromBackground = (
   };
 };
 
+/**
+ * 背景輝度に合わせてインクを切り替える（網点など、キャンバス上に直接載る文字用）。
+ * vita の daytime UI（常に明色＋暗パネル）とは別系統。
+ */
+export const uiTokensForReadableContrast = (
+  backgroundHex: number,
+  options: UiTokenOptions = {},
+): DaytimeUiTokens => {
+  const formLum = relativeLuminance(backgroundHex);
+  const horizonLum =
+    options.horizonHex != null ? relativeLuminance(options.horizonHex) : formLum;
+  const zenithLum =
+    options.zenithHex != null ? relativeLuminance(options.zenithHex) : formLum;
+  const maxLum = Math.max(formLum, horizonLum * 0.92, zenithLum * 0.8);
+  const bright = maxLum >= 0.42;
+
+  if (bright) {
+    return {
+      ink: "#161616",
+      soft: "#2a2a2a",
+      faint: "rgb(22 22 22 / 62%)",
+      panel: "rgb(247 246 242 / 88%)",
+      border: "rgb(22 22 22 / 28%)",
+      badgeBg: "rgb(247 246 242 / 90%)",
+      darkUi: false,
+    };
+  }
+
+  return {
+    ink: "#f6f3ea",
+    soft: "#d5d0c4",
+    faint: "rgb(246 243 234 / 68%)",
+    panel: "rgb(8 10 14 / 84%)",
+    border: "rgb(245 240 230 / 28%)",
+    badgeBg: "rgb(10 12 18 / 84%)",
+    darkUi: true,
+  };
+};
+
 export type SampleDaytimeOptions = {
   latitude?: number;
   longitude?: number;

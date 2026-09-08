@@ -70,6 +70,9 @@ node fps.js
 # （強度が適切かは測れない。それは曲を鳴らして目で決める）
 node bloom_panel_check.js "http://localhost:5173/?style=vita" 8000
 
+# sculpture-stick がオブジェクトを回せるか（無音。遊泳が group.rotation を食った回帰用）
+node stick_rotate_check.js "http://localhost:5173/?style=vita"
+
 # vita の映り込み（vita-environment.ts の環境マップ）の効き方を測る。
 # 第3引数 1 で完成状態、第4引数を渡すと <接頭辞>-on.png / -off.png を保存する
 node env_panel_check.js "http://localhost:5173/?style=vita" 9000 0 /tmp/envw
@@ -150,6 +153,82 @@ node gem_live_strength_stats.js /tmp/gemstats 55 Fury 6
 # 「LIVE 最終フレーム → 完成後」の**飛び幅**を平均で測る（稜・鏡面 / 薄膜 / 輝度 / 彩度 /
 # 局所コントラスト / 面積）。熟成度 maturity の作業（worklist [P1]）の before/after 判定に使う
 node completion_gap_stats.js /tmp/gap 60 Fury 5
+
+# **表示の平滑（worklist vita [P1]「動きを滑らかに」）** — 完成後・同一個体で
+# 「表示へ渡す変位の平滑」だけを切り替えて撮る。**別 run だとシードが違って形が変わる**
+node smooth_ab.js /tmp/smooth.png Fury 60          # 等倍の A/B 画像（0 / 0.55 / 0.8）
+node smooth_sil.js /tmp/silsm Fury 60              # 検証用キャプチャを 0 / 0.55 / 0 の順で
+node silhouette.js /tmp/silsm/s0a.png /tmp/silsm/s55.png auto   # 形がどれだけ変わったか
+node silhouette.js /tmp/silsm/s0a.png /tmp/silsm/s0b.png auto   # ← ノイズ床（同じ設定を2回）
+# 粗さの数値は live_motion_probe.js が出す（coreRough → coreRoughDisplay）。
+# 平滑の強さは環境変数で振れる: SMOOTH=0.8 node live_motion_probe.js /tmp/x 45 Fury
+
+# 全スタイル（7 つ）を短く再生して console error と読み出しの有無を確認する。
+# **共有層（SoundSculpture / RhythmDetector / 色）を触ったら毎回これを通す**
+node styles_check.js
+
+# **色の「濁り」を層別に測る（worklist vita [P1]）** — **Lab の C（chroma）**で測る。
+# HSL の S は暗部で意味が薄い（暗い色は S が高くても C は低い）。
+# 同一ロード内でブルーム / 染み / 色相ムラ / 膜への色乗り / 映り込みを切り替えるので、差は層だけ。
+# **スライダーは番号ではなくラベルで選ぶこと**（ノブを足すと番号がずれて別のものを動かす）
+node mud_probe.js /tmp/mud
+
+# **初期色（worklist vita [P1]）** — **待機状態**で天気 6 × 時刻 4 を撮り、本体画素の HSL と
+# 「どの段で環境の信号が消えているか」を出す。第2・第3引数は振れ幅（天気 / 時刻）
+node initial_color_grid.js /tmp/initcolor 1 1
+node initial_color_grid.js /tmp/initcolor23 2 3
+
+# **LIVE の動き（worklist vita [P0]）** — 打点イベントの量と画面上で実際に動いた量を
+# 同じフレームで記録する。飽和率と「打点が目で分かるか」（打点直後の動き ÷ 平常の動き）を出す
+node live_motion_probe.js /tmp/live 150 Fury "I'm Yours"
+
+# **ボーカル・主旋律の切り分け（段A0 / A1）** — メロ帯域の持続を「声の代理」として、
+# 句頭検出 → 句イベント → 中音の視覚（chatter・膜）を同じ時間軸で記録する。
+# 記録はアプリ内の長窓リングバッファ（__live.dumpVocal()・約60秒）から1回だけ回収する。
+# **外からのポーリングは使えない**（headless では rAF もタイマーも絞られ 40秒で12点だった）
+node vocal_probe.js /tmp/vocal 40 40 "I'm Yours" ロビンソン 修羅場 "Donna Lee"
+
+# **どのチャンネルがどれだけ動いているか（段A1・2026-08-25）** — 句が出ている間に限定して、
+# 打点 / 径方向の波 / 接線流 の実変位を比べる。
+# 「声が見えない」がゲインの問題か**チャンネルの取り合い**かを確定するためのもの。
+# 実測: 波は打点と同じ liveOffset へ足していたので、並ぶには 5.5〜5.9 倍が必要だった
+node wave_share.js 40 40 "I'm Yours" ロビンソン 修羅場
+
+# **接線流の視覚寄与（段A1・2026-08-25）** — **同じ瞬間にそのチャンネルだけ ON/OFF して
+# 3 枚連続で撮り**、音楽の進行ぶんを差し引いて寄与を出す制御実験＋見た目のストリップ。
+# OFF 区間と ON 区間を別々に撮って比べる素朴なやり方は**打点フラッシュと粒子に埋もれて
+# 逆符号が出る**（2026-08-25 に -35% を踏んだ）。
+# ユーザーが「見えない」と判定した径の波を同時に測って**基準線**にするのが要点
+node flow_ab.js /tmp/flow-ab.png ロビンソン 45 3 4 150
+
+# **声の駆動信号は「句」になっているか（段A1・2026-08-28）** — 振幅ではなく**時間構造**を測る。
+# duty（出ている時間の割合）／休みの割合／イベント/分／1 回の長さ／休みの長さ。
+# **段A1 の 3 巡すべての失敗の真因がこれだった**（句頭は 6〜11 回/分 検出できているのに、
+# レベル追従が離さず駆動が 95〜97% の時間出っぱなし → 何を動かしても常時うねりに見える）。
+# **「見えない」を可視性の問題として追う前に、まずこれを測る。**
+node phrase_shape.js 40 60 ロビンソン "I'm Yours" 修羅場
+
+# **輪郭が変わっているか（段A1 3 巡目・2026-08-26）** — flow_ab.js と同じ制御実験だが、
+# 指標を**シルエット**（xor/union・bbox アスペクト比）にしたもの。
+# **輝度差では可視性を判定できない**（08-25 に輝度で 12 倍と出したものが実機で「全く見えない」だった）。
+# 星・浮遊粒子は最大連結成分で除外する（入れると bbox が全画面になり差が 0 に張り付く）
+node voice_shape_ab.js /tmp/shape.png ロビンソン 45 9 1
+
+# 接線流の強さを #voice-panel のスライダー経由で掃引する（メッシュ破綻の見張りつき）。
+# **接線変位は径方向と違って青天井ではない**（隣接頂点との差が辺長 0.115 を超えると三角形が反転）
+node flow_sweep.js 修羅場 0 1 2 3 4
+
+# 直近 900 フレーム（≒15 秒）の**生波形**を折れ線にする。
+# **平均では「点滅しているのか点きっぱなしなのか」が判定できない**（実測: 平均 0.998 / sd 0.012）
+node live_trace.js /tmp/trace.png Fury 60 "修正後 — Fury"
+
+# 再生中の連続フレームを横に並べる（隣接フレームの差つき）
+node live_strip.js /tmp/strip.png Fury 60 6 130
+
+# 曲ごとに 60 秒形成 → Complete → 検証用キャプチャ。
+# **LIVE を触ったら曲間のシルエット差が保たれているかを必ずこれで測る**
+node silhouette_songs.js /tmp/sil 60
+node silhouette.js --matrix auto /tmp/sil/Fury_0.png /tmp/sil/Fly_Away_0.png /tmp/sil/I_m_Yours_0.png
 
 # 完成形シルエットの差（色は見ない）。同じ曲2回の差が床、別曲の差がそれを超えるか
 # **vita は `auto` を渡すこと**（下の注意を読む）

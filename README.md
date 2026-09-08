@@ -17,10 +17,10 @@ PC に入力された音を Web Audio API で解析し、Three.js 上の 3D オ�
 | ID | ラベル | 概要 |
 | --- | --- | --- |
 | `vita`（既定） | 生命 | 膜が真珠光沢に輝き、完成後も呼吸を続ける |
-| `metamorphosis` | 変容 | 形成中は生命体、無音・完了で石化・結晶化 |
 | `monolith` | 彫刻 | 膜なし・素材感重視、完成でギャラリー照明 |
+| `dither` | 網点 | 黒背景に Ordered Dither の有機ブロブ |
 
-例: `/?style=monolith`
+例: `/?style=monolith` / `/?style=dither`
 
 成長の形は操作パネルの「成長アルゴリズム」（または URL `?algo=`）でも切り替えられます。
 
@@ -61,7 +61,21 @@ npm install
 npm run dev
 ```
 
-ブラウザで表示されたローカル URL を開き、`マイク入力を開始` を押してください。ブラウザからマイク入力の許可を求められます。
+ブラウザで表示されたローカル URL を開き、操作パネルの `Use Input Device`（マイク）または
+`Use System Audio`（PC・タブ音声）を選んでから `Start Recording` を押してください。
+マイクを選ぶと、ブラウザから入力の許可を求められます。
+
+### 推奨環境
+
+**Google Chrome（最新版）。**
+
+PC・タブ音声の取り込みは `getDisplayMedia({ audio })` を使うため、対応しているのは Chromium 系のみです。
+Safari / Firefox は音声トラックを返さないので、この経路は使えません（2026-09-07 に Safari で確認）。
+**マイク入力は Safari でも動作します**（同日確認）。
+
+コードにブラウザ判定は無く、Chromium 限定 API も使っていないので、差が出るのはこの 1 経路だけです。
+タブ音声が取れなかったときは、非対応とチェック入れ忘れの両方に届く案内を status に出します
+（`AudioInputNotice`）。
 
 ### DEV / 公開モード
 
@@ -71,7 +85,10 @@ npm run dev
 | `npm run dev` + `?surface=public` | 公開プレビュー | 左上に `PUBLIC PREVIEW`。公開と同じ UI |
 | `npm run build` / `npm run preview` | 常に公開 | バッジなし |
 
-DEV 中のみ、実験用スタイル `?style=dither` / `?style=lumen` も開けます（公開ビルドでは `vita` にフォールバック）。
+DEV 中のみ、実験用スタイル `?style=metamorphosis` / `?style=lumen` / `?style=volume` / `?style=aether` も開けます（公開ビルドでは公開 3 種以外は `vita` にフォールバック）。
+
+公開（本番）でも Settings から **時刻の指定** と **天気の条件**（晴れ・雨など）を使えます。
+雨量・風速の細かいノブ、Band Test、開発チューニングは DEV のみです。
 
 ## Usage
 
@@ -100,4 +117,7 @@ npm run preview
 
 音入力はリアルタイム解析のため、同じ曲でも入力環境や音量によって結果が変わる可能性があります。
 
-開発の前提ルールは [`.cursor/rules/project-principles.mdc`](.cursor/rules/project-principles.mdc)、作業リストは [`docs/WORKLIST.md`](docs/WORKLIST.md) を参照。
+開発の前提ルールは [`.cursor/rules/project-principles.mdc`](.cursor/rules/project-principles.mdc)。
+作業リストは [`docs/worklist/`](docs/worklist/README.md)、再開に必要な状態と地雷は
+[`docs/handoff/`](docs/handoff/README.md)（どちらもスタイル別）を参照。
+（`docs/WORKLIST.md` は 2026-08-09 に分割済み。移設先を指すだけの残骸です。）

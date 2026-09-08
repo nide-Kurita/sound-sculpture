@@ -40,7 +40,6 @@ import {
   GROWTH_ALGORITHM_CATALOG,
   getGrowthAlgoSilhouetteBias,
   getGrowthAlgorithmId,
-  getGrowthAlgorithmMeta,
   growthFlow,
   growthModulateFromPattern,
   growthModulateScalar,
@@ -66,6 +65,15 @@ import {
   envClayShiftFromWeatherAndHour,
   weatherClayShiftFromSnapshot,
   hourClayShiftFromHour,
+  envColorGain,
+  abyssSeaTintFromWeather,
+  weatherClayPalette,
+  vitaWeatherClayShift,
+  vitaDaytimeClayLift,
+  weatherGoldLuster,
+  weatherLightTint,
+  DEFAULT_ENV_COLOR_WEATHER_GAIN,
+  DEFAULT_ENV_COLOR_HOUR_GAIN,
 } from "./clay-color";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { createAbyssEnvironment, DEFAULT_ABYSS_ENV_INTENSITY } from "./vita-environment";
@@ -161,6 +169,7 @@ import {
   sampleDaytimeAtmosphereFromHour,
   writeDaytimeBackgroundEnabled,
   uiTokensFromBackground,
+  uiTokensForReadableContrast,
   DEFAULT_DAYTIME_LOCATION,
   type DaytimeAtmosphere,
 } from "./daytime-atmosphere";
@@ -175,6 +184,16 @@ import {
   type LiveWeatherSnapshot,
   type WeatherPreviewPresetId,
 } from "./live-weather";
+import {
+  growthTagline,
+  readUiLocale,
+  t,
+  UI_STRINGS,
+  WEATHER_PRESET_I18N,
+  writeUiLocale,
+  type UiLocale,
+  type UiStringKey,
+} from "./ui-locale";
 import type { SceneWeatherState } from "./scene-background";
 import {
   clamp01,
@@ -206,8 +225,32 @@ type DeterministicSimStep = {
   bands: AudioBands;
   /** ピーク正規化前 — ドラム／オンセット検出用（曲と同期させる） */
   rhythmBands: AudioBands;
+  /** ノイズゲート前の生の帯域。**ゲートが飽和した曲でオンセットを拾い直す**ため */
+  rawBands: RawBands;
   waveform: WaveformMetrics;
   deltaTime: number;
+};
+
+/**
+ * ノイズゲートを通す前の帯域。**大音量の曲でオンセットが消えるのを防ぐためだけに使う。**
+ *
+ * `rhythmBands` は `smoothstep(a, b, v)` のノイズゲートを通っていて、b 以上は全部 1 になる。
+ * そのため大音量の曲では帯域値が 1 に張り付き、**その差分（＝オンセット）が 0 になる**。
+ * 高域は b = 0.18 と低いので、Fury では 15 秒間ずっと 0.999 で、
+ * **ライドが鳴り続けているのにハットが 1 回も検出されなかった**（2026-08-20 実測）。
+ */
+type RawBands = { sub: number; low: number; mid: number; melody: number; high: number };
+
+/**
+ * ノイズゲートの傾き 1/(b - a)。生の差分をゲート後と**同じ感度**に揃えるための係数。
+ * ここを間違えると、静かな曲の検出感度まで変わる。
+ */
+const RAW_ONSET_GAIN = {
+  sub: 1 / (0.42 - 0.035),
+  low: 1 / (0.46 - 0.04),
+  mid: 1 / (0.38 - 0.03),
+  melody: 1 / (0.24 - 0.012),
+  high: 1 / (0.18 - 0.01),
 };
 
 /** 曲内相対正規化の対象となる帯域キー */
@@ -297,9 +340,98 @@ let latestRhythm: RhythmEvents = {
 const DEFAULT_PEARL_MIX_SPREAD = 0.28;
 const DEFAULT_PEARL_MIX_BALANCE = -0.1;
 /** dev パネルと共有する現在値（実機で決めた値は DEFAULT_* へ焼き込む） */
+/**
+ * 面内の真珠ノイズ（干渉色のムラ）の倍率。**1.0 が従来値。**
+ *
+ * 面内の色相ノイズは合計 ±0.35 あり、**天気・時刻が画面上で動かす幅（0.08）の 4 倍**。
+ * そのため「今日の天気の色」ではなく「ランダムなまだら」が本体色の主役になっていた
+ * （2026-08-21 実測。ユーザー指摘「初期の色が何で決まってるのか不明」の一因）。
+ * ムラ自体は「真珠の干渉色（青緑〜藤〜桃）」として意図された語彙なので**消さない**。
+ * 色相の振れ幅だけ絞り、彩度・明度のムラは残す（＝虹色感は保ったまま地の色が読める）。
+ */
+/**
+ * **2026-08-21: 1.0 → 0.35。**
+ * 地（球体の色）が真珠シアン固定だった頃は、このノイズを下げても見た目がほとんど変わらず
+ * 「下げる根拠が無い」と判断していた。**地を天気の色へ振り切ったら話が変わった**：
+ * ±0.35 の色相ノイズは琥珀を緑と桃へ、藍を紫と青緑へ散らして、
+ * せっかく決めた「その日の色」を濁らせる（等倍で確認）。
+ * 彩度・明度のムラは残るので、真珠の揺らぎ自体は消えない。
+ */
+/** 段C2: 環境色相幅（~0.15）より小さく。大きいと「今日の天気」よりまだらが勝つ。 */
+const DEFAULT_PEARL_HUE_NOISE = 0.26;
+
+/**
+ * **膜への「地の色」の乗り**（worklist vita [P1]）。0 = 2026-08-11 案A の従来値。
+ *
+ * 膜は本体を覆うので、案A の色乗り（0.20 / 0.26）だと**球体はどの天気でも青緑**になる
+ * （2026-08-21 ユーザー指摘「粘土質の球体の色合いがどの状態でも青緑っぽい」）。
+ * 真珠白と電気シアンの芯・干渉色・glint は残したまま、
+ * ベース／アクセント／模様の加算だけを粘土の色へ寄せる割合。
+ */
+const DEFAULT_MEMBRANE_PALETTE_BIAS = 0.75;
+const membranePalette = { bias: DEFAULT_MEMBRANE_PALETTE_BIAS };
+
+/**
+ * **粘土の彩度の倍率**（worklist vita [P1] 段1。2026-08-23 ユーザー合意で 1.6）。
+ *
+ * 「色合いが全体的に濁っている」の主因を層別に測ったところ、
+ * ブルーム ±0 / 染み +1.7 / 膜の色乗り +2.7 / ライト中立 +1.4 / 映り込み OFF +3.2 に対して
+ * **彩度だけが ×1.5 で +4.5、×2.2 で +8.7**（本体の Lab 彩度 C。現状 8.6 / 背景の海 27.8）。
+ * ＝ **粘土そのものの彩度が、当たっている光量に対して低い**のが濁りの主因だった。
+ * 明度は上げない（上げると白茶ける）。dev パネル `#colormix-panel` で実機で詰める。
+ */
+const DEFAULT_CLAY_CHROMA_GAIN = 1.6;
+const clayChroma = { gain: DEFAULT_CLAY_CHROMA_GAIN };
+
+/**
+ * **本体（彫刻）に当たる光の量**（worklist vita [P1] 段2。2026-08-23 ユーザー合意）。
+ *
+ * Lab の彩度は**暗いと原理的に出ない**（本体の L は 34〜42 だった）。
+ * 彫刻のライトだけを上げる＝**背景ドームは暗いまま**（ドームは自前シェーダでライトを受けない）
+ * なので、深海の暗さは保ったまま本体の色だけが出るようになる。
+ * ただし上げ過ぎると白飛びして**逆に彩度が落ちる**ので、実測でピークを探して決めること。
+ */
+/**
+ * **既定 1.4（2026-08-23）。** 1.0 / 1.2 / 1.4 / 1.7 / 2.1 で実測したところ、
+ * 本体の Lab 彩度は 15 時 13.6 → 14.4 → **14.7** → 15.2 → 15.3、
+ * 3 時 15.2 → 15.7 → **15.9** → 16.0 → 16.0 と **1.4 前後で頭打ち**（それ以上は明るくなるだけ）。
+ * 陰影のコントラストは潰れず、夜はむしろ 10.4 → 12.0 と立体感が増えた。
+ * 背景ドームはライトを受けないので**深海の暗さは変わらない。**
+ */
+const DEFAULT_SCULPTURE_LIGHT_GAIN = 1.4;
+const sculptureLight = { gain: DEFAULT_SCULPTURE_LIGHT_GAIN };
+
+/**
+ * **表示へ渡す変位の平滑**（worklist vita [P1]「メッシュを細かくして動きを滑らかに」）。
+ *
+ * 表示メッシュ（detail 20）は変位を**線形補間**するだけなので、
+ * 変形メッシュ（detail 10）の三角形ごとの折れ目がそのまま画面に残る。
+ * ＝**「表示を細かくしても動きの滑らかさは上がらない」の実体。**
+ * 実測（2026-08-21）: 隣り合う頂点の変位の食い違い ÷ 変位の大きさ ＝
+ * **core 0.133（Fury）／0.180（I'm Yours）**。結晶面の上（0.122）と粘土面（0.135）で
+ * ほぼ同じなので、**稜が原因ではなく、変形場そのものがグリッド目で暴れている。**
+ *
+ * 直し方は「変形の解像度を上げる」ではなく（頂点数に比例して CPU が重くなる。
+ * 過去に却下済み）、**表示へ渡す変位だけを 1-ring で平滑する**。
+ * 蓄積・完成形の状態（`vectorField` / `sculptureMemory`）は**一切触らない**ので、
+ * 作品の中身は変わらず、描画の再構成だけが滑らかになる。
+ * 膜で承認済みの `relaxMembraneFolds`（位置ではなく変位を平滑）と同じ考え方。
+ *
+ * `keepCrystal` は結晶面の上で平滑を弱める割合（稜を残すため）。
+ */
+const DEFAULT_DISPLAY_SMOOTH = 0.55;
+const DEFAULT_DISPLAY_SMOOTH_KEEP_CRYSTAL = 0.7;
+const displaySmooth = {
+  strength: DEFAULT_DISPLAY_SMOOTH,
+  keepCrystal: DEFAULT_DISPLAY_SMOOTH_KEEP_CRYSTAL,
+  enabled: true,
+};
+
 const pearlColorMix = {
   spread: DEFAULT_PEARL_MIX_SPREAD,
   balance: DEFAULT_PEARL_MIX_BALANCE,
+  /** 面内の**色相**ノイズの倍率（彩度・明度のムラには掛けない） */
+  hueNoise: DEFAULT_PEARL_HUE_NOISE,
   enabled: true,
 };
 
@@ -360,6 +492,136 @@ const maturityMix = {
 };
 
 /**
+ * 主旋律チャンネル（vita 段A1・2026-08-24 プラン合意）の既定値。
+ * 検出は `RhythmDetector` の melodyLine、表示は「コアを伝わる波」＋「膜の光の帯」（両方採用）。
+ * 実測（2026-08-24 vocal_probe）: ロビンソン 13.5句/分・修羅場 12句/分（旧検出は 1.5 / 0）。
+ * 実測（2026-08-31 Phase 1 実機 OK）: sense×3 / bulge×3 / contour×2 / stretch×3 /
+ * bandOpen×2.55 / waveSpeed×3 を焼き込み済み。
+ */
+const DEFAULT_MELODY_LINE_SENSE = 3.0;
+/** 波の位相速度（rad/s）。接線流・膜句ローブの位相更新に使用 */
+const DEFAULT_PHRASE_WAVE_SPEED = 15.0;
+/** 句頭スポーン時の波振幅スケール（痕跡・句ローブの立ち上げ） */
+const DEFAULT_PHRASE_WAVE_AMP = 0.75;
+/** 膜の光の帯の発光ゲイン（2026-08-25 に主役を降りたので既定を下げた。下の uVoiceOpen が本線） */
+const DEFAULT_VOICE_BAND_GAIN = 0.18;
+/**
+ * **接線方向の流れのゲイン（2026-08-25・実機判定後の作り直し）。**
+ * 打点（キック／スネア／ハット）は例外なく法線方向へ出っ張るので、接線方向は
+ * **誰も使っていない空きチャンネル**。半径方向へは 1 も足さないため、
+ * 密な曲で打点と振幅を奪い合わない（＝修羅場で埋もれない）。
+ * 径方向の波（`DEFAULT_PHRASE_WAVE_AMP`）とは 90° 位相差で組になり、
+ * 合わせて表面波（Rayleigh 波）になる。径方向側は `liveOffset` 経由なので
+ * **痕跡（蓄積）の経路はそちらが担う。**
+ */
+// **2026-08-31 Phase 1 実機 OK（bulge×3 焼き込み）**
+const DEFAULT_PHRASE_FLOW_AMP = 1.14;
+/** 膜の句方向接線流の soft ceiling（world 単位） */
+const PHRASE_FLOW_CEIL = 0.28;
+/** 曲頭の LIVE ウォームアップ（秒）。この間 voice / 膜 solo を立ち上げない */
+const LIVE_WARMUP_SECONDS = 2.8;
+/**
+ * **主旋律の伸び（段A1 3 巡目・2026-08-26。ユーザー選択）。**
+ * 句のあいだ、体全体が句の方向へ伸びる。**シルエット（輪郭）が変わる**ので、
+ * 模様が動かなくても・遠目でも読める。原則「差はシルエットに出す」とも一致する。
+ * キックの縦潰れも非一様スケールを使うが、あちらは 0.1〜0.2 秒のインパルス、
+ * こちらは 1〜3 秒の持続なので**時間スケールで分離**できる（振幅を奪い合わない）。
+ */
+// **2026-08-31: 体全体伸び・撓みは廃止。声は膜の接線流（DEFAULT_PHRASE_FLOW_AMP）。**
+/** 膜の句ローブ（≈83°。スネア strike より広い） */
+const VOICE_MEMBRANE_COS = 0.12;
+/**
+ * **句の時間構造（2026-08-28）。** 句頭で立ち上がり、HOLD まで抑揚に追従し、LIFE で必ず 0 へ。
+ * 句頭は実測で 6〜11 回/分（＝5〜10 秒に 1 回）なので、LIFE 2 秒なら休みが 3〜8 秒残る。
+ * **休みがないと「句」として読めない**（それまでは 95〜97% の時間ずっと出ていて、
+ * 何を動かしても常時うねりに見えていた）。
+ */
+const PHRASE_ATTACK = 0.12;
+const PHRASE_HOLD = 0.85;
+const PHRASE_LIFE = 2.0;
+/**
+ * 接線変位の soft ceiling（world 単位）。**径方向と違って青天井ではない。**
+ * 半径 1.34 / detail 13 の辺長は約 0.115 で、隣接頂点との差がこれを超えると三角形が反転する。
+ * 剪断を作るのは振動成分だけ（1 辺で位相が 0.60 rad 進む ＝ 隣接差 ≈ 振幅 × 0.56）なので、
+/** 膜を「透かす」量。**2026-08-31 bandOpen×2.55 焼き込み** */
+const DEFAULT_VOICE_BAND_OPEN = 0.306;
+/** 膜周り glowDust の発光倍率（高音・波形駆動） */
+const DEFAULT_GLOW_DUST_GAIN = 1.0;
+/** 句中抑揚（contour）→ 膜振幅へのゲイン（Phase 1 実機 OK・contour×2 焼き込み） */
+const DEFAULT_VOICE_CONTOUR_GAIN = 2.3;
+/** 段B1: 膜の同心円波紋（法線変位） */
+const DEFAULT_MEMBRANE_RIPPLE_AMP = 0.038;
+const DEFAULT_MEMBRANE_RIPPLE_RINGS = 9.0;
+const DEFAULT_MEMBRANE_KICK_RIPPLE = 0.58;
+/** 段B2: 主旋律帯→膜の板ガラス化（gGemMask より先） */
+const DEFAULT_VOICE_GLASS_GAIN = 2.1;
+/** 段B2: 膜が凍ってから粘土ファセットが開くラグ（0..1） */
+const DEFAULT_VOICE_CLAY_LAG = 0.22;
+/** 段B3: 有機軸×膜ゲイン→粘液（帯の流れを遅く・alpha 微増） */
+const DEFAULT_MUCUS_STRENGTH = 0.72;
+const DEFAULT_MUCUS_FLOW_DAMP = 0.42;
+const DEFAULT_MUCUS_ALPHA = 0.14;
+/**
+ * 段A2: キック収縮語彙。
+ * **2026-09-04 実機で不採用 → 0（A2 前の thump 外向きに復帰）。**
+ * ハット純化（`DEFAULT_HAT_STRIKE_AMP`）は維持。
+ */
+const DEFAULT_KICK_CONTRACT = 0;
+/** 径方向の内向きゲイン。2巡では 0（不採用）。実験用に残す */
+const DEFAULT_KICK_RADIAL_CONTRACT = 0;
+/** キック縦収縮の最大（group.scale.y）。旧 kickAccent×0.075 では読めなかった */
+const DEFAULT_KICK_SQUASH = 0.2;
+/** 収縮の保持（秒）→ その後リリース */
+const KICK_CONTRACT_HOLD = 0.07;
+/** ハットの径バンプ係数（旧 0.6。粒子を主にするため弱める） */
+const DEFAULT_HAT_STRIKE_AMP = 0.2;
+/** スネア外向き（A2 でキックと分離したあと識別が落ちたので 0.38→0.48） */
+const DEFAULT_SNARE_CRACK_GAIN = 0.48;
+/**
+ * 段A3: 遊泳の地。出来事と独立した体スケールのマントル進行波。
+ * **liveOffset へ入れない・永久層へ bleed しない。** 打点で duck。
+ * 旧「常時うねり」との差: 低空間周波数・BPM 遅い周期・専用場・duck。
+ * 実機で旧うねりに見えたら `DEFAULT_SWIM_AMP=0` で即戻す。
+ */
+const DEFAULT_SWIM_AMP = 0.055;
+/** 拍あたりのうねり回数（0.28 ≈ 3.5 拍で 1 周期） */
+const DEFAULT_SWIM_SPEED = 0.28;
+/** 体を一周する波の数（1 前後＝体スケール） */
+const DEFAULT_SWIM_WAVES = 1.05;
+/** 打点・句頭があるとき遊泳を退ける量 0..1 */
+const DEFAULT_SWIM_DUCK = 0.72;
+/** 体全体の姿勢揺れ（rad） */
+const DEFAULT_SWIM_SWAY = 0.038;
+/** 膜の同心円へ載せる遊泳寄与 */
+const DEFAULT_SWIM_MEMBRANE = 0.85;
+const swimTuning = {
+  amp: 1,
+  speed: 1,
+  waves: 1,
+  duck: 1,
+  sway: 1,
+  membrane: 1,
+};
+const voiceTuning = {
+  /** 検出感度（presence の入力レベル倍率。RhythmDetector が読む） */
+  sense: 1,
+  /** 以下は DEFAULT_* への倍率 */
+  waveAmp: 1,
+  waveSpeed: 1,
+  bandGain: 1,
+  flowAmp: 1,
+  bandOpen: 1,
+  stretch: 1,
+  bend: 1,
+  /** 句中抑揚 → 膜の流れ・波の強さ（Phase 1） */
+  contour: 1,
+  /** 局所隆起（句方向への塊）。**膜の声チャンネル** */
+  bulge: 1,
+  /** 句の長さの倍率（PHRASE_HOLD / PHRASE_LIFE へ掛かる）。**うねって見えたらまずここを下げる** */
+  phraseLife: 1,
+};
+
+/**
  * 熟成度（maturity）の入力の dev 読み出し。**worklist [P1]。**
  * `window.__maturity` に生やす（`maturity_probe.js` が読む）。
  *
@@ -386,6 +648,320 @@ const maturityDebug = {
   /** 有音だった秒数 */
   activeSeconds: 0,
   completed: false,
+};
+
+/**
+ * LIVE の動きの dev 読み出し（worklist [P0]「LIVE が単調／密な曲で見えない」）。
+ * `window.__live` に生やす（`live_motion_probe.js` が読む）。
+ *
+ * **打点イベントの量と、画面上で実際に動いた量を同時に出す**ためのもの。
+ * 「イベントは出ているのに動いて見えない」（＝視覚側の飽和・埋もれ）を
+ * 数値で切り分けられないと、係数の当てずっぽうに戻る。軸・熟成度と同じ理由で消さないこと。
+ *
+ * `acc` はフレームごとの集計（probe が `take()` で回収してリセットする）。
+ * ポーリングでは取りこぼすので、**飽和率はフレーム単位で数える。**
+ */
+/** 段B2 診断: 1=通常 / 0=B2 完全 off（`voice_glass_ab.js`） */
+const voiceGlassDiag = { mul: 1 };
+const liveDebug = {
+  /** 打点（減衰込みの現在値） */
+  kick: 0,
+  snare: 0,
+  hat: 0,
+  flash: 0,
+  phrase: 0,
+  /** 聴感ジェスチャー（`getListeningEventDrive`） */
+  thump: 0,
+  ting: 0,
+  chatter: 0,
+  sparkle: 0,
+  /** LIVE の開き具合 */
+  listen: 0,
+  drawScale: 0,
+  busy: 0,
+  maturity: 0,
+  /** 膜のドライブ（uLive / uGlow の目標値。天井 1.05 / 1.2） */
+  membraneLive: 0,
+  membraneGlow: 0,
+  /** 膜の線・模様の強さ（clamp01。1 に張り付くと模様が常時最大） */
+  midFlash: 0,
+  /** 高域チャンネルの切り分け用（検出そのものが出ていないのか、視覚側で消えているのか） */
+  rHat: 0,
+  salHigh: 0,
+  salMid: 0,
+  bandHigh: 0,
+  /**
+   * ボーカル・主旋律の切り分け用（段A0 診断。`vocal_probe.js` が読む）。
+   * 「歌モノで声が見えない」が検出の欠落か表示の欠落かを分けるために、
+   * メロ帯域（500–1800Hz）の持続レベル・存在感・句頭オンセットをそのまま出す。
+   */
+  melodyBand: 0,
+  melodyFocus: 0,
+  melodyOnset: 0,
+  /** 主旋律の「線」（段A1 実装。検出の after を測る） */
+  melodyPresence: 0,
+  melodyHead: 0,
+  melodyContour: 0,
+  /** 段A1 切り分け用の一時診断: 打点と波の実変位量（頂点平均の絶対値）。判定後に消す */
+  pulseDisp: 0,
+  waveDisp: 0,
+  flowDisp: 0,
+  /** 接線流の頂点ごとの最大変位。辺長 0.115 を超えると三角形が反転するので上限の見張り */
+  flowPeak: 0,
+  /** 伸び・撓みの強さ 0–1（句頭スナップ）。句が無いとき 0 */
+  voiceStretch: 0,
+  /** 句頭インパルス（spawn 直後だけ。句中は bulgeDisp） */
+  voiceHead: 0,
+  /** 句の波源の合成振幅（駆動信号。局所隆起の入力） */
+  phraseAmp: 0,
+  /** presence×contour の膜駆動（Phase 1 診断） */
+  contourDrive: 0,
+  /** 局所隆起の頂点平均変位（膜の声チャンネル） */
+  bulgeDisp: 0,
+  /** 段B1: 膜同心円波紋の平均法線変位 */
+  waterRipple: 0,
+  /** 段B2: 帯→板ガラス（`voice_glass_ab.js`） */
+  voiceGlass: 0,
+  voiceGlassGain: 0,
+  facetVoiceGlassMax: 0,
+  /** 段B3: 粘液強度 */
+  mucus: 0,
+  /** 段A2: キック収縮エンベロープ 0..1 */
+  kickContract: 0,
+  /** 段A2: 種類ごとの発火（take 区間） */
+  kickContractEvents: 0,
+  snareOutEvents: 0,
+  hatSparkleEvents: 0,
+  /** 段A3: 遊泳の地（表示のみ・bleed しない） */
+  swimAmp: 0,
+  swimDuck: 1,
+  swimPhase: 0,
+  /** 遊泳場の頂点平均絶対変位 */
+  swimField: 0,
+  /** 1 = melodyOnset を中音打点へ流さない（voiced 主旋律線が出ている） */
+  voicedMidBlocked: 0,
+  /** ハット検出の回数（`take()` の区間内） */
+  hatEvents: 0,
+  /** 実際の動き: 変形メッシュ頂点の移動量（world 単位 / 秒。平均） */
+  coreMotion: 0,
+  membraneMotion: 0,
+  /**
+   * **一番動いている所の動き**（頂点ごとの移動量の上位 5% の平均）。
+   * 目に見えるのは平均ではなく局所の変化なので、打点を局在させると
+   * 平均が下がってピークが上がる。両方見ないと判断を誤る。
+   */
+  coreMotionPeak: 0,
+  membraneMotionPeak: 0,
+  /** 打点由来の変位そのもの（`liveOffset` / `idleWobbleField` の平均絶対値） */
+  liveAmp: 0,
+  idleAmp: 0,
+  /**
+   * **変位場の粗さ**（worklist vita [P1]「動きを滑らかに」）。
+   * 隣り合う頂点で変位がどれだけ食い違うか ÷ 変位の大きさ。
+   * 大きいほど「低解像度のグリッド目」が形と動きに出ている。
+   * 表示メッシュは変位を**線形補間**しているので、この粗さはそのまま画面に残る。
+   */
+  coreRough: 0,
+  membraneRough: 0,
+  /** 結晶になっている面の上／それ以外に分けた粗さ（稜を潰さずに直せるかの判断用） */
+  coreRoughGem: 0,
+  coreRoughClay: 0,
+  /** **表示へ実際に渡した**変位の粗さ（平滑後）。これが画面に出る粗さ */
+  coreRoughDisplay: 0,
+  /** 集計（フレーム単位。`take()` でリセット） */
+  acc: {
+    frames: 0,
+    seconds: 0,
+    sum: {} as Record<string, number>,
+    sumSq: {} as Record<string, number>,
+    max: {} as Record<string, number>,
+    min: {} as Record<string, number>,
+    /** 飽和していたフレーム数（天井の 97% 以上） */
+    sat: {} as Record<string, number>,
+    /** 打点の直後（0.18 秒以内）とそれ以外で、動きがどれだけ違うか */
+    hatEvents: 0,
+    kickContractEvents: 0,
+    snareOutEvents: 0,
+    hatSparkleEvents: 0,
+    hitFrames: 0,
+    hitCore: 0,
+    hitMembrane: 0,
+    calmFrames: 0,
+    calmCore: 0,
+    calmMembrane: 0,
+  },
+  /**
+   * 直近 900 フレーム（60fps で約 15 秒）の**生の波形**。
+   * 平均値では「点滅しているのか点きっぱなしなのか」が判定できないので、
+   * before/after の比較図はここから描く（`live_trace.js`）。
+   */
+  traceIndex: 0,
+  trace: new Float32Array(900 * 5),
+  dump() {
+    const rows: number[][] = [];
+    for (let i = 0; i < 900; i += 1) {
+      const j = ((this.traceIndex + i) % 900) * 5;
+      rows.push([this.trace[j], this.trace[j + 1], this.trace[j + 2], this.trace[j + 3], this.trace[j + 4]]);
+    }
+    return rows;
+  },
+  /**
+   * 段A0/A1 診断用の長窓リングバッファ（シミュレーション周期で約60秒 / `vocal_probe.js` が読む）。
+   * headless では描画 rAF が大きく絞られるため、**外からのポーリングでは取れない**
+   * （実測: 40秒で12サンプル）。シミュレーション周期で書くこれを1回だけ回収する。
+   * 列: [dt, melodyBand, melodyFocus, melodyOnset, phrase, flash, chatter, kick, snare,
+   *      membraneLive, melodyPresence, melodyHead, melodyContour, pulseDisp, waveDisp, flowDisp, flowPeak, voiceStretch, phraseAmp, voicedMidBlocked]
+   */
+  vocalIndex: 0,
+  vocalTrace: new Float32Array(3600 * 20),
+  dumpVocal() {
+    const rows: number[][] = [];
+    for (let i = 0; i < 3600; i += 1) {
+      const j = ((this.vocalIndex + i) % 3600) * 20;
+      if (this.vocalTrace[j] <= 0) continue;
+      const row: number[] = [];
+      for (let k = 0; k < 20; k += 1) row.push(this.vocalTrace[j + k]);
+      rows.push(row);
+    }
+    return rows;
+  },
+  take() {
+    const a = this.acc;
+    const out = {
+      frames: a.frames,
+      seconds: a.seconds,
+      mean: {} as Record<string, number>,
+      sd: {} as Record<string, number>,
+      max: { ...a.max },
+      min: { ...a.min },
+      satRatio: {} as Record<string, number>,
+      /** 打点直後の動き ÷ それ以外の動き。1.0 = 打点が見て取れない */
+      hatEventsPerSec: a.hatEvents / Math.max(0.001, a.seconds),
+      kindPerSec: {
+        kickContract: a.kickContractEvents / Math.max(0.001, a.seconds),
+        snareOut: a.snareOutEvents / Math.max(0.001, a.seconds),
+        hatSparkle: a.hatSparkleEvents / Math.max(0.001, a.seconds),
+      },
+      hitCoupling: {
+        core: (a.hitCore / Math.max(1, a.hitFrames)) / Math.max(1e-6, a.calmCore / Math.max(1, a.calmFrames)),
+        membrane:
+          (a.hitMembrane / Math.max(1, a.hitFrames)) /
+          Math.max(1e-6, a.calmMembrane / Math.max(1, a.calmFrames)),
+        hitRatio: a.hitFrames / Math.max(1, a.hitFrames + a.calmFrames),
+      },
+    };
+    const n = Math.max(1, a.frames);
+    for (const k of Object.keys(a.sum)) {
+      const mean = a.sum[k] / n;
+      out.mean[k] = mean;
+      out.sd[k] = Math.sqrt(Math.max(0, a.sumSq[k] / n - mean * mean));
+      out.satRatio[k] = (a.sat[k] ?? 0) / n;
+    }
+    a.frames = 0;
+    a.seconds = 0;
+    a.sum = {};
+    a.sumSq = {};
+    a.max = {};
+    a.min = {};
+    a.sat = {};
+    a.hatEvents = 0;
+    a.kickContractEvents = 0;
+    a.snareOutEvents = 0;
+    a.hatSparkleEvents = 0;
+    a.hitFrames = 0;
+    a.hitCore = 0;
+    a.hitMembrane = 0;
+    a.calmFrames = 0;
+    a.calmCore = 0;
+    a.calmMembrane = 0;
+    return out;
+  },
+};
+
+/** 上位 fraction の平均（計測用。上位 5% ＝「一番動いている所」） */
+const topFractionMean = (values: Float32Array, fraction: number) => {
+  const n = values.length;
+  if (n === 0) return 0;
+  const take = Math.max(1, Math.round(n * fraction));
+  const sorted = Array.from(values).sort((a, b) => b - a);
+  let sum = 0;
+  for (let i = 0; i < take; i += 1) sum += sorted[i];
+  return sum / take;
+};
+
+/** 計測中だけ true（`live_motion_probe.js` が立てる）。既定は何もしない。 */
+const liveProbe = { on: false };
+
+/**
+ * 硬い天井（`clamp01` / `Math.min`）で切ると、天井を超えたぶんの**順序が消える**。
+ * 密な曲では複数の打点が重なって常に天井を超えるので、「常に最大＝変化が見えない」になる
+ * （2026-08-20 の実測: 膜の uLive 目標が平均 1.36／天井 1.05、飽和率 91%）。
+ *
+ * knee より下は**恒等**（既存の見た目を動かさない）、そこから上は天井へ漸近させて
+ * 重なったぶんの差を残す。**打点を弱めるのではなく、切り捨てをやめる。**
+ */
+/**
+ * 複数チャンネルの出来事をまとめる。**一番強いものは丸ごと、残りは 0.4 倍で足す。**
+ *
+ * 単純な和だと、低・中・高が同時に鳴っているだけで天井を超えて「点きっぱなし」になる。
+ * 原則の「抑制は同時多発の視覚渋滞を防ぐため」を、**打点を弱めるのではなく
+ * 足し方を変える**ことで満たす。1 チャンネルしか鳴っていない瞬間（まばらな曲の大半）は
+ * 和と同じ値になるので、既存の見た目は変わらない。
+ */
+const combineEvents = (...values: number[]) => {
+  let max = 0;
+  let sum = 0;
+  for (const v of values) {
+    if (v > max) max = v;
+    sum += v;
+  }
+  return max + (sum - max) * 0.5;
+};
+
+const softCeil = (value: number, ceil: number, knee = 0.62) => {
+  if (value <= 0) return 0;
+  const k = ceil * knee;
+  if (value <= k) return value;
+  return k + (ceil - k) * (1 - Math.exp(-(value - k) / (ceil - k)));
+};
+
+/**
+ * 粘土色の dev 読み出し（worklist vita [P1]「初期色が面白くない」）。
+ * `window.__clay` に生やす（`initial_color_grid.js` が読む）。
+ *
+ * ユーザーの指摘は「**初期の色が何で決まっているのか不明**で、あまり面白くない」。
+ * 色は「スタイル基準 → 天気シフト → 時刻シフト → 曲パレット → 面内の2極混色 → 面内ノイズ」と
+ * 何段も重なるので、**どの段で環境の信号が消えているのかを数値で出せないと直せない。**
+ * 軸・熟成度・LIVE と同じ理由で消さないこと。
+ */
+const clayDebug = {
+  /** いま効いている粘土の基準色（追従後） */
+  hueBase: 0,
+  satBase: 0,
+  lightBase: 0,
+  /** 天気ぶんのシフト（スタイル基準色相に対する差分） */
+  wxHue: 0,
+  wxSat: 0,
+  wxLight: 0,
+  /** 時刻ぶんのシフト */
+  hourHue: 0,
+  hourSat: 0,
+  hourLight: 0,
+  /** 目標（追従前）と、スタイル素の基準 */
+  targetHue: 0,
+  styleHue: 0,
+  /** 曲パレットの寄り具合 0..1 */
+  songBlend: 0,
+  /** 面内混色の2極（ここが「紫×緑」になっていないか） */
+  warmHue: 0,
+  coolHue: 0,
+  /** 面内のランダムな色相ノイズの振れ幅（±。環境の信号がこれに埋もれる） */
+  hueNoiseSpan: 0,
+  /** いまの振幅ノブ */
+  weatherGain: 1,
+  hourGain: 1,
+  condition: "-",
+  hour: -1,
 };
 
 const structureTracker = new StructureTracker();
@@ -434,6 +1010,17 @@ const scopeCyanDrive = (rhythm: RhythmEvents) =>
       rhythm.hatRing * 0.12 +
       rhythm.chop * 0.55 +
       rhythm.transient * 0.45,
+  );
+
+/** 膜周り粒子用：キック／スネアより高音・波形を主役にする */
+const scopeHighDrive = (rhythm: RhythmEvents, bands: AudioBands) =>
+  clamp01(
+    rhythm.hat * 0.62 +
+      rhythm.hatRing * 0.38 +
+      rhythm.salienceHigh * 0.55 +
+      rhythm.transient * 0.35 +
+      bands.high * 0.42 +
+      bands.brightness * 0.18,
   );
 
 const emptyBands = (): AudioBands => ({
@@ -500,6 +1087,20 @@ class RhythmTracker {
   private deltaHigh = 0;
   private deltaPeak = 0;
   private deltaEnergy = 0;
+  /**
+   * 主旋律の「線」トラッカー（vita 段A1）。生帯域（正規化・ゲート前）の包絡から
+   * 句の持続・句頭・抑揚を取る。fast=速い包絡 / med=音節を均した包絡 /
+   * bed=ゆっくり上がる床（ギターの壁など持続成分）/ mod=音節・ビブラート変調。
+   */
+  private melodyLineFast = 0;
+  private melodyLineMed = 0;
+  private melodyLineBed = 0;
+  private melodyLineMod = 0;
+  private melodyLinePresence = 0;
+  private melodyLineContour = 0;
+  private melodyLineHead = 0;
+  private melodyLineAge = 0;
+  private melodyLineGapTime = 10;
   private lastKick = 10;
   private lastSnare = 10;
   private lastHat = 10;
@@ -545,6 +1146,12 @@ class RhythmTracker {
   private trailLow = 0;
   private trailMid = 0;
   private trailHigh = 0;
+  /** ゲート前の帯域の前フレーム値（飽和した曲でオンセットを拾い直す） */
+  private prevRawSub = 0;
+  private prevRawLow = 0;
+  private prevRawMid = 0;
+  private prevRawMelody = 0;
+  private prevRawHigh = 0;
 
   reset() {
     this.envSub = 0;
@@ -561,6 +1168,15 @@ class RhythmTracker {
     this.deltaHigh = 0;
     this.deltaPeak = 0;
     this.deltaEnergy = 0;
+    this.melodyLineFast = 0;
+    this.melodyLineMed = 0;
+    this.melodyLineBed = 0;
+    this.melodyLineMod = 0;
+    this.melodyLinePresence = 0;
+    this.melodyLineContour = 0;
+    this.melodyLineHead = 0;
+    this.melodyLineAge = 0;
+    this.melodyLineGapTime = 10;
     this.lastKick = 10;
     this.lastSnare = 10;
     this.lastHat = 10;
@@ -603,6 +1219,11 @@ class RhythmTracker {
     this.trailLow = 0;
     this.trailMid = 0;
     this.trailHigh = 0;
+    this.prevRawSub = 0;
+    this.prevRawLow = 0;
+    this.prevRawMid = 0;
+    this.prevRawMelody = 0;
+    this.prevRawHigh = 0;
   }
 
   /** 直近1秒の検出イベント密度 0〜1（多いほど埋もれやすいミックス） */
@@ -696,7 +1317,12 @@ class RhythmTracker {
     return { open: false, start, peak: nextPeak, length: liveLen, ring: 0 };
   }
 
-  update(bands: AudioBands, waveform: WaveformMetrics | null, deltaTime: number): RhythmEvents {
+  update(
+    bands: AudioBands,
+    waveform: WaveformMetrics | null,
+    deltaTime: number,
+    raw?: RawBands,
+  ): RhythmEvents {
     this.elapsed += deltaTime;
     const a = Math.min(1, deltaTime * 20);
     const prevSub = this.envSub;
@@ -711,11 +1337,33 @@ class RhythmTracker {
     this.envMelody += (bands.melody - this.envMelody) * a;
     this.envHigh += (bands.high - this.envHigh) * a;
 
-    const onsetSub = Math.max(0, bands.sub - prevSub);
-    const onsetLow = Math.max(0, bands.low - prevLow);
-    const onsetMid = Math.max(0, bands.mid - prevMid);
-    const onsetMelody = Math.max(0, bands.melody - prevMelody);
-    const onsetHigh = Math.max(0, bands.high - prevHigh);
+    let onsetSub = Math.max(0, bands.sub - prevSub);
+    let onsetLow = Math.max(0, bands.low - prevLow);
+    let onsetMid = Math.max(0, bands.mid - prevMid);
+    let onsetMelody = Math.max(0, bands.melody - prevMelody);
+    let onsetHigh = Math.max(0, bands.high - prevHigh);
+
+    // **ゲートで潰れたぶんを生の帯域から拾い直す**（[P0] 2026-08-20）。
+    // ゲート後の値が 1 に張り付いている区間では上の差分が 0 になるので、
+    // 生の差分にゲート区間の傾きを掛けて**同じ感度**に揃え、大きい方を採る。
+    // 飽和していない（＝静かな）曲では両者がほぼ一致するので、**検出感度は変わらない。**
+    if (raw) {
+      const pSub = this.prevRawSub;
+      const pLow = this.prevRawLow;
+      const pMid = this.prevRawMid;
+      const pMelody = this.prevRawMelody;
+      const pHigh = this.prevRawHigh;
+      this.prevRawSub = raw.sub;
+      this.prevRawLow = raw.low;
+      this.prevRawMid = raw.mid;
+      this.prevRawMelody = raw.melody;
+      this.prevRawHigh = raw.high;
+      onsetSub = Math.max(onsetSub, Math.max(0, raw.sub - pSub) * RAW_ONSET_GAIN.sub);
+      onsetLow = Math.max(onsetLow, Math.max(0, raw.low - pLow) * RAW_ONSET_GAIN.low);
+      onsetMid = Math.max(onsetMid, Math.max(0, raw.mid - pMid) * RAW_ONSET_GAIN.mid);
+      onsetMelody = Math.max(onsetMelody, Math.max(0, raw.melody - pMelody) * RAW_ONSET_GAIN.melody);
+      onsetHigh = Math.max(onsetHigh, Math.max(0, raw.high - pHigh) * RAW_ONSET_GAIN.high);
+    }
     const bassOnset = Math.max(onsetSub, onsetLow * 0.92);
     const midOnset = Math.max(onsetMid * 0.9, onsetMelody * 1.25);
 
@@ -750,6 +1398,74 @@ class RhythmTracker {
     this.deltaHigh += (onsetHigh - this.deltaHigh) * Math.min(1, deltaTime * 5.5);
     this.deltaPeak += (peakDelta - this.deltaPeak) * Math.min(1, deltaTime * 5.5);
     this.deltaEnergy += (energyDelta - this.deltaEnergy) * Math.min(1, deltaTime * 5.5);
+
+    // --- 主旋律の「線」（vita 段A1・2026-08-24 プラン合意）---
+    // 声・リードは打点ではなく「句」で来る。正規化後の帯域は密な曲で飽和して差分が
+    // 消える（A0 実測: 修羅場でメロ帯域 0.91 張り付き・句頭 0/分）ので、**生帯域**の
+    // 包絡と「床」（ゆっくり上がる持続成分＝ギターの壁など）の**比**で持続を取る。
+    // 比なので飽和しない。さらに音節・ビブラート帯の変調で「歌・リードらしさ」を重み付けし、
+    // 壁（変調のない持続音）を句として拾わない。busy には結合しない（密な曲で声を殺さない）。
+    {
+      const rawMelody = raw ? raw.melody : bands.melody;
+      const noiseFloor = 0.008;
+      this.melodyLineFast += (rawMelody - this.melodyLineFast) * Math.min(1, deltaTime / 0.08);
+      this.melodyLineMed +=
+        (this.melodyLineFast - this.melodyLineMed) * Math.min(1, deltaTime / 0.3);
+      const bedRate = this.melodyLineFast > this.melodyLineBed ? deltaTime / 7 : deltaTime / 1.6;
+      this.melodyLineBed += (this.melodyLineFast - this.melodyLineBed) * Math.min(1, bedRate);
+      const lift = Math.max(0, this.melodyLineMed - this.melodyLineBed * 0.82);
+      // sense は dev ノブ（既定 1）。実機で「声を拾いすぎ／拾わなすぎ」を追い込む口
+      const level =
+        (lift / (this.melodyLineBed + noiseFloor)) * DEFAULT_MELODY_LINE_SENSE * voiceTuning.sense;
+      const mod = Math.abs(this.melodyLineFast - this.melodyLineMed);
+      this.melodyLineMod += (mod - this.melodyLineMod) * Math.min(1, deltaTime / 0.4);
+      const modNorm = this.melodyLineMod / (this.melodyLineMed + noiseFloor);
+      const sing = smoothstep(0.05, 0.16, modNorm);
+      const focusW = smoothstep(0.08, 0.26, bands.melodyFocus);
+      const presenceTarget =
+        smoothstep(0.1, 0.45, level) *
+        (0.4 + sing * 0.6) *
+        (0.35 + focusW * 0.65) *
+        smoothstep(noiseFloor, noiseFloor * 3, this.melodyLineFast);
+      const presenceRising = presenceTarget > this.melodyLinePresence;
+      this.melodyLinePresence +=
+        (presenceTarget - this.melodyLinePresence) *
+        Math.min(1, deltaTime * (presenceRising ? 9 : 2.6));
+      // **抑揚（contour）= 句中の音節・ビブラートの浮き。** presence（線の有無）と分離する。
+      // 旧実装は level を追従していたため contour ≈ presence になり、Phase 1 の
+      // 「抑揚で振幅を変える」が効いていなかった。
+      const syllableLift = Math.max(0, this.melodyLineFast - this.melodyLineMed * 0.88);
+      const syllableNorm = syllableLift / (this.melodyLineMed + noiseFloor);
+      const vibratoW = smoothstep(0.04, 0.2, modNorm);
+      const syllableW = smoothstep(0.06, 0.28, syllableNorm);
+      const contourInstant = clamp01(syllableW * 0.58 + vibratoW * 0.42);
+      if (this.melodyLinePresence > 0.12) {
+        const contourRising = contourInstant > this.melodyLineContour;
+        this.melodyLineContour +=
+          (contourInstant - this.melodyLineContour) *
+          Math.min(1, deltaTime * (contourRising ? 16 : 6));
+      } else {
+        this.melodyLineContour *= Math.exp(-deltaTime * 10);
+      }
+      // 句の区切り: 0.35 秒以上の空白のあとに立ち上がったら句頭
+      if (this.melodyLinePresence > 0.3) {
+        if (this.melodyLineGapTime > 0.35) {
+          this.melodyLineHead = Math.max(
+            this.melodyLineHead,
+            0.5 + this.melodyLinePresence * 0.5,
+          );
+          this.melodyLineAge = 0;
+        }
+        this.melodyLineGapTime = 0;
+        this.melodyLineAge += deltaTime;
+      } else if (this.melodyLinePresence < 0.18) {
+        this.melodyLineGapTime += deltaTime;
+        if (this.melodyLineGapTime > 0.6) {
+          this.melodyLineAge = 0;
+        }
+      }
+      this.melodyLineHead *= Math.exp(-deltaTime * 7);
+    }
 
     this.lastKick += deltaTime;
     this.lastSnare += deltaTime;
@@ -836,17 +1552,25 @@ class RhythmTracker {
     const snareLevel = Math.max(bands.mid, bands.high * 0.75);
 
     // --- hat: 拾いすぎないが、チッチのトレンドは落とさない ---
-    const hatGate = 0.012 + this.deltaHigh * 0.4;
+    // **密な曲で高域チャンネル（粒子）が丸ごと死んでいた**（2026-08-20 [P0] の実測:
+    // Fury 6.8 分で hat 平均 0.005 / 粒 0.015 ＝ ライドが鳴り続けているのにほぼ無反応）。
+    // 原因は3つ:
+    //   (1) 適応ゲートの係数 0.4 が高く、**均等に刻むライド／ハットは自分自身の平均に
+    //       埋もれて**常に閾値ぎりぎりで落ちる（適応閾値が定常パターンに弱い典型）。
+    //   (2) 歪みの壁で onsetMid が大きく `onsetHigh > onsetMid*0.55` が通らない。
+    //   (3) キック／スネアと同じフレームなら**丸ごと捨てていた**。
+    // 粒子は低音（粘土）・中音（膜）とは**別の視覚チャンネル**なので、同時に出ても
+    // 視覚渋滞にならない。捨てるのをやめ、同時のときだけ弱める（原則の「抑制は
+    // 同時多発の視覚渋滞用であって、密な曲を丸ごと大人しくする手段ではない」）。
+    const hatGate = 0.012 + this.deltaHigh * 0.24;
+    const hatSimultaneous = 1 - clamp01(Math.max(kick, snare)) * 0.4;
     const hat =
       this.lastHat > 0.022 &&
       onsetHigh > hatGate &&
       bands.high > 0.024 &&
-      kick < 0.08 &&
-      snare < 0.08 &&
-      // シンバル／金物はミッドにも金属的なシマーが乗るため、高音優勢の比率をやや緩める
-      onsetHigh > onsetMid * 0.55 &&
+      onsetHigh > onsetMid * 0.35 &&
       (peakDelta > fibUnit(3, 34) || energyDelta > fibUnit(2, 34) || onsetHigh > hatGate * 1.35)
-        ? onsetHigh * 1.15
+        ? onsetHigh * 1.15 * hatSimultaneous
         : 0;
 
     // --- transient: シンバル／クラッシュ（強めの高域＋波形だけ）---
@@ -1090,6 +1814,12 @@ class RhythmTracker {
       snareRing: this.snareRing,
       hatRing: this.hatRing,
       melodyOnset: clamp01(this.deltaMelody * 2.4),
+      melodyLine: {
+        presence: this.melodyLinePresence,
+        head: clamp01(this.melodyLineHead),
+        contour: this.melodyLineContour,
+        age: this.melodyLineAge,
+      },
       salienceLow,
       salienceMid,
       salienceHigh,
@@ -1121,8 +1851,31 @@ type GrowthAnchor = {
   age: number;
 };
 
-/** 彫刻用ジオメトリの分割数（merge 後も十分な頂点密度を確保）。 */
-const SCULPTURE_SPHERE_DETAIL = 10;
+/**
+ * 彫刻用ジオメトリの分割数（merge 後も十分な頂点密度を確保）。
+ *
+ * **動きの解像度はここで決まる。** 表示メッシュ（`SCULPTURE_DISPLAY_DETAIL`）をいくら
+ * 細かくしても、変形はこの解像度で計算されるので動きのグリッド目は残る。
+ *
+ * 上げると **CPU の per-vertex 変形が頂点数に比例して重くなる**（過去に分割を上げて
+ * 「カクカク＋重い」で却下されている）。さらに結晶面の最寄り探索が
+ * 頂点数 × 36 面なので、群晶のコストも比例する。
+ *
+ * **フレームレートは headless（swiftshader）では測れない。**
+ * `?simDetail=<n>` で上書きできるようにして（dev だけ。10〜16 にクランプ）実機で試してもらい、
+ * **2026-08-21 にユーザーが「13 がギリギリ。それ以上は重くなりすぎる」と判断したので 13 を既定にした。**
+ * 10 → 13 で三角形 2,420 → 3,920（頂点 1,245 → 1,962 ＝ 1.58 倍）。
+ * **これ以上上げないこと。** 上げるなら実機の fps を測り直してユーザーの判断を取る。
+ */
+const parseSimDetailOverride = () => {
+  if (!isDevSurface()) return null;
+  const raw = new URLSearchParams(window.location.search).get("simDetail");
+  if (raw === null) return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return null;
+  return Math.max(10, Math.min(16, Math.round(value)));
+};
+const SCULPTURE_SPHERE_DETAIL = parseSimDetailOverride() ?? 13;
 /**
  * 表示専用メッシュの分割数。**変形計算はこの解像度では走らない**（`display-mesh.ts`）。
  * 変形は `SCULPTURE_SPHERE_DETAIL` のメッシュで計算し、変位だけをここへ補間する。
@@ -1215,10 +1968,27 @@ const surfaceFragmentShader = /* glsl */ `
   uniform float uMelodyLine;
   uniform float uMelodyFresnel;
   uniform float uMelodyNoise;
+  /** 膜への「地の色」の乗り（0 = 2026-08-11 案A の従来値 / 1 = 最大） */
+  uniform float uPaletteBias;
   uniform float uMelodyFlowAnim;
   uniform float uHigh;
   uniform float uLive;
   uniform float uGlow;
+  /** 主旋律の帯（vita 段A1）: 強さ / 波源方向（オブジェクト空間）/ 句内の流れ位相 */
+  uniform float uVoice;
+  uniform vec3 uVoiceDir;
+  uniform float uVoicePhase;
+  uniform float uVoiceOpen;
+  /** 段B1: 膜の同心円波紋（位相・強さ。幾何リップルと同期） */
+  uniform float uWaterRipplePhase;
+  uniform float uWaterRippleGain;
+  /** 段B2: 帯→膜ガラス化の強さ（uMineral と掛け合わせ。uVoice=透過とは別） */
+  uniform float uVoiceGlassGain;
+  uniform float uVoiceGlass;
+  /** 段B3: 粘液（有機軸×膜ゲイン。0=恒等） */
+  uniform float uMucus;
+  /** 段C4: 晴れの金の陽だまり（0=恒等） */
+  uniform float uWeatherGold;
   uniform float uOpacity;
   uniform float uCompleted;
   uniform float uPetrify;
@@ -1272,7 +2042,15 @@ const surfaceFragmentShader = /* glsl */ `
     float softSheen = pow(NdotV, 1.15) * 0.52;
     float pearl = clamp(fresnel * 0.58 + softSheen, 0.0, 1.0);
     float frozen = smoothstep(0.0, 1.0, uCompleted);
-    float flowTime = uTime * (1.0 - frozen) * (1.0 + uLive * uMelodyFlowAnim);
+    float liveAmt = clamp(uLive, 0.0, 1.15);
+    float glowAmt = clamp(uGlow, 0.0, 1.15);
+    // 段B1: vita 再生中は待機時と同じ静かな水壳（模様レイヤーは足さない）
+    float vitaPlayShell = 1.0;
+    if (uVita > 0.5) {
+      vitaPlayShell = 1.0 - smoothstep(0.30, 0.56, liveAmt);
+    }
+    float flowBoost = uVita > 0.5 ? mix(0.30, 1.0, vitaPlayShell) : 1.0;
+    float flowTime = uTime * (1.0 - frozen) * (1.0 + uLive * uMelodyFlowAnim * flowBoost);
 
     float surfaceNoise = noise(vLocalPosition * 4.2 + vec3(0.0, flowTime * 0.34, 0.0));
     float fineNoise = noise(vLocalPosition * 18.0 - vec3(flowTime * 0.22));
@@ -1282,8 +2060,6 @@ const surfaceFragmentShader = /* glsl */ `
     // （常時ゆっくり流れる/歪む演出は「曲と関係あるように見えない」との指摘で撤去）。
     float meridian = sin(dot(vLocalPosition, vec3(9.5, 0.7, 8.2)) + fineNoise * 1.6);
     // 音楽連動の uLive/uGlow — 形状は抑えめでも光は 7/28 以前の煌めきを残す
-    float liveAmt = clamp(uLive, 0.0, 1.15);
-    float glowAmt = clamp(uGlow, 0.0, 1.15);
     // uLiveはアイドル呼吸（idleWobbleAmp）でも底上げされるため、そのままだと
     // 無音時にも縞模様(melodyLines)が薄く点灯し続けてしまい「音と無関係な固定の縞」に
     // 見えてしまっていた（ユーザー指摘で判明）。ライン模様専用に無音分を除いた
@@ -1297,39 +2073,61 @@ const surfaceFragmentShader = /* glsl */ `
     // 縞にならない不規則な3Dノイズ（sin波の帯ではなく既存のvalue noise）で
     // 散らばった細かい輝点を作り、「反応時にキラキラ光る」質感を縞無しで戻す。
     float glitter = pow(clamp(noise(vLocalPosition * 19.0 + vec3(6.4, 2.8, 11.1)), 0.0, 1.0), 3.4);
-    float melodyLines = (0.4 + glitter * 2.6) * lineDrive * uMelodyLine;
+    float vitaPattern = uVita > 0.5 ? vitaPlayShell : 1.0;
+    float melodyLines = (0.4 + glitter * 2.6) * lineDrive * uMelodyLine * vitaPattern;
     float dataLines = 0.0;
-    float microSignals = smoothstep(0.65, 0.96, meridian) * uHigh * lineDrive * 0.95;
+    float microSignals = smoothstep(0.65, 0.96, meridian) * uHigh * lineDrive * 0.95 * vitaPattern;
 
     vec3 baseColor = uPaletteColor;
     vec3 electricBlue = uPaletteAccent;
     // vita: ヒット時のハイライトも真珠シアン寄り（金色メロディは粘土パレットの
     // 桃緑と同居して「模様がうるさい」印象になりやすいので弱める）。
     vec3 hitTint = uVita > 0.5 ? vec3(0.82, 0.93, 1.0) : vec3(1.0, 0.82, 0.52);
-    // vita 案A（2026-08-11）: 膜ベースを真珠白＋electric シアンへ寄せ、
-    // 粘土パレットの色乗りを弱める。天気/曲の色は薄い染みとして残す（殺さない）。
+    // 段B1（2026-08-31）: 真珠シアンの「皮膚」→ 薄い水。天気/曲の色は染みとして残す。
     if (uVita > 0.5) {
-      vec3 pearlWhite = vec3(0.90, 0.95, 1.0);
-      vec3 cyanAccent = vec3(0.42, 0.76, 1.0);
-      baseColor = mix(pearlWhite, uPaletteColor, 0.20);
-      electricBlue = mix(cyanAccent, uPaletteAccent, 0.26);
+      vec3 waterClear = vec3(0.94, 0.97, 0.99);
+      vec3 waterDeep = vec3(0.55, 0.72, 0.86);
+      // 段C2: 浅瀬の水 — 底の粘土色が薄く透ける（B1 の澄さは維持）
+      // 段C2': 暖色地（琥珀・硫黄）ほど透けを足す — 青い水壳が黄系を緑に見せるのを防ぐ
+      float warmBody = smoothstep(-0.02, 0.24, uPaletteColor.r - uPaletteColor.b);
+      float bodyMix = 0.14 + 0.50 * uPaletteBias + warmBody * 0.18;
+      baseColor = mix(waterClear, uPaletteColor, bodyMix);
+      electricBlue = mix(waterDeep, uPaletteAccent, 0.18 + 0.32 * uPaletteBias);
+      hitTint = mix(hitTint, uPaletteColor, 0.22 * uPaletteBias);
     }
-    vec3 color = baseColor * 0.2;
+    vec3 color = baseColor * (uVita > 0.5 ? 0.17 : 0.2);
     float idleDim = 0.42 + liveAmt * 0.5;
     if (uVita > 0.5) {
-      // 待機では膜を読める底上げを残しつつ、再生中の live による明るさの上がりを抑える
-      // （2026-08-11→12: 輝きを段階的に抑制）
-      idleDim = 0.54 + liveAmt * 0.14;
+      // B1: 待機ベースの明るさ。再生中も live の上げ幅を抑えて待機に近い壳を保つ。
+      idleDim = 0.72 + min(liveAmt, 0.48) * 0.20;
     }
     // vita は高域で常時シアンが乗りすぎないよう、uHigh の乗せを弱める
     float pearlLive = pearl * (0.75 + uHigh * (uVita > 0.5 ? 0.28 : 0.95));
-    color += electricBlue * pearlLive * idleDim;
+    if (uVita > 0.5) {
+      // B1: 待機時と同じ静かな水（フレネル縁＋干渉）。caustic 模様は使わない。
+      float waterEdge = pow(fresnel, 1.05);
+      color += electricBlue * waterEdge * idleDim * 0.62;
+      color += vec3(0.94, 0.98, 1.0) * softSheen * idleDim * 0.30;
+      color += electricBlue * pearl * idleDim * 0.24;
+    } else {
+      color += electricBlue * pearlLive * idleDim;
+    }
     color += hitTint * melodyLines * (uVita > 0.5 ? 0.42 : 1.6);
-    color += hitTint * pearl * uMelodyFresnel * lineDrive * (uVita > 0.5 ? 0.26 : 0.95);
-    color += vec3(0.72, 0.94, 1.0) * microSignals * (uVita > 0.5 ? 0.35 : 0.85);
-    color += vec3(0.2, 0.42, 0.72) * surfaceNoise * liveAmt * (uVita > 0.5 ? 0.07 : 0.2);
-    color += (uVita > 0.5 ? vec3(0.28, 0.48, 0.72) : vec3(0.55, 0.38, 0.22))
-      * surfaceNoise * uMelodyNoise * lineDrive * (uVita > 0.5 ? 0.08 : 0.32);
+    color += hitTint * pearl * uMelodyFresnel * lineDrive * (uVita > 0.5 ? 0.26 : 0.95) * vitaPattern;
+    // 固定の青系だった加算も地の色へ寄せる（vita のみ）。ここが青のままだと
+    // 膜の模様・ノイズが常時シアンを塗り続ける。
+    vec3 microTint = uVita > 0.5
+      ? mix(vec3(0.88, 0.94, 0.98), uPaletteColor, 0.35 * uPaletteBias)
+      : vec3(0.72, 0.94, 1.0);
+    vec3 noiseTint = uVita > 0.5
+      ? mix(vec3(0.42, 0.58, 0.72), uPaletteColor, 0.35 * uPaletteBias)
+      : vec3(0.2, 0.42, 0.72);
+    vec3 melodyNoiseTint = uVita > 0.5
+      ? mix(vec3(0.48, 0.62, 0.78), uPaletteColor, 0.35 * uPaletteBias)
+      : vec3(0.55, 0.38, 0.22);
+    color += microTint * microSignals * (uVita > 0.5 ? 0.12 : 0.85);
+    color += noiseTint * surfaceNoise * liveAmt * (uVita > 0.5 ? 0.028 : 0.2) * vitaPattern;
+    color += melodyNoiseTint * surfaceNoise * uMelodyNoise * lineDrive * (uVita > 0.5 ? 0.05 : 0.32) * vitaPattern;
 
     // 中音のヒットできらめく粒状ハイライト（煌めき表現）。位置は固定し、
     // uMid/uMelody（＝実際のヒットで立ち上がる値）が来た瞬間だけ明滅させる
@@ -1338,40 +2136,118 @@ const surfaceFragmentShader = /* glsl */ `
     color += (uVita > 0.5 ? vec3(0.92, 0.97, 1.0) : vec3(1.0, 0.9, 0.68))
       * glint * glintDrive * (uVita > 0.5 ? 0.48 : 1.5);
 
+    // 主旋律の帯（vita 段A1・**2026-08-25 に加算 → 透過へ反転**）。
+    // 旧実装は color += で白く光らせていたが、打点のフラッシュ（glint / snareFlash /
+    // melodyLines）と**まったく同じ加算発光チャンネル**だったため、密な曲では
+    // 明るさの奪い合いに負けて見えなかった（実機判定 2026-08-25: 修羅場で全く見えない）。
+    // 打点は例外なく「明るくする」ので、声だけ**膜を透かす**（alpha を下げて下の粘土を見せる）
+    // ようにすると、フラッシュが飽和していても符号で区別が付く。
+    // 段B「膜＝澄んだ水」とも同方向なので手戻りしない。
+    float voiceAng = acos(clamp(dot(normalize(vLocalPosition), normalize(uVoiceDir)), -1.0, 1.0));
+    float voiceEnv = exp(-voiceAng * 1.4);
+    float voiceFlow = 0.5 + 0.5 * cos(voiceAng * 8.0 - uVoicePhase);
+    float voiceBand = uVoice * voiceEnv * smoothstep(0.4, 0.95, voiceFlow);
+    // 段B2: 帯ガラス板では透過帯を弱め、板を「固体」として読ませる（alpha カットより先）
+    float voiceFaceAlignEarly = max(0.0, dot(normalize(vGemDir), normalize(uVoiceDir)));
+    float voicePlateEarly = 0.0;
+    if (uVita > 0.5) {
+      voicePlateEarly =
+        clamp(
+          uVoiceGlass * smoothstep(0.18, 0.72, voiceFaceAlignEarly)
+            * exp(-voiceAng * 0.55) * uVoiceGlassGain,
+          0.0, 0.88)
+        * smoothstep(0.18, 0.62, voiceFaceAlignEarly);
+    }
+    float voiceBandOpenMul = mix(1.0, 0.15, voicePlateEarly);
+    // 発光は主役を降りたが、帯の先端が水面のように光を拾うぶんだけ残す（既定 0.18 倍）。
+    color += vec3(0.85, 0.96, 1.0) * voiceBand * 0.55;
+
     float hotVeins = pow(noise(vLocalPosition * 9.5 + vec3(flowTime * 0.5)), 2.8);
     float ember = pow(noise(vLocalPosition * 22.0 - vec3(flowTime * 0.8)), 4.2);
-    float glowScale = uVita > 0.5 ? 0.32 : 1.0;
+    float glowScale = uVita > 0.5 ? 0.24 * vitaPlayShell : 1.0;
     color += vec3(0.45, 0.78, 1.0) * hotVeins * glowAmt * glowScale
-      * (0.22 + uHigh * 0.32) * mix(0.7, 1.0, pearl);
+      * (0.14 + uHigh * 0.22) * mix(0.7, 1.0, pearl);
     // ember はパレットのみ（白寄りミックスなし）
-    color += electricBlue * ember * glowAmt * glowScale * uHigh * 0.18 * mix(0.65, 1.0, pearl);
+    color += electricBlue * ember * glowAmt * glowScale * uHigh * 0.10 * mix(0.65, 1.0, pearl);
 
     // 透明外殻が強いと「中身が空っぽ」に見えやすいので、fresnel/ラインの寄与を抑える
-    float alpha = uOpacity + pearl * 0.08 * idleDim + melodyLines * (uVita > 0.5 ? 0.07 : 0.16)
+    float alpha = uOpacity + pearl * 0.10 * idleDim + melodyLines * (uVita > 0.5 ? 0.07 : 0.16)
       + microSignals * (uVita > 0.5 ? 0.045 : 0.12);
     alpha += glint * glintDrive * (uVita > 0.5 ? 0.022 : 0.06);
+    // 声の帯は alpha を**局所的に**下げる。膜全体が消えないよう下限を高く保つ。
+    float voiceOpenMul = uVita > 0.5 ? 0.82 : 1.0;
+    float voiceAlphaFloor = uVita > 0.5 ? 0.42 : 0.15;
+    alpha = max(alpha - voiceBand * uVoiceOpen * voiceOpenMul * voiceBandOpenMul, alpha * voiceAlphaFloor);
     alpha += hotVeins * glowAmt * glowScale * 0.045 + ember * glowAmt * glowScale * uHigh * 0.03;
-    alpha += lineDrive * pearl * uMelodyFresnel * (uVita > 0.5 ? 0.018 : 0.045);
+    alpha += lineDrive * pearl * uMelodyFresnel * (uVita > 0.5 ? 0.018 : 0.045) * vitaPattern;
     alpha *= mix(1.0, 0.58, frozen);
 
-    // vita: 真珠は白〜シアンの薄い艶。パレット乗算で緑紫に染まらないようにする
-    // （以前の irid*uPaletteColor と color*0.58 が白芯を潰していた）。
+    // vita 段B1: 待機 shell ＋同心円波紋。谷で透け、稜で光。
     if (uVita > 0.5) {
+      // 段B2: 帯ガラスは ripple／pearl より先に見積もり、板内を滑らかにする
+      float voiceFaceAlign = max(0.0, dot(normalize(vGemDir), normalize(uVoiceDir)));
+      float voiceGlassBoost = clamp(
+        uVoiceGlass * smoothstep(0.18, 0.72, voiceFaceAlign)
+          * exp(-voiceAng * 0.55) * uVoiceGlassGain,
+        0.0, 0.88);
+      float voicePlateHint = voiceGlassBoost * smoothstep(0.18, 0.62, voiceFaceAlign);
+      float plateSmooth = 1.0 - voicePlateHint * 0.82;
+      // 段B3: 粘液 — 帯の通った所で流れを遅く、少し厚く（水の対極）
+      float mucusLocal = uMucus * voiceEnv * smoothstep(0.35, 0.92, voiceFlow);
+      float mucusFlow = mix(1.0, 0.58, mucusLocal);
+      float slowFlow = flowTime * mucusFlow;
+
+      float angTop = acos(clamp(normalize(vLocalPosition).y, -1.0, 1.0));
+      float ringIdle = sin(angTop * 9.0 - slowFlow * 2.4);
+      float ringPhrase = sin(voiceAng * 10.0 - uVoicePhase * 1.35) * exp(-voiceAng * 0.52);
+      float rippleField = (ringIdle * 0.62 + ringPhrase * uVoice * 0.88 * plateSmooth) * uWaterRippleGain;
+      rippleField += sin(angTop * 10.5 - uWaterRipplePhase * 2.9) * uWaterRippleGain * 0.45;
+      alpha *= 1.0 - abs(rippleField) * 0.07 * (1.0 - fresnel * 0.35);
+      color += vec3(0.94, 0.99, 1.0) * max(0.0, rippleField) * fresnel * idleDim * 0.11;
+      // 光の透過: 谷でも膜が消えないよう、正面係数を底上げ（2026-08-31 B2 再調整）
+      alpha *= mix(0.80, 1.08, pow(fresnel, 0.62));
+      alpha *= mix(0.86, 1.0, pow(NdotV, 0.78));
+      alpha += 0.055 * idleDim;
+      alpha += fresnel * pearl * 0.08 * idleDim;
       vec3 irid = 0.55 + 0.32 * cos(6.28318 * (pearl * 0.85 + vec3(0.0, 0.14, 0.48)) + flowTime * 0.12);
-      vec3 pearlTint = mix(vec3(0.88, 0.94, 1.0), electricBlue, 0.38);
-      // 天気/曲の色はごく薄い染みだけ残す
-      pearlTint = mix(pearlTint, uPaletteColor, 0.12);
-      vec3 pearlColor = irid * mix(pearlTint * 0.95, pearlTint * 1.18, 0.7);
-      color = mix(color, color * 0.82 + pearlColor * (0.22 + uBreath * 0.12), 0.24 * idleDim);
-      alpha += (0.01 + pearl * 0.025 + uBreath * pearl * 0.016) * idleDim;
-      // 宝石（vita [P2]）: **結晶になっている面の上だけ**、膜を平らなガラス板に見せる。
-      // 生物の面の上は真珠シアンの確定値のまま（2026-08-11 承認済みの見た目を壊さない）。
+      vec3 pearlTint = mix(vec3(0.92, 0.97, 1.0), electricBlue, 0.18);
+      pearlTint = mix(pearlTint, uPaletteColor, 0.12 + 0.32 * uPaletteBias);
+      vec3 pearlColor = irid * mix(pearlTint * 0.95, pearlTint * 1.12, 0.65);
+      color = mix(color, color * 0.90 + pearlColor * (0.22 + uBreath * 0.10), 0.18 * idleDim * plateSmooth);
+      alpha += (0.018 + pearl * 0.034 + uBreath * pearl * 0.018) * idleDim;
+      // 段C4: 晴れの金の陽だまり。色相ではなく縁のキャッチライト＋水面の細かい反射
+      if (uWeatherGold > 0.01) {
+        float sunSparkle = pow(noise(vLocalPosition * 16.0 + vec3(flowTime * 0.12)), 9.0);
+        vec3 gold = vec3(1.0, 0.82, 0.40);
+        color += gold * pow(fresnel, 1.65) * uWeatherGold * idleDim * 0.32;
+        color += gold * sunSparkle * uWeatherGold * idleDim * 0.24;
+      }
+      // 水膜の最低可視 opacity（消えて粘土だけになるのを防ぐ）
+      alpha = max(alpha, 0.26 * idleDim * mix(0.82, 1.0, fresnel));
+      // 段B2: 主旋律の帯が通った面は facetCrystal より先に膜が板ガラス化
+      // uVoice は透過（alpha を下げる）専用。ガラス板は uVoiceGlass を別チャンネルで駆動。
       ${GEM_MEMBRANE_FRAGMENT}
-      // 結晶の面の上は**天井を下げて透かす**（[P1] step 2）。以前は逆に上げていて
-      // （0.55 + gGemMask*0.06）、乳白の膜が濃いまま下の宝石が見えなかった。
-      // 稜と鏡面は上の加算で残るので、板は「白く盛る」のではなく「透ける」。
-      alpha = min(alpha, mix(0.55, 0.30, gGemMask));
-      color = min(color, vec3(0.92 + gGemMask * 0.05));
+      // facetCrystal 由来だけ透かす上限。帯由来ガラスは**読める opacity** を足す（B1 水壳と逆）
+      if (gGemMask > 0.02) {
+        alpha = min(alpha, mix(0.55, 0.30, gGemMask));
+        color = min(color, vec3(0.92 + gGemMask * 0.05));
+      }
+      float voiceGlassOnly = clamp(voiceGlassBoost, 0.0, 0.88);
+      if (voiceGlassOnly > 0.03) {
+        float voicePlate = voiceGlassOnly * smoothstep(0.18, 0.62, voiceFaceAlign);
+        float voiceRim = pow(fresnel, 2.0) * voicePlate;
+        float plateInterior = voicePlate * (1.0 - gFacetGap * 0.88);
+        color = mix(color, vec3(0.48, 0.58, 0.68), plateInterior * 0.62 * idleDim);
+        alpha = max(alpha, plateInterior * 0.62 + gFacetGap * voicePlate * 0.38);
+        color += vec3(0.84, 0.92, 0.98) * gFacetGap * voicePlate * uGemRidge * 1.35 * idleDim;
+        color += vec3(0.76, 0.88, 0.97) * voiceRim * 0.22 * plateInterior * idleDim;
+        color = min(color, vec3(0.94));
+      }
+      if (mucusLocal > 0.02) {
+        alpha += mucusLocal * ${DEFAULT_MUCUS_ALPHA};
+        color = mix(color, color * 0.88 + vec3(0.58, 0.50, 0.44) * ${DEFAULT_MUCUS_ALPHA}, mucusLocal * 0.38 * idleDim);
+        alpha *= mix(1.0, 1.06, mucusLocal * 0.35);
+      }
     }
 
     // petrify: 下から上へ結晶化が進む（変容スタイル）
@@ -1391,6 +2267,84 @@ const surfaceFragmentShader = /* glsl */ `
     gl_FragColor = vec4(color, alpha);
   }
 `;
+/**
+ * 例外だが「不具合」ではなく、利用者への案内として出すもの。
+ * 呼び出し側はこれだけ `name` を付けずに本文だけを表示する。
+ */
+class AudioInputNotice extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AudioInputNotice";
+  }
+}
+
+/**
+ * `navigator.mediaDevices` は **secure context でしか生えない**。
+ * http:// で配信すると undefined になり、マイクもタブ音声も必ず失敗する。
+ * 開発中は localhost が secure context 扱いなので気づけない（2026-09-08 に本番で判明）。
+ * 例外を握って「なぜ使えないか」を利用者へ返す。
+ */
+/** getUserMedia / getDisplayMedia の例外を、利用者に分かる文へ直す */
+const audioInputErrorMessage = (error: Error): string => {
+  switch (error.name) {
+    case "NotAllowedError":
+    case "SecurityError":
+      return "ブラウザで音声の使用が拒否されました。アドレスバーのカメラ・マイクのアイコンから許可してください。";
+    case "NotFoundError":
+    case "OverconstrainedError":
+      return "使える入力デバイスが見つかりませんでした。マイクの接続を確認してください。";
+    case "NotReadableError":
+      return "入力デバイスを他のアプリが使用中の可能性があります。閉じてからもう一度お試しください。";
+    case "AbortError":
+      return "音声の取り込みが中断されました。もう一度お試しください。";
+    default:
+      return `${error.name}: ${error.message}`;
+  }
+};
+
+/**
+ * 権限プロンプトが**出ないまま保留になる**ことがある。
+ * Chrome の「静かな権限リクエスト」では、ダイアログの代わりに
+ * アドレスバーの小さなアイコンだけが出る。利用者はそれに気づかず、
+ * `getUserMedia` は解決も拒否もしない（2026-09-08 に本番で発生）。
+ * 一定時間で切り上げて、どこを見ればよいかを伝える。
+ */
+const MEDIA_PROMPT_TIMEOUT_MS = 20000;
+
+const withPromptTimeout = async <T>(work: Promise<T>, kind: "mic" | "display"): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new AudioInputNotice(
+          kind === "mic"
+            ? "マイクの使用許可を待っています。ダイアログが出ない場合は、アドレスバー右端のマイクのアイコン（またはURL左側のアイコン）から「許可」を選んでください。以前に「ブロック」した場合もここから戻せます。"
+            : "画面共有の選択を待っています。共有するタブを選び、「タブの音声も共有する」にチェックを入れてください。",
+        ),
+      );
+    }, MEDIA_PROMPT_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
+const requireMediaDevices = (): MediaDevices => {
+  if (typeof navigator !== "undefined" && navigator.mediaDevices) {
+    return navigator.mediaDevices;
+  }
+  if (typeof window !== "undefined" && !window.isSecureContext) {
+    throw new AudioInputNotice(
+      "このページは安全な接続（HTTPS）ではないため、ブラウザがマイクと音声の取り込みを許可しません。https:// のアドレスで開き直してください。",
+    );
+  }
+  throw new AudioInputNotice(
+    "このブラウザでは音声入力を利用できません。Google Chrome の最新版でお試しください。",
+  );
+};
+
 class AudioInput {
   private context: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
@@ -1427,6 +2381,7 @@ class AudioInput {
     contrast: 0,
   };
   /** 曲内ピーク正規化前の帯域。リズム検出はこちらを使う（誤反応防止） */
+  private rawBands: RawBands = { sub: 0, low: 0, mid: 0, melody: 0, high: 0 };
   private rhythmBands: AudioBands = {
     sub: 0,
     low: 0,
@@ -1509,10 +2464,10 @@ class AudioInput {
 
   async startMicrophone(deviceId?: string) {
     const open = async (audio: boolean | MediaTrackConstraints) => {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio,
-        video: false,
-      });
+      const stream = await withPromptTimeout(
+        requireMediaDevices().getUserMedia({ audio, video: false }),
+        "mic",
+      );
       this.connectStream(stream);
       await this.ensureContextRunning();
     };
@@ -1542,23 +2497,31 @@ class AudioInput {
   }
 
   async listAudioInputDevices() {
-    const devices = await navigator.mediaDevices.enumerateDevices();
+    const devices = await requireMediaDevices().enumerateDevices();
     return devices.filter((device) => device.kind === "audioinput");
   }
 
   async startDisplayAudio() {
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      },
-      video: true,
-    });
+    const stream = await withPromptTimeout(
+      requireMediaDevices().getDisplayMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+        video: true,
+      }),
+      "display",
+    );
 
     if (stream.getAudioTracks().length === 0) {
       stream.getTracks().forEach((track) => track.stop());
-      throw new Error("共有された画面またはタブに音声トラックがありません。");
+      // Safari / Firefox は getDisplayMedia の音声取り込みに未対応で、必ずここへ来る。
+      // Chrome でも共有ダイアログで「タブの音声を共有」を入れ忘れると同じ経路。
+      // どちらの利用者にも届く文言にし、マイク入力へ誘導する。
+      throw new AudioInputNotice(
+        "音声を取り込めませんでした。Chrome の場合は、共有ダイアログで「タブの音声も共有する」にチェックを入れてください。Safari / Firefox はタブ・PC 音声の取り込みに対応していません。マイクを使う場合は「Use Input Device」を選んでください。",
+      );
     }
 
     this.connectStream(stream);
@@ -1657,6 +2620,7 @@ class AudioInput {
       steps.push({
         bands,
         rhythmBands: { ...this.rhythmBands },
+        rawBands: { ...this.rawBands },
         waveform: this.waveformFromDeterministicFrame(frame),
         deltaTime: hop,
       });
@@ -1886,6 +2850,7 @@ class AudioInput {
         Math.abs(mid - high)) /
       spectralTotal;
 
+    this.rawBands = { sub, low, mid, melody, high };
     // 帯域ごとのノイズゲート（絶対値）— 少し厳しめにして弱い常時信号を落とす
     // centroid/bassFocus/brightness/contrast はスペクトル比率（相対値）
     const gatedSub = smoothstep(0.035, 0.42, sub);
@@ -1932,6 +2897,11 @@ class AudioInput {
     return this.rhythmBands;
   }
 
+  /** ノイズゲート前の帯域（オンセット検出でゲートの飽和を補うためだけに使う） */
+  getRawBands(): RawBands {
+    return this.rawBands;
+  }
+
   /** 直近フレームのグリット（歪み/ザラつき）。音色軸の主信号。0..1。 */
   getSpectralFlatness(): number {
     return this.spectralFlatness;
@@ -1942,6 +2912,13 @@ class AudioInput {
   }
 
   private bandsFromDeterministicFrame(frame: DeterministicSpectralFrame, deltaTime: number): AudioBands {
+    this.rawBands = {
+      sub: frame.sub,
+      low: frame.low,
+      mid: frame.mid,
+      melody: frame.melody,
+      high: frame.high,
+    };
     const gatedSub = smoothstep(0.035, 0.42, frame.sub);
     const gatedLow = smoothstep(0.04, 0.46, frame.low);
     const gatedMid = smoothstep(0.03, 0.38, frame.mid);
@@ -2355,6 +3332,11 @@ class SoundSculpture {
   }
 
   readonly group = new THREE.Group();
+  /**
+   * 遊泳の微揺れ専用。スティック／ドラッグの操作回転は `group` 側。
+   * 同じ Euler に書くと操作向きが毎フレーム打ち消される（2026-09-07）。
+   */
+  private readonly swimGroup = new THREE.Group();
 
   private readonly core: THREE.Mesh;
   private readonly innerCore: THREE.Mesh;
@@ -2439,6 +3421,85 @@ class SoundSculpture {
   private readonly algoIdentity: Float32Array;
   private readonly liveOffset: Float32Array;
   private readonly surfaceLiveOffset: Float32Array;
+  /**
+   * [P0] **打点の局在**。「いつ鳴ったか」だけでなく「どこで鳴ったか」を持つ。
+   *
+   * 直すまでは、キックもスネアも**球全体を同じように脈打たせる**だけだった
+   * （`growthPattern` の全球パターン × スカラのドライブ）。そのため
+   * (a) 何発打っても同じ動きに見える（数分で飽きる） (b) 密な曲では打点が重なって
+   * ドライブが天井に張り付き、全球が一様に膨らんだまま動かなく見える、の両方が起きていた。
+   *
+   * ここでは打点ごとに**発火点（方向）**を決め、その周りだけが応える。
+   * 同じ量の動きでも局所の変位は大きくなり、発ごとに違う場所が動く。
+   * `liveOffset` は `bleedLiveIntoSculpture` で永久層へ転写されるので、
+   * **どこを叩かれたかが最終形へそのまま残る**（原則の「蓄積」に効く）。
+   */
+  private static readonly STRIKE_SLOTS = 8;
+  private readonly strikeDir = new Float32Array(SoundSculpture.STRIKE_SLOTS * 3);
+  private readonly strikeAmp = new Float32Array(SoundSculpture.STRIKE_SLOTS);
+  private readonly strikeCos = new Float32Array(SoundSculpture.STRIKE_SLOTS);
+  private readonly strikeFall = new Float32Array(SoundSculpture.STRIKE_SLOTS);
+  /** 段A2: スロットの種類 0=kick / 1=snare·chop / 2=hat */
+  private readonly strikeKind = new Uint8Array(SoundSculpture.STRIKE_SLOTS);
+  /**
+   * 段A2: キック収縮の2相エンベロープ（0..1）。
+   * `DEFAULT_KICK_CONTRACT===0` なら使わない。
+   */
+  private kickContractEnv = 0;
+  private kickContractAge = 0;
+  /** 経度の原点。曲（シード）ごとに回すので、同じ音でも作品ごとに位置が違う */
+  private strikeSeedPhase = 0;
+  /**
+   * 主旋律の波（vita 段A1・2026-08-24 プラン合意）。
+   * 打点（strike。0.1〜0.2 秒で減衰する局所ポップ）とは**別の時間スケール**の語彙:
+   * 句頭で波源を作り、**句が続く間ずっと**体表を伝播するリップルとして生きる。
+   * 変位は liveOffset へ合流するので、既存の bleed 経路で声の軌跡が最終形に残る。
+   */
+  private static readonly PHRASE_WAVE_SLOTS = 2;
+  private readonly phraseWaveDir = new Float32Array(SoundSculpture.PHRASE_WAVE_SLOTS * 3);
+  private readonly phraseWaveAmp = new Float32Array(SoundSculpture.PHRASE_WAVE_SLOTS);
+  private readonly phraseWavePhase = new Float32Array(SoundSculpture.PHRASE_WAVE_SLOTS);
+  private readonly phraseWaveQuiet = new Float32Array(SoundSculpture.PHRASE_WAVE_SLOTS);
+  /** 1 = 句が終わって減衰だけしているスロット（presence 追従をやめる） */
+  private readonly phraseWaveReleasing = new Uint8Array(SoundSculpture.PHRASE_WAVE_SLOTS);
+  private phraseWaveCursor = 0;
+  private phraseWaveSpawnCooldown = 0;
+  /** 句の経過時間（秒）。`PHRASE_LIFE` を超えたら必ず 0 へ落とす＝句が終わる担保 */
+  private phraseWaveLife = new Float32Array(SoundSculpture.PHRASE_WAVE_SLOTS);
+  /** 接線流の使い回しバッファ（毎頂点で new しない） */
+  private phraseFlowScratch = { x: 0, y: 0, z: 0 };
+  /** 句頭パフ（膜）の強さ。updateVoiceStretch が減衰させる */
+  private voiceHeadPulse = 0;
+  /** このフレーム、melodyOnset を中音打点へ流さない（applyRhythmImpulses 先頭で更新） */
+  private voicedLineBlocksMid = false;
+  /** 0→1。曲頭の膜膨らみ・句スポーンを抑える（進行度ではなく経過秒のみ） */
+  private liveWarmup = 0;
+  /** [P0] 中音の「壁」から立ち上がりを取り出すための2本の包絡（速い / 遅い） */
+  private chugFast = 0;
+  private chugSlow = 0;
+  /**
+   * [P0] **中音フラッシュの順応。** 連打が来るたび感度を半分にして、約 0.38 秒で 1 へ戻す。
+   *
+   * チャグやカッティングは秒 10 発の勢いで来るのに、フラッシュの減衰は 9.5/s なので
+   * **1 発ごとの光が融合して「点きっぱなし」になる**（人の目にも「1 枚の板が光っている」に見える）。
+   * 打点を捨てるのではなく、**連打の中の 1 発ぶんを小さくする**ことで列として読めるようにする。
+   * まばらな曲では次の打点までに感度が 1 へ戻るので**従来と同じ**。
+   * 原則の「抑制は同時多発の視覚渋滞用」を、正しい対象（連打の融合）へ効かせたもの。
+   */
+  private midFlashSensitivity = 1;
+  /** [P1] 表示へ渡す平滑済みの位置（**シミュレーション状態は触らない**） */
+  private displaySmoothCore: Float32Array | null = null;
+  private displaySmoothSurface: Float32Array | null = null;
+  private displaySmoothTmp: Float32Array | null = null;
+  private displaySmoothMask: Float32Array | null = null;
+  /** [P0] 計測用。前フレームの変形メッシュ頂点（`liveProbe.on` のときだけ確保する） */
+  private probePrevCore: Float32Array | null = null;
+  private probePrevSurface: Float32Array | null = null;
+  private probeDeltaTime = 1 / 60;
+  private probeHitAge = 10;
+  private probeHatIndex = -1;
+  private probeMotionScratch: Float32Array | null = null;
+  private probeMotionScratch2: Float32Array | null = null;
   /** コア接触による膜の外向き圧力（頂点ごと） */
   private readonly membranePressure: Float32Array;
   private readonly membranePressureScratch: Float32Array;
@@ -2520,6 +3581,8 @@ class SoundSculpture {
   private morphologySeed = 0;
   /** 結晶ファセット（音色→鉱物）の平面軸と距離。morphologySeed から曲ごとに決まる。 */
   private static readonly facetCount = GEM_FACET_COUNT;
+  /** [P0] 打点で結晶板がせり出す量（world 単位）。膜半径 1.46 に対して約 6%。 */
+  private static readonly FACET_PLATE_GAIN = 0.085;
   private readonly facetAxes = new Float32Array(SoundSculpture.facetCount * 3);
   private readonly facetLevels = new Float32Array(SoundSculpture.facetCount);
   /**
@@ -2534,6 +3597,20 @@ class SoundSculpture {
   private readonly facetRank = new Float32Array(SoundSculpture.facetCount);
   /** いまその面が結晶か 0..1（軸で毎フレーム更新。境界は smoothstep で滑らかに立ち上がる）。 */
   private readonly facetCrystal = new Float32Array(SoundSculpture.facetCount);
+  /**
+   * [P0] **結晶面ごとの「生きた押し出し」。** 打点が来ると、その方向の結晶板が
+   * 板ごと外へせり出して戻る（＝硬い反応）。
+   *
+   * なぜ要るか: 結晶面スナップ（`applyMembraneFacets`）は面内の変位を約 23% まで潰す。
+   * 鉱物寄りの曲ほど**面が開くほど LIVE のうねりが消える**という逆転が起きていた。
+   * 面の中の頂点を動かせないなら、**面そのものを動かす**のが正しい直し方。
+   * 面は熟成度とともに開くので、曲が進むにつれて反応が
+   * 「柔らかい脈動」→「結晶板の応答」へ**語彙ごと変わる**（[P0] の A＝単調さ対策）。
+   * 軸 0（丸みの曲）は `facetCrystal` が全部 0 なので**完全な恒等**。
+   */
+  private readonly facetLive = new Float32Array(SoundSculpture.facetCount);
+  /** 段B2: 主旋律帯が通った面の膜ガラス化の進み（0..1。粘土はラグ後） */
+  private readonly facetVoiceGlass = new Float32Array(SoundSculpture.facetCount);
   /** 1 枚でも結晶になっているか。0 なら幾何側のファセット処理ごと飛ばす（軸 0 の完全な no-op）。 */
   private anyCrystalFace = 0;
   /** 面法線をワールドへ回す行列（宝石シェーダはここからビュー空間へ落とす）。 */
@@ -2624,6 +3701,10 @@ class SoundSculpture {
   private guitarFlash = 0;
   /** メロディ句頭（人がフレーズの立ち上がりで感じる反応） */
   private melodyPhraseImpulse = 0;
+  /** 段B1: 膜の水面波紋位相・キック／スネア由来のリング強度 */
+  private waterRipplePhase = 0;
+  private kickRippleStrength = 0;
+  private snareRippleStrength = 0;
   /** salienceHigh のスパーク発火用クールダウン（連続発火を防ぐ） */
   private lastSalienceHighSpark = 10;
   /** 音数の多いミックスでイベントが埋もれないよう、直近の視覚イベント密度 */
@@ -2647,6 +3728,16 @@ class SoundSculpture {
   private readonly idleWobbleVector: Float32Array;
   /** クリック・タッチで一瞬強まる揺らぎ（0→1 で減衰） */
   private idlePokeImpulse = 0;
+  /**
+   * 段A3: 遊泳の地（再生中の体スケール進行波）。
+   * idleWobble とは逆で、**音があるほど**立つ。表示専用（bleed なし）。
+   */
+  private swimPhase = 0;
+  private swimHeading = 0;
+  private swimAmp = 0;
+  private swimDuck = 1;
+  private swimIntensity = 0;
+  private readonly swimField: Float32Array;
   /** クリック位置の局所反発（完成後も有効） */
   private readonly clickRepulsion: ReturnType<typeof createClickRepulsionState>;
   private readonly surfaceClickRepulsion: ReturnType<typeof createClickRepulsionState>;
@@ -2739,6 +3830,17 @@ class SoundSculpture {
         uHigh: { value: 0 },
         uLive: { value: 0 },
         uGlow: { value: 0 },
+        // 主旋律の帯（vita 段A1）: 波源から流れる澄んだ光の帯。声・リードの句の間だけ持続する
+        uVoice: { value: 0 },
+        uVoiceDir: { value: new THREE.Vector3(0, 1, 0) },
+        uVoicePhase: { value: 0 },
+        uVoiceOpen: { value: DEFAULT_VOICE_BAND_OPEN },
+        uWaterRipplePhase: { value: 0 },
+        uWaterRippleGain: { value: 0.35 },
+        uVoiceGlassGain: { value: 0 },
+        uVoiceGlass: { value: 0 },
+        uMucus: { value: 0 },
+        uWeatherGold: { value: 0 },
         // 外殻は控えめにして core の質量感を主役に
         uOpacity: { value: SoundSculpture.INITIAL_MEMBRANE_OPACITY },
         uCompleted: { value: 0 },
@@ -2748,6 +3850,7 @@ class SoundSculpture {
         // 他スタイルの膜は従来のまま（旧近似）。物理ベース化は vita だけの判断。
         uPaletteColor: { value: new THREE.Color(0.52, 0.66, 0.82) },
         uPaletteAccent: { value: new THREE.Color(0.72, 0.78, 0.9) },
+        uPaletteBias: { value: DEFAULT_MEMBRANE_PALETTE_BIAS },
         // 宝石（vita [P2]）: 結晶面の選択。**core と同じ module uniform オブジェクトを共有**
         // するので、パネルを動かすと core と膜が同時に変わる。
         ...gemUniforms,
@@ -2952,11 +4055,9 @@ class SoundSculpture {
     this.detachmentDustMetalLife.fill(0);
     this.detachmentDustSparkLife.fill(0);
 
+    this.swimGroup.add(this.core, this.innerCore, this.surface, this.particles);
     this.group.add(
-      this.core,
-      this.innerCore,
-      this.surface,
-      this.particles,
+      this.swimGroup,
       this.glowDust,
       this.sparkleGlow,
       this.sparkles,
@@ -3033,6 +4134,7 @@ class SoundSculpture {
     this.detachmentCarve = new Float32Array(this.accumulated.length);
     this.idleWobbleField = new Float32Array(this.accumulated.length);
     this.idleWobbleVector = new Float32Array(this.accumulated.length * 3);
+    this.swimField = new Float32Array(this.accumulated.length);
     this.clickRepulsion = createClickRepulsionState(this.accumulated.length);
     this.surfaceClickRepulsion = createClickRepulsionState(this.accumulated.length);
     this.baseCoreClearcoat = styleCore.clearcoat;
@@ -3201,43 +4303,88 @@ class SoundSculpture {
     return clamp01(this.getSpecies().mineral);
   }
 
+  /** 段B3: 有機軸 0..1。低 organic 曲は粘液 no-op。 */
+  getOrganicAxis(): number {
+    if (!this.style.membrane.vita) {
+      return 0;
+    }
+    return clamp01(this.getSpecies().organic);
+  }
+
+  private syncMucusUniforms() {
+    const uniforms = this.surfaceMaterial.uniforms;
+    if (!this.style.membrane.vita || this.completed || this.shapeHold) {
+      uniforms.uMucus.value = 0;
+      liveDebug.mucus = 0;
+      return;
+    }
+    const organic = this.getOrganicAxis();
+    if (organic <= 0.002) {
+      uniforms.uMucus.value = 0;
+      liveDebug.mucus = 0;
+      return;
+    }
+    const sp = this.getSpecies();
+    const gainNorm = clamp01(sp.membraneGain / 2.8);
+    const faceGate =
+      SoundSculpture.GEM_FACE_FLOOR +
+      (1 - SoundSculpture.GEM_FACE_FLOOR) * this.getMaturity();
+    uniforms.uMucus.value = organic * gainNorm * faceGate * DEFAULT_MUCUS_STRENGTH;
+    liveDebug.mucus = uniforms.uMucus.value as number;
+  }
+
   private resolvePearlColorPoles(): {
     warmHue: number;
     coolHue: number;
     warmSat: number;
     coolSat: number;
     balanceBias: number;
+    accentLight: number;
   } {
     const base = this.clayHueBase;
     const enable = pearlColorMix.enabled ? 1 : 0;
     const spread = pearlColorMix.spread * enable;
     if (spread <= 0) {
-      return { warmHue: base, coolHue: base, warmSat: 1, coolSat: 1, balanceBias: 0 };
+      return { warmHue: base, coolHue: base, warmSat: 1, coolSat: 1, balanceBias: 0, accentLight: 0 };
     }
     // 2026-08-11 案C: 語彙を「無機（寒・真珠シアン/氷）ベース ＋ 有機（暖・珊瑚/琥珀）の染み」に
     // 再定義した。旧実装は base ± spread の対称で、base が琥珀寄りだと暖極が赤(0.0)を越えて
     // 紫へ wrap し、寒極が緑へ開くため「紫×緑」が既定になっていた（ユーザー指摘）。
     // 対処: 暖極は赤を割らないよう floor し、寒極はシアン真珠(0.52)へ寄せて紫を作らない。
     // 曲・環境の平均色（clayHueBase）は殺さない（時刻→暖 / 天気→寒 の割り振りも維持）。
-    const time = hourClayShiftFromHour(this.lastWeatherHour);
-    const wx = weatherClayShiftFromSnapshot(this.lastWeatherSnapshot, base);
-    // 暖・有機: base から暖側へ。**赤(0.0)を割らないよう floor 0.035（珊瑚）** ＝ 紫 wrap を止める。
-    const warmHue = Math.max(0.035, base - spread * 0.5 + time.hue * 0.5);
-    // 寒・無機: base から寒側へ開き、さらにシアン真珠 0.52 へ 0.45 寄せる（低彩度と併せて氷/貝に見せる）。
-    const coolHue = lerpHueShortest(base + spread + wx.hue * 0.5, 0.52, 0.45);
-    // 彩度: 無機ほど淡く（真珠・氷）、有機は色を残す。claySatBase への倍率で返す。
-    const warmSat = 0.92;
-    const coolSat = 0.45;
+    // 2極の置き場所も天気・時刻の倍率に合わせる（振幅ノブと足並みを揃える）
+    const timeRaw = hourClayShiftFromHour(this.lastWeatherHour);
+    const time = { ...timeRaw, hue: timeRaw.hue * envColorGain.hour };
+    // **2026-08-21: 2 極を「base からの相対」から「決め打ち」へ変えた。**
+    // 旧: 暖極 = base - spread/2。base が深海のシアン 0.62 なので暖極は緑〜黄緑に落ち、
+    // 寒極のシアンと面内で混ざって**どの天気でも濁ったオリーブ**になっていた
+    // （等倍で 6 天気を並べて確認。ユーザー「あまり面白い色合いではない」の実体）。
+    // 新: **地（寒極）は真珠シアンに固定し、染み（暖極）だけが天気の色**（案C の本来の姿）。
+    const pal = weatherClayPalette(this.lastWeatherSnapshot);
+    // **地（球体そのもの）＝いまの粘土基準色。** これは `vitaWeatherClayShift` で
+    // 天気の地の色へ振り切ってあるので、天気ごとに球体の色が変わる。
+    // 時刻ぶんはここにも薄く乗せる。
+    const coolHue = ((base + time.hue * 0.2) % 1 + 1) % 1;
+    // **染み＝もう一方の極。** `spread` は「どれだけ染みを出すか」の割合として効かせる
+    // （spread 0 で両極が一致＝従来の単色＋ノイズに潰れる、という性質は保つ）。
+    const accentAmount = clamp01(spread / DEFAULT_PEARL_MIX_SPREAD);
+    const warmHue = lerpHueShortest(coolHue, pal.bloom, accentAmount);
+    // 彩度: **地はその日の色なのでしっかり出す。** 染みは真珠の艶なので少し淡く。
+    // （地が真珠シアンだった頃の 0.45 のままだと、天気の色が乗っても白茶けて見えた）
+    const warmSat = 0.88 * pal.sat;
+    const coolSat = 0.95;
     // 配分: 無機（寒）を主体に、有機（暖）を少数の染みにする。midpoint は bake 側で寒寄りに置く。
     // 曲が明るい／曇り・雨ほどさらに寒側へ（副次。平均色はずらさない）。
+    // **寒へ寄せ過ぎると天気の色（染み）が見えなくなる**ので、係数は 2026-08-21 に
+    // 0.5 / 0.35 → 0.3 / 0.2 へ下げた（染みが小さ過ぎて「どの天気も同じ」に見えた）。
     const songSrc = this.completionPalette ?? this.liveSongPalette;
-    const songCoolBias = songSrc ? (clamp01(songSrc.lightness) - 0.45) * 0.5 : 0;
+    const songCoolBias = songSrc ? (clamp01(songSrc.lightness) - 0.45) * 0.3 : 0;
     const snap = this.lastWeatherSnapshot;
     const wxCoolBias = snap
-      ? clamp01(clamp01(snap.cloudCover) * 0.4 + clamp01(snap.rainIntensity) * 0.5) * 0.35
+      ? clamp01(clamp01(snap.cloudCover) * 0.4 + clamp01(snap.rainIntensity) * 0.5) * 0.2
       : 0;
     const balanceBias = (pearlColorMix.balance + songCoolBias + wxCoolBias) * enable;
-    return { warmHue, coolHue, warmSat, coolSat, balanceBias };
+    return { warmHue, coolHue, warmSat, coolSat, balanceBias, accentLight: pal.light };
   }
 
   /**
@@ -3253,7 +4400,11 @@ class SoundSculpture {
     const position = this.geometry.attributes.position;
     const colors = new Float32Array(position.count * 3);
     const color = new THREE.Color();
-    const { warmHue, coolHue, warmSat, coolSat, balanceBias } = this.resolvePearlColorPoles();
+    const { warmHue, coolHue, warmSat, coolSat, balanceBias, accentLight } =
+      this.resolvePearlColorPoles();
+    // 2 極の色相の隔たり（0〜1）。遠いほど中間が濁るので、彩度のディップを強くする。
+    const poleGap = Math.abs(((warmHue - coolHue) % 1 + 1) % 1);
+    const poleDistance = clamp01((poleGap > 0.5 ? 1 - poleGap : poleGap) / 0.35);
     for (let i = 0; i < position.count; i += 1) {
       const x = position.getX(i);
       const y = position.getY(i);
@@ -3275,18 +4426,40 @@ class SoundSculpture {
       // midpoint を寒寄り(0.64)に置き、無機を主体・有機を少数の染みにする。
       // SPREAD = 0 では warm===cool===base なので、hue は従来式に一致する。
       const pMix = growthPattern(nx * 0.6, nz * 0.6, ny * 0.6, this.morphologySeed + 61.7);
-      const mix = clamp01(0.64 + pMix * 0.52 + balanceBias);
+      // midpoint。**地が主体・染みは少数**（案C の配分）。
+      // 一度 0.56 まで下げたが、地が天気の色になった後は
+      // 「地と染みが半々」＝どんよりが桃色、のように**染みが主役を奪う**ので 0.70 へ戻した。
+      const mix = clamp01(0.7 + pMix * 0.52 + balanceBias);
       const toneHue = lerpHueShortest(warmHue, coolHue, mix);
-      const hue = (toneHue + p1 * 0.12 + p3 * 0.08 + p4 * 0.09 + ny * 0.03 + p2 * 0.03 + 1) % 1;
+      // **色相のムラだけ倍率を掛ける。** 彩度・明度のムラ（下の sat/light）はそのままなので、
+      // 干渉色の「揺らぎ」は残したまま、地の色（天気・時刻・曲）が読めるようになる。
+      const hueJitter =
+        (p1 * 0.12 + p3 * 0.08 + p4 * 0.09 + ny * 0.03 + p2 * 0.03) * pearlColorMix.hueNoise;
+      const hue = (toneHue + hueJitter + 1) % 1;
+      // 面内のランダムな色相ノイズの合計振れ幅（±）。**環境の信号（天気・時刻）が
+      // これより小さいと、色は環境ではなくノイズで決まる。** dev の読み出し用。
+      clayDebug.hueNoiseSpan = (0.12 + 0.08 + 0.09 + 0.03 + 0.03) * pearlColorMix.hueNoise;
       // 無機（寒側）ほど淡く、有機（暖側）は色を残す。mix で warmSat↔coolSat を補間。
       const poleSat = warmSat + (coolSat - warmSat) * mix;
+      // **混ざり際の彩度を落とす（絵の具と同じ）。**
+      // 2 極が色相環で遠いと、その中間は「緑」を通る。彩度を落とさずに補間すると
+      // 境目が濁った緑になり、それが面積を占めて「濁ったオリーブ」に見えていた。
+      // 中間ほど彩度を落とすと、境目は緑ではなく**淡い灰**になって両極が澄んで見える。
+      // **2 極が近い天気（雨・雪など）では効かせない**（一律に掛けると全部くすむ。
+      // 一度そうして「修正後のほうが地味」になった）。`poleDistance` は 0〜1。
+      const blendDip = 1 - 0.36 * poleDistance * (4 * mix * (1 - mix));
       const saturation = clamp01(
-        this.claySatBase * poleSat + (Math.abs(p2) * 0.38 + Math.abs(p3) * 0.16) * amount * 0.65,
+        this.claySatBase * poleSat * blendDip +
+          (Math.abs(p2) * 0.38 + Math.abs(p3) * 0.16) * amount * 0.65,
       );
       const lightness = clamp01(
         Math.min(
           0.62,
-          this.clayLightBase + p1 * 0.08 * amount * 0.35 + p2 * 0.03 * amount + p3 * 0.02 * amount,
+          this.clayLightBase +
+            accentLight * (1 - mix) +
+            p1 * 0.08 * amount * 0.35 +
+            p2 * 0.03 * amount +
+            p3 * 0.02 * amount,
         ),
       );
       color.setHSL(hue, saturation, lightness);
@@ -3399,8 +4572,47 @@ class SoundSculpture {
     const target = this.resolveEvolvingClayTarget();
     const follow = snap ? 1 : Math.min(1, deltaTime * 2.1);
     this.clayHueBase = lerpHueShortest(this.clayHueBase, target.hue, follow);
-    this.claySatBase += (target.sat - this.claySatBase) * follow;
+    // 段1: 彩度だけ倍率を掛ける（明度・色相はそのまま）。
+    // ここで掛けると粘土の頂点カラー・コア材質・膜のパレットへ一貫して効く。
+    const satTarget = clamp01(target.sat * clayChroma.gain);
+    this.claySatBase += (satTarget - this.claySatBase) * follow;
     this.clayLightBase += (target.light - this.clayLightBase) * follow;
+
+    if (devSurface && this.style.membrane.vita) {
+      // 読み出しは**いま効いている値**（倍率込み）を出す。設計値のままだと
+      // ノブを動かしても数字が変わらず、また「効いていない」と誤診する。
+      const wxRawDbg = weatherClayShiftFromSnapshot(this.lastWeatherSnapshot, this.style.core.hueBase);
+      const hourRawDbg = hourClayShiftFromHour(this.lastWeatherHour);
+      const wx = {
+        hue: wxRawDbg.hue * envColorGain.weather,
+        sat: wxRawDbg.sat * envColorGain.weather,
+        light: wxRawDbg.light * envColorGain.weather,
+      };
+      const hourShift = {
+        hue: hourRawDbg.hue * envColorGain.hour,
+        sat: hourRawDbg.sat * envColorGain.hour,
+        light: hourRawDbg.light * envColorGain.hour,
+      };
+      const poles = this.resolvePearlColorPoles();
+      clayDebug.hueBase = this.clayHueBase;
+      clayDebug.satBase = this.claySatBase;
+      clayDebug.lightBase = this.clayLightBase;
+      clayDebug.wxHue = wx.hue;
+      clayDebug.wxSat = wx.sat;
+      clayDebug.wxLight = wx.light;
+      clayDebug.hourHue = hourShift.hue;
+      clayDebug.hourSat = hourShift.sat;
+      clayDebug.hourLight = hourShift.light;
+      clayDebug.targetHue = target.hue;
+      clayDebug.styleHue = this.style.core.hueBase;
+      clayDebug.songBlend = this.songColorBlend;
+      clayDebug.warmHue = poles.warmHue;
+      clayDebug.coolHue = poles.coolHue;
+      clayDebug.condition = this.lastWeatherSnapshot?.condition ?? "-";
+      clayDebug.hour = this.lastWeatherHour;
+      clayDebug.weatherGain = envColorGain.weather;
+      clayDebug.hourGain = envColorGain.hour;
+    }
 
     const st = this.style.core;
     if (st.pearlVariation > 0) {
@@ -3554,7 +4766,21 @@ class SoundSculpture {
   ) {
     this.lastWeatherSnapshot = snapshot;
     this.lastWeatherHour = hour;
-    const next = envClayShiftFromWeatherAndHour(snapshot, hour, this.style.core.hueBase);
+    // **vita だけは地の色へ振り切る**（途中で止めると緑の中間色になり、
+    // 「どの天気でも青緑の球」になっていた。2026-08-21 ユーザー指摘）。
+    // 他スタイル（aether ほか）は従来の `envClayShiftFromWeatherAndHour` のまま。
+    const next = this.style.membrane.vita
+      ? combineClayShifts(
+          combineClayShifts(
+            vitaWeatherClayShift(snapshot, this.style.core.hueBase),
+            hourClayShiftFromHour(hour),
+          ),
+          vitaDaytimeClayLift(hour),
+        )
+      : envClayShiftFromWeatherAndHour(snapshot, hour, this.style.core.hueBase);
+    if (this.style.membrane.vita) {
+      this.surfaceMaterial.uniforms.uWeatherGold.value = weatherGoldLuster(snapshot);
+    }
     // 時刻は連続変化させる（分キーだけで間引かない）
     const fineKey = Math.round((((hour % 24) + 24) % 24) * 240); // 15秒粒度
     const key = snapshot
@@ -3628,6 +4854,11 @@ class SoundSculpture {
 
   private initMorphology(seed?: number) {
     this.morphologySeed = seed ?? Math.random() * 1000;
+    this.strikeSeedPhase = seededUnit(11, this.morphologySeed + 3.3) * Math.PI * 2;
+    this.strikeAmp.fill(0);
+    this.strikeKind.fill(0);
+    this.facetLive.fill(0);
+    this.facetVoiceGlass.fill(0);
     this.idleTime = seededUnit(0, this.morphologySeed + 0.71) * 30;
     const axis = growthPlaceOnSphere(0, 1, this.morphologySeed);
     this.morphAxis.set(axis.x, axis.y, axis.z);
@@ -3760,22 +4991,27 @@ class SoundSculpture {
     const busy = this.mixBusy;
     const listen = this.getQuietLivePresence(bands);
     const bob = this.getGrooveBob() * (0.7 + listen * 0.3);
-    const thump = clamp01(
+    // **天井で切らない**（[P0] 2026-08-20）。密な曲は複数の打点が重なって常に 1 を超えるので、
+    // clamp01 だと「ずっと 1 ＝ 何も起きていないのと同じ見え方」になる。softCeil は
+    // 0.62 まで恒等・そこから上は漸近なので、**まばらな曲の見た目は変わらない**まま
+    // 重なったぶんの差が残る。
+    const thump = softCeil(
       this.kickImpulse * 1.15 +
         this.peakPunch * 0.55 +
         bob * 0.5 +
         (this.currentStructure.events.energySurge ? 0.22 : 0),
+      1,
     );
-    const ting = clamp01(this.snareImpulse * 1.05 + this.snareFlash * 0.75);
-    const chatter = clamp01(
-      this.guitarFlash * 1.15 +
-        this.guitarImpulse * 0.25 +
-        this.melodyPhraseImpulse * 0.45,
+    const ting = softCeil(this.snareImpulse * 1.05 + this.snareFlash * 0.75, 1);
+    const chatter = softCeil(
+      this.guitarFlash * 1.15 + this.guitarImpulse * 0.25 + this.melodyPhraseImpulse * 0.45,
+      1,
     );
-    const sparkle = clamp01(
+    const sparkle = softCeil(
       (this.hatImpulse * 0.85 + this.hatFlash * 1.15 + this.waveImpulse * 0.35) *
         (1 - busy * 0.2) *
         (this.primaryHitLock > 0 ? 0.7 : 1),
+      1,
     );
     return {
       thump,
@@ -3797,7 +5033,9 @@ class SoundSculpture {
   private getQuietLivePresence(bands: AudioBands) {
     const r = latestRhythm;
     const busy = this.mixBusy;
-    const events = clamp01(
+    // clamp01 だと密な曲では常に 1（＝LIVE の開き具合が常時全開）になり、
+    // 振幅の抑揚が消える。softCeil で天井付近の順序を残す（[P0]）。
+    const events = softCeil(
       this.kickImpulse * 1.15 +
         this.snareImpulse * 0.95 +
         this.peakPunch * 0.55 +
@@ -3808,6 +5046,7 @@ class SoundSculpture {
         this.waveImpulse * 0.4 +
         this.sectionSurgeBoost * 0.4 +
         (this.currentStructure.events.energySurge ? 0.35 : 0),
+      1,
     );
     const bob =
       this.getGrooveBob() *
@@ -3815,11 +5054,14 @@ class SoundSculpture {
       (0.35 + r.pulseEnvelope * 0.65) *
       (1 - busy * 0.3);
     const melodic = clamp01(
-      this.melodyPhraseImpulse * 0.85 +
+      this.melodyPhraseImpulse * (this.melodyOnsetUsesMidChannel() ? 0.85 : 0.12) +
         this.guitarFlash * (0.55 - busy * 0.2) +
         this.guitarImpulse * (0.35 - busy * 0.15) +
-        bands.melodyFocus * r.melodyOnset * (1.2 - busy * 0.4),
+        bands.melodyFocus * this.melodyOnsetForMid(r) * (1.2 - busy * 0.4),
     );
+    // ここは「LIVE をどれだけ開くか」のゲートなので **1 まで開く**（softCeil を掛けると
+    // ピークまで下がって動きの振幅そのものが落ちる。2026-08-20 に実測 -14% で戻した）。
+    // 飽和を解くのは上の `events` の中だけでよい。
     return clamp01(events * 0.78 + bob * 0.35 + melodic * 0.55);
   }
 
@@ -4119,6 +5361,7 @@ class SoundSculpture {
     species: SpeciesProfile = speciesProfiler.getProfile(),
   ) {
     this.lastBands = bands;
+    this.probeDeltaTime = deltaTime;
     this.currentStructure = structure;
     this.speciesProfile = species;
     // 熟成度は**どの状態でも**進める（形の凍結中・完成後も含む）。[P1]
@@ -4159,6 +5402,7 @@ class SoundSculpture {
       this.audioColorBlend += (activityTarget - this.audioColorBlend) * Math.min(1, deltaTime * 0.55);
     }
     this.updateIdleWobble(activity, deltaTime);
+    this.updateSwimGround(bands, activity, deltaTime);
     updateClickRepulsion(this.clickRepulsion, deltaTime);
     updateClickRepulsion(this.surfaceClickRepulsion, deltaTime);
 
@@ -4166,6 +5410,7 @@ class SoundSculpture {
       if (bands.overall > SILENCE_THRESHOLD) {
         this.activeFormingTime += deltaTime;
         this.soundExposure += bands.overall * deltaTime;
+        this.liveWarmup = Math.min(1, this.liveWarmup + deltaTime / LIVE_WARMUP_SECONDS);
       }
 
       if (this.currentStructure.events.energySurge) {
@@ -4336,6 +5581,122 @@ class SoundSculpture {
   }
 
   /**
+   * 段A3: 遊泳の地。
+   * 出来事と独立した体スケールのマントル進行波。idleWobble（無音ホヨホヨ）とは別。
+   * **表示専用**（`liveOffset` 非経由・bleed なし）。打点・句頭で duck。
+   */
+  private updateSwimGround(bands: AudioBands, activity: number, deltaTime: number) {
+    if (!this.style.membrane.vita || this.completed || this.shapeHold) {
+      this.swimAmp = 0;
+      this.swimDuck = 1;
+      this.swimField.fill(0);
+      if (!this.completed) {
+        this.swimGroup.rotation.x += (0 - this.swimGroup.rotation.x) * Math.min(1, deltaTime * 4);
+        this.swimGroup.rotation.z += (0 - this.swimGroup.rotation.z) * Math.min(1, deltaTime * 4);
+      }
+      liveDebug.swimAmp = 0;
+      liveDebug.swimDuck = 1;
+      liveDebug.swimPhase = this.swimPhase;
+      return;
+    }
+
+    const ampMul = DEFAULT_SWIM_AMP * swimTuning.amp;
+    if (ampMul <= 1e-6) {
+      this.swimAmp = 0;
+      this.swimField.fill(0);
+      liveDebug.swimAmp = 0;
+      liveDebug.swimDuck = 1;
+      liveDebug.swimPhase = this.swimPhase;
+      return;
+    }
+
+    const r = latestRhythm;
+    const bpm = r.bpm > 36 && r.bpm < 220 ? r.bpm : 72;
+    const beatHz = bpm / 60;
+    const warm = smoothstep(0.28, 0.92, this.liveWarmup);
+    const energy = clamp01(
+      this.currentStructure.energyLong * 0.55 +
+        this.currentStructure.energyMid * 0.25 +
+        bands.overall * 0.45 +
+        bands.contrast * 0.2,
+    );
+    this.swimIntensity += (energy - this.swimIntensity) * Math.min(1, deltaTime * 1.4);
+
+    const hitSpike = Math.max(
+      this.kickImpulse,
+      this.snareImpulse * 0.92,
+      this.peakPunch * 0.7,
+    );
+    // 持続フラッシュ（guitarFlash 等）では退かない。密な曲で地が永久に潰れるのを防ぐ。
+    // 鋭い打点の瞬間だけ退く（閾値高め・深さは DEFAULT_SWIM_DUCK）。
+    const duckAmt = clamp01(DEFAULT_SWIM_DUCK * swimTuning.duck);
+    this.swimDuck = 1 - duckAmt * smoothstep(0.2, 0.72, hitSpike);
+
+    const rate =
+      beatHz *
+      DEFAULT_SWIM_SPEED *
+      swimTuning.speed *
+      (0.72 + this.swimIntensity * 0.55 + r.pulseConfidence * 0.18);
+    this.swimPhase += deltaTime * rate * Math.PI * 2;
+    this.swimHeading += deltaTime * (0.09 + this.swimIntensity * 0.14);
+
+    const settle = 1 - this.getMaturity() * 0.28;
+    const targetAmp =
+      ampMul *
+      warm *
+      Math.max(activity, 0.35) *
+      (0.42 + this.swimIntensity * 0.7) *
+      (0.78 + r.pulseConfidence * 0.22) *
+      this.swimDuck *
+      settle;
+    this.swimAmp += (targetAmp - this.swimAmp) * Math.min(1, deltaTime * 3.2);
+
+    if (this.swimAmp < 0.0008) {
+      this.swimAmp = 0;
+      this.swimField.fill(0);
+    } else {
+      const waves = DEFAULT_SWIM_WAVES * swimTuning.waves;
+      const hx = Math.cos(this.swimHeading);
+      const hz = Math.sin(this.swimHeading);
+      // 重い曲でも毎頂点は回すが、計算は軽い（sin/atan2 のみ）
+      for (let i = 0; i < this.swimField.length; i += 1) {
+        const index = i * 3;
+        const x = this.basePositions[index];
+        const y = this.basePositions[index + 1];
+        const z = this.basePositions[index + 2];
+        const rr = Math.hypot(x, y, z) || 1;
+        const nx = x / rr;
+        const ny = y / rr;
+        const nz = z / rr;
+        // 進行方向まわりの経度（体を一周する位相）
+        const lon = Math.atan2(nx * hz - nz * hx, nx * hx + nz * hz);
+        // 赤道帯寄り（頭・尾は弱く）＝イカのマントル
+        const belt = 0.42 + 0.58 * Math.cos(ny * 1.15);
+        const mantle = Math.sin(this.swimPhase - waves * lon) * belt;
+        // 第2高調波をごく薄く（硬直した単一 sin を避ける。ノイズにはしない）
+        const soft = Math.sin(this.swimPhase * 0.5 - waves * 0.5 * lon + 0.7) * 0.22;
+        this.swimField[i] = (mantle + soft * belt) * this.swimAmp;
+      }
+    }
+
+    const sway =
+      DEFAULT_SWIM_SWAY *
+      swimTuning.sway *
+      (this.swimAmp / Math.max(1e-6, ampMul)) *
+      this.swimDuck;
+    const targetRx = Math.sin(this.swimPhase * 0.5) * sway;
+    const targetRz = Math.cos(this.swimPhase * 0.37 + 0.8) * sway * 0.72;
+    const rotFollow = Math.min(1, deltaTime * 5.5);
+    // 操作回転は group。ここへ書くとスティックが効かなくなる
+    this.swimGroup.rotation.x += (targetRx - this.swimGroup.rotation.x) * rotFollow;
+    this.swimGroup.rotation.z += (targetRz - this.swimGroup.rotation.z) * rotFollow;
+
+    liveDebug.swimAmp = this.swimAmp;
+    liveDebug.swimDuck = this.swimDuck;
+    liveDebug.swimPhase = this.swimPhase;
+  }
+
+  /**
    * 人がのれるビート表現:
    * - 土台 = BPMパルスのうなずき（で、で、で…）
    * - アクセント = キック縦／スネア横
@@ -4388,6 +5749,917 @@ class SoundSculpture {
     return floor + clamp01(events * 0.85 + this.drumLiveGate * 0.2) * (1 - floor);
   }
 
+  /**
+   * 打点の発火点を決める。**音が「どこを彫るか」を決める。**
+   *
+   * - **経度 = 音色の高さ（`centroid`）を 12 段に量子化。** 同じ高さの音は同じ場所へ返ってくるので、
+   *   リフやコード進行が**同じ場所を繰り返し彫る**。曲が変われば分布ごと変わる。
+   * - **緯度 = 帯域。** 低音は下（胴）、高音は上（先端）、メロディ寄りは赤道へ。
+   * - 基準の軸は `morphAxis`（曲とシードが決める作品の主軸）。
+   *
+   * 近い方向にまだ生きている打点があれば**同じスロットを叩き直す**。
+   * これが無いと、密な曲で 8 スロットが埋まって「結局また全球一様」に戻る。
+   *
+   * kind: 0=低（キック・胴） / 1=中（スネア・カッティング・句頭） / 2=高（ハット・シンバル）
+   */
+  private spawnStrike(kind: 0 | 1 | 2, strength: number, bands: AudioBands) {
+    const amp = clamp01(strength);
+    if (amp < 0.05 || this.completed || this.shapeHold) {
+      return;
+    }
+    const bin = Math.min(11, Math.floor(clamp01(bands.centroid) * 12));
+    const lon = (bin / 12) * Math.PI * 2 + this.strikeSeedPhase;
+    const latBase = kind === 0 ? -0.62 : kind === 2 ? 0.62 : 0;
+    const lat = Math.max(-1.3, Math.min(1.3, latBase + (bands.melodyFocus - 0.35) * 1.1));
+
+    // morphAxis を北極とする正規直交基底
+    const ax = this.morphAxis.x;
+    const ay = this.morphAxis.y;
+    const az = this.morphAxis.z;
+    const hx = Math.abs(az) > 0.9 ? 1 : 0;
+    const hy = 0;
+    const hz = Math.abs(az) > 0.9 ? 0 : 1;
+    let e1x = ay * hz - az * hy;
+    let e1y = az * hx - ax * hz;
+    let e1z = ax * hy - ay * hx;
+    const e1len = Math.hypot(e1x, e1y, e1z) || 1;
+    e1x /= e1len;
+    e1y /= e1len;
+    e1z /= e1len;
+    const e2x = ay * e1z - az * e1y;
+    const e2y = az * e1x - ax * e1z;
+    const e2z = ax * e1y - ay * e1x;
+    const cl = Math.cos(lat);
+    const sl = Math.sin(lat);
+    const cosLon = Math.cos(lon);
+    const sinLon = Math.sin(lon);
+    let dx = ax * sl + (e1x * cosLon + e2x * sinLon) * cl;
+    let dy = ay * sl + (e1y * cosLon + e2y * sinLon) * cl;
+    let dz = az * sl + (e1z * cosLon + e2z * sinLon) * cl;
+    const dlen = Math.hypot(dx, dy, dz) || 1;
+    dx /= dlen;
+    dy /= dlen;
+    dz /= dlen;
+
+    // 熟成が進むほどコーンを絞る（＝反応が「柔らかい脈動」から「鋭い応答」へ移る）
+    const tighten = 1 - this.getMaturity() * 0.22;
+    const cone = (kind === 0 ? 0.30 : kind === 1 ? 0.46 : 0.62) + (1 - tighten);
+    const fall = kind === 0 ? 4.6 : kind === 1 ? 7.5 : 11;
+
+    let slot = -1;
+    let weakest = 0;
+    let weakestAmp = Infinity;
+    for (let k = 0; k < SoundSculpture.STRIKE_SLOTS; k += 1) {
+      const kk = k * 3;
+      if (this.strikeAmp[k] > 0.02) {
+        const d = dx * this.strikeDir[kk] + dy * this.strikeDir[kk + 1] + dz * this.strikeDir[kk + 2];
+        if (d > 0.93) {
+          slot = k;
+          break;
+        }
+      }
+      if (this.strikeAmp[k] < weakestAmp) {
+        weakestAmp = this.strikeAmp[k];
+        weakest = k;
+      }
+    }
+    if (slot < 0) {
+      slot = weakest;
+    }
+    // 結晶面が開いているなら、その打点は**面の応答**にも回す（熟成で語彙が移る）。
+    if (this.anyCrystalFace > 0.002) {
+      let bestDot = -2;
+      let bestFace = -1;
+      for (let k = 0; k < SoundSculpture.facetCount; k += 1) {
+        if (this.facetCrystal[k] < 0.05) {
+          continue;
+        }
+        const fk = k * 3;
+        const d = dx * this.facetAxes[fk] + dy * this.facetAxes[fk + 1] + dz * this.facetAxes[fk + 2];
+        if (d > bestDot) {
+          bestDot = d;
+          bestFace = k;
+        }
+      }
+      if (bestFace >= 0 && bestDot > 0.15) {
+        this.facetLive[bestFace] = Math.min(
+          1,
+          this.facetLive[bestFace] + amp * this.facetCrystal[bestFace] * 0.9,
+        );
+      }
+    }
+
+    const kk = slot * 3;
+    this.strikeDir[kk] = dx;
+    this.strikeDir[kk + 1] = dy;
+    this.strikeDir[kk + 2] = dz;
+    this.strikeAmp[slot] = Math.min(1.25, Math.max(this.strikeAmp[slot], amp));
+    this.strikeCos[slot] = Math.min(0.86, cone);
+    this.strikeFall[slot] = fall;
+    this.strikeKind[slot] = kind;
+  }
+
+  /**
+   * [P1] 変位場の粗さ。**隣り合う頂点で変位がどれだけ食い違うか ÷ 変位の大きさ。**
+   *
+   * 表示メッシュ（detail 20）は**変位を線形に補間**するだけなので、
+   * 低解像度（detail 10）の三角形ごとの折れ目はそのまま画面に残る。
+   * ＝「表示を細かくしても動きの滑らかさは上がらない」の実体がこの数字。
+   * 結晶面の上（＝わざと平らにして稜を立てている所）とそれ以外を分けて出す。
+   * 稜は残したまま粘土側だけ滑らかにできるかの判断に使う。
+   */
+  private measureFieldRoughness(
+    positions: Float32Array,
+    base: Float32Array,
+    splitByGem: boolean,
+  ) {
+    const cap = SoundSculpture.membraneNeighborCap;
+    const n = this.accumulated.length;
+    let sum = 0;
+    let amp = 0;
+    let gemSum = 0;
+    let gemAmp = 0;
+    let claySum = 0;
+    let clayAmp = 0;
+    for (let i = 0; i < n; i += 1) {
+      const idx = i * 3;
+      const dx = positions[idx] - base[idx];
+      const dy = positions[idx + 1] - base[idx + 1];
+      const dz = positions[idx + 2] - base[idx + 2];
+      let ax = 0;
+      let ay = 0;
+      let az = 0;
+      let k = 0;
+      for (let m = 0; m < cap; m += 1) {
+        const j = this.membraneNeighbors[i * cap + m];
+        if (j < 0) break;
+        const jj = j * 3;
+        ax += positions[jj] - base[jj];
+        ay += positions[jj + 1] - base[jj + 1];
+        az += positions[jj + 2] - base[jj + 2];
+        k += 1;
+      }
+      if (k === 0) continue;
+      const gap = Math.hypot(dx - ax / k, dy - ay / k, dz - az / k);
+      const mag = Math.hypot(dx, dy, dz);
+      sum += gap;
+      amp += mag;
+      if (splitByGem) {
+        // その頂点が結晶面に吸着しているか（球面方向で判定。CPU 側と同じ考え方）
+        const bx = base[idx];
+        const by = base[idx + 1];
+        const bz = base[idx + 2];
+        const r = Math.hypot(bx, by, bz) || 1;
+        const onGem = this.nearestCrystalStrength(bx / r, by / r, bz / r) > 0.05;
+        if (onGem) {
+          gemSum += gap;
+          gemAmp += mag;
+        } else {
+          claySum += gap;
+          clayAmp += mag;
+        }
+      }
+    }
+    return {
+      all: sum / Math.max(1e-6, amp),
+      gem: gemSum / Math.max(1e-6, gemAmp),
+      clay: claySum / Math.max(1e-6, clayAmp),
+    };
+  }
+
+  /** その方向が結晶になっている面のコーンに入っていれば、その面の結晶度を返す */
+  private nearestCrystalStrength(nx: number, ny: number, nz: number) {
+    if (this.anyCrystalFace <= 0.002) return 0;
+    let best = -2;
+    let bk = -1;
+    for (let k = 0; k < SoundSculpture.facetCount; k += 1) {
+      const dk = k * 4;
+      if (
+        nx * this.facetDomains[dk] + ny * this.facetDomains[dk + 1] + nz * this.facetDomains[dk + 2] <
+        this.facetDomains[dk + 3]
+      ) {
+        continue;
+      }
+      const kk = k * 3;
+      const d = nx * this.facetAxes[kk] + ny * this.facetAxes[kk + 1] + nz * this.facetAxes[kk + 2];
+      if (d > best) {
+        best = d;
+        bk = k;
+      }
+    }
+    return bk < 0 ? 0 : this.facetCrystal[bk];
+  }
+
+  /** その頂点方向が、いま生きている打点にどれだけ含まれるか（0〜） */
+  private strikeFieldAt(nx: number, ny: number, nz: number) {
+    return this.strikeFieldAtKind(nx, ny, nz, -1);
+  }
+
+  /** kind < 0 なら全種類。段A2 でキック／スネアを別場にする */
+  private strikeFieldAtKind(nx: number, ny: number, nz: number, kind: number) {
+    let sum = 0;
+    for (let k = 0; k < SoundSculpture.STRIKE_SLOTS; k += 1) {
+      const a = this.strikeAmp[k];
+      if (a <= 0.004) {
+        continue;
+      }
+      if (kind >= 0 && this.strikeKind[k] !== kind) {
+        continue;
+      }
+      const kk = k * 3;
+      const d = nx * this.strikeDir[kk] + ny * this.strikeDir[kk + 1] + nz * this.strikeDir[kk + 2];
+      const c = this.strikeCos[k];
+      if (d <= c) {
+        continue;
+      }
+      const w = (d - c) / (1 - c);
+      sum += a * w * w * (3 - 2 * w);
+    }
+    return sum;
+  }
+
+  /** 段A2: キック収縮エンベロープ（2相）。視覚は updateCoreGeometry 側 */
+  private updateKickContract(deltaTime: number) {
+    if (DEFAULT_KICK_CONTRACT <= 0) {
+      this.kickContractEnv = 0;
+      this.kickContractAge = 0;
+      return;
+    }
+    if (this.kickContractEnv <= 0.001) {
+      this.kickContractEnv = 0;
+      return;
+    }
+    this.kickContractAge += deltaTime;
+    if (this.kickContractAge < KICK_CONTRACT_HOLD) {
+      return;
+    }
+    // hold 後: やや遅く解放（常時へこまない。A1 と同病を避ける）
+    const release =
+      this.kickContractAge < KICK_CONTRACT_HOLD + 0.08 ? 4.2 : 8.5;
+    this.kickContractEnv *= Math.exp(-release * deltaTime);
+    if (this.kickContractEnv < 0.002) {
+      this.kickContractEnv = 0;
+    }
+  }
+
+  /**
+   * 主旋律の波源を作る（vita 段A1・2026-08-24）。位置は打点と同じ写像
+   * （音高12分割→経度・シード回転）で、主旋律は**赤道帯**。同じ旋律は同じ場所から波が出る。
+   */
+  private spawnPhraseWave(strength: number, bands: AudioBands) {
+    const bin = Math.min(11, Math.floor(clamp01(bands.centroid) * 12));
+    const lon = (bin / 12) * Math.PI * 2 + this.strikeSeedPhase;
+    const lat = Math.max(-0.9, Math.min(0.9, (bands.melodyFocus - 0.35) * 1.4));
+
+    // morphAxis を北極とする正規直交基底（spawnStrike と同じ写像）
+    const ax = this.morphAxis.x;
+    const ay = this.morphAxis.y;
+    const az = this.morphAxis.z;
+    const hx = Math.abs(az) > 0.9 ? 1 : 0;
+    const hy = 0;
+    const hz = Math.abs(az) > 0.9 ? 0 : 1;
+    let e1x = ay * hz - az * hy;
+    let e1y = az * hx - ax * hz;
+    let e1z = ax * hy - ay * hx;
+    const e1len = Math.hypot(e1x, e1y, e1z) || 1;
+    e1x /= e1len;
+    e1y /= e1len;
+    e1z /= e1len;
+    const e2x = ay * e1z - az * e1y;
+    const e2y = az * e1x - ax * e1z;
+    const e2z = ax * e1y - ay * e1x;
+    const cl = Math.cos(lat);
+    const sl = Math.sin(lat);
+    const cosLon = Math.cos(lon);
+    const sinLon = Math.sin(lon);
+    let dx = ax * sl + (e1x * cosLon + e2x * sinLon) * cl;
+    let dy = ay * sl + (e1y * cosLon + e2y * sinLon) * cl;
+    let dz = az * sl + (e1z * cosLon + e2z * sinLon) * cl;
+    const dlen = Math.hypot(dx, dy, dz) || 1;
+    dx /= dlen;
+    dy /= dlen;
+    dz /= dlen;
+
+    const k = this.phraseWaveCursor % SoundSculpture.PHRASE_WAVE_SLOTS;
+    this.phraseWaveCursor += 1;
+    // 前の句の波は解放へ（presence 追従をやめて減衰だけ。新しい句が主役になる）
+    for (let j = 0; j < SoundSculpture.PHRASE_WAVE_SLOTS; j += 1) {
+      if (j !== k && this.phraseWaveAmp[j] > 0) {
+        this.phraseWaveReleasing[j] = 1;
+      }
+    }
+    const kk = k * 3;
+    this.phraseWaveDir[kk] = dx;
+    this.phraseWaveDir[kk + 1] = dy;
+    this.phraseWaveDir[kk + 2] = dz;
+    this.phraseWaveAmp[k] = Math.max(
+      this.phraseWaveAmp[k],
+      (0.15 + clamp01(strength) * 0.25) * DEFAULT_PHRASE_WAVE_AMP * voiceTuning.waveAmp,
+    );
+    this.phraseWavePhase[k] = 0;
+    this.phraseWaveQuiet[k] = 0;
+    this.phraseWaveReleasing[k] = 0;
+    // 句の寿命を測り直す（これを 0 にしないと前の句の残り時間で即消える）
+    this.phraseWaveLife[k] = 0;
+    // 句頭タイミング（phrase 波紋の径変位抑制用。法線パフは 2026-09-02 廃止）
+    const warm = smoothstep(0.42, 1, this.liveWarmup);
+    this.voiceHeadPulse = Math.max(
+      this.voiceHeadPulse,
+      (0.28 + clamp01(strength) * 0.22) * warm,
+    );
+  }
+
+  /**
+   * 主旋律の波の更新（applyRhythmImpulses から毎フレーム）。
+   *
+   * **2026-08-28 に時間構造を作り直した。** それまでは句頭で作った波を
+   * 「`presence > 0.18` が続く限り維持、0.25 秒の空白で減衰」というレベル追従にしていたが、
+   * 実測（`phrase_shape.js`）で**駆動信号が 95〜97% の時間ずっと出ていた**
+   * （ロビンソン: 1 イベント 8.9 秒・休み 0.67 秒・休みの割合 3%）。
+   * 句頭は 6〜11 回/分 正しく検出できているのに、その後**離してくれない**のが真因。
+   *
+   * これが段A1 の 3 巡（径の波 / 接線流 / 伸び・撓み）すべての失敗の共通原因だった。
+   * 3 巡目の実機判定は「伸びは分からないが**常時うねって見える**」で、
+   * ＝チャンネルは見えていて、駆動が句になっていなかったことを示している。
+   *
+   * 直し方: 各スロットに**寿命**を持たせる。句頭で立ち上がり（attack）、
+   * `PHRASE_HOLD` まで presence×抑揚に追従し、`PHRASE_LIFE` で必ず 0 へ落ちる。
+   * 句頭は平均 5〜10 秒に 1 回なので、寿命 2 秒なら**休みが 3〜8 秒残る**＝句として読める。
+   * 「句頭＋持続（線）」という設計意図（戦略 9.1）は保つ。**終わるようにしただけ。**
+   */
+  private updatePhraseWaves(deltaTime: number, bands: AudioBands) {
+    this.phraseWaveSpawnCooldown = Math.max(0, this.phraseWaveSpawnCooldown - deltaTime);
+    const ml = latestRhythm.melodyLine;
+    if (!ml) {
+      return;
+    }
+    if (
+      ml.head > 0.45 &&
+      this.phraseWaveSpawnCooldown <= 0 &&
+      this.liveWarmup > 0.42 &&
+      this.style.membrane.vita &&
+      !this.completed &&
+      !this.shapeHold
+    ) {
+      this.spawnPhraseWave(ml.head, bands);
+      this.phraseWaveSpawnCooldown = 0.5;
+    }
+    const speed =
+      DEFAULT_PHRASE_WAVE_SPEED *
+      voiceTuning.waveSpeed *
+      (0.72 + ml.contour * (0.2 + voiceTuning.contour * 0.32));
+    const life = PHRASE_LIFE * voiceTuning.phraseLife;
+    const hold = Math.min(PHRASE_HOLD * voiceTuning.phraseLife, life * 0.9);
+    const contourGain = DEFAULT_VOICE_CONTOUR_GAIN * voiceTuning.contour;
+    for (let k = 0; k < SoundSculpture.PHRASE_WAVE_SLOTS; k += 1) {
+      if (this.phraseWaveAmp[k] <= 0) {
+        continue;
+      }
+      this.phraseWaveLife[k] += deltaTime;
+      const age = this.phraseWaveLife[k];
+      // 寿命の窓: 立ち上がり → 保持 → 必ず 0 へ。**ここが「句が終わる」の担保。**
+      let window = 1;
+      if (age < PHRASE_ATTACK) {
+        window = age / PHRASE_ATTACK;
+      } else if (age > hold) {
+        window = Math.max(0, 1 - (age - hold) / Math.max(1e-3, life - hold));
+        window = window * window; // 尻を軽くして「消えた」を分かりやすく
+      }
+      if (age >= life) {
+        this.phraseWaveAmp[k] = 0;
+        this.phraseWaveReleasing[k] = 0;
+        continue;
+      }
+      // 句中の抑揚は残す（歌の強弱が形の強弱になる）。ただし窓で必ず閉じる。
+      const drive = clamp01(ml.presence * (0.28 + ml.contour * contourGain));
+      const target = drive * window;
+      const follow = target > this.phraseWaveAmp[k] ? 9 : 6;
+      this.phraseWaveAmp[k] += (target - this.phraseWaveAmp[k]) * Math.min(1, deltaTime * follow);
+      this.phraseWavePhase[k] += deltaTime * speed;
+      if (this.phraseWaveAmp[k] < 0.004) {
+        this.phraseWaveAmp[k] = 0;
+        this.phraseWaveReleasing[k] = 0;
+      }
+    }
+  }
+
+  /**
+   * 主旋律の帯（段A1）の膜 uniform 更新。一番強い波スロットを帯の波源にし、
+   * 帯の強さは presence×抑揚に追従（句の間だけ持続して流れ、句尻で消える）。
+   * vita 以外・完成後は 0 へ戻る（他スタイルへ横展開しない）。
+   */
+  private syncVoiceBandUniforms(deltaTime: number) {
+    const uniforms = this.surfaceMaterial.uniforms;
+    const ml = latestRhythm.melodyLine;
+    let best = -1;
+    let bestAmp = 0.02;
+    for (let k = 0; k < SoundSculpture.PHRASE_WAVE_SLOTS; k += 1) {
+      if (this.phraseWaveAmp[k] > bestAmp) {
+        bestAmp = this.phraseWaveAmp[k];
+        best = k;
+      }
+    }
+    const active = this.style.membrane.vita && !this.completed && !this.shapeHold && ml && best >= 0;
+    // **2026-08-28: presence 直読みをやめ、句のエンベロープ（bestAmp）を継承する。**
+    // presence は 95〜97% の時間出ているので、直読みだと膜も出っぱなしになり
+    // 「句が通った」ではなく「ずっと透けている」になる。bestAmp は寿命窓で必ず閉じる。
+    const target = active
+      ? clamp01(bestAmp * (0.42 + this.getVoiceContourDrive() * 0.72)) *
+        DEFAULT_VOICE_BAND_GAIN *
+        voiceTuning.bandGain *
+        0.35
+      : 0;
+    const glassTarget = active
+      ? softCeil(bestAmp * (0.78 + this.getVoiceContourDrive() * 1.12), 1.0)
+      : 0;
+    uniforms.uVoiceOpen.value = DEFAULT_VOICE_BAND_OPEN * voiceTuning.bandOpen;
+    const rising = target > uniforms.uVoice.value;
+    uniforms.uVoice.value +=
+      (target - uniforms.uVoice.value) * Math.min(1, deltaTime * (rising ? 14 : 5));
+    const glassRising = glassTarget > (uniforms.uVoiceGlass.value as number);
+    uniforms.uVoiceGlass.value +=
+      (glassTarget - (uniforms.uVoiceGlass.value as number)) *
+      Math.min(1, deltaTime * (glassRising ? 14 : 5));
+    if (best >= 0) {
+      const kk = best * 3;
+      (uniforms.uVoiceDir.value as THREE.Vector3).set(
+        this.phraseWaveDir[kk],
+        this.phraseWaveDir[kk + 1],
+        this.phraseWaveDir[kk + 2],
+      );
+      uniforms.uVoicePhase.value = this.phraseWavePhase[best];
+    }
+    this.updateVoiceCrystalCausation(deltaTime, best, bestAmp);
+    this.applyVoiceGlassDiag();
+  }
+
+  /** 段B2 診断フック（`voice_glass_ab.js`）。mul=0 で shader／幾何とも完全 off。 */
+  private applyVoiceGlassDiag() {
+    const uniforms = this.surfaceMaterial.uniforms;
+    liveDebug.voiceGlass = uniforms.uVoiceGlass.value as number;
+    liveDebug.voiceGlassGain = uniforms.uVoiceGlassGain.value as number;
+    let maxF = 0;
+    for (let k = 0; k < SoundSculpture.facetCount; k += 1) {
+      maxF = Math.max(maxF, this.facetVoiceGlass[k]);
+    }
+    liveDebug.facetVoiceGlassMax = maxF;
+    const mul = voiceGlassDiag.mul;
+    if (mul >= 0.999) {
+      return;
+    }
+    if (mul <= 0.001) {
+      uniforms.uVoiceGlass.value = 0;
+      uniforms.uVoiceGlassGain.value = 0;
+      this.facetVoiceGlass.fill(0);
+      return;
+    }
+    uniforms.uVoiceGlass.value = (uniforms.uVoiceGlass.value as number) * mul;
+    uniforms.uVoiceGlassGain.value = (uniforms.uVoiceGlassGain.value as number) * mul;
+  }
+
+  /**
+   * 段B2: 主旋律の帯が通った面で膜が先にガラス化 → ラグ後に粘土ファセットが開く。
+   * 軸 0 では mineral=0 で完全 no-op（facetVoiceGlass も 0）。
+   */
+  private updateVoiceCrystalCausation(
+    deltaTime: number,
+    bestWave: number,
+    bestAmp: number,
+  ) {
+    if (!this.style.membrane.vita || this.completed || this.shapeHold) {
+      this.facetVoiceGlass.fill(0);
+      return;
+    }
+    const axis = this.getMineralAxis();
+    if (axis <= 0.002) {
+      this.facetVoiceGlass.fill(0);
+      return;
+    }
+    const faceGate =
+      SoundSculpture.GEM_FACE_FLOOR +
+      (1 - SoundSculpture.GEM_FACE_FLOOR) * this.getMaturity();
+    const mineral = axis * faceGate;
+    const uniforms = this.surfaceMaterial.uniforms;
+    uniforms.uVoiceGlassGain.value =
+      DEFAULT_VOICE_GLASS_GAIN * Math.max(0.62, smoothstep(0.02, 0.18, mineral));
+
+    if (bestWave < 0 || bestAmp <= 0.004) {
+      for (let k = 0; k < SoundSculpture.facetCount; k += 1) {
+        this.facetVoiceGlass[k] *= Math.exp(-deltaTime * 3.2);
+        if (this.facetVoiceGlass[k] < 0.004) {
+          this.facetVoiceGlass[k] = 0;
+        }
+      }
+      return;
+    }
+
+    const voiceStrength = uniforms.uVoiceGlass.value as number;
+    const kk = bestWave * 3;
+    const vdx = this.phraseWaveDir[kk];
+    const vdy = this.phraseWaveDir[kk + 1];
+    const vdz = this.phraseWaveDir[kk + 2];
+    const lag = DEFAULT_VOICE_CLAY_LAG;
+    const clayOpenRate = 5.8;
+
+    for (let k = 0; k < SoundSculpture.facetCount; k += 1) {
+      const rank = this.facetRank[k];
+      const faceMineral = smoothstep(rank, rank + 0.12, mineral);
+      if (faceMineral <= 0.004) {
+        this.facetVoiceGlass[k] *= Math.exp(-deltaTime * 5);
+        continue;
+      }
+      const fk = k * 3;
+      const faceAlign = Math.max(
+        0,
+        this.facetAxes[fk] * vdx +
+          this.facetAxes[fk + 1] * vdy +
+          this.facetAxes[fk + 2] * vdz,
+      );
+      const target = clamp01(
+        voiceStrength * (0.38 + faceAlign * 0.82) * faceMineral * DEFAULT_VOICE_GLASS_GAIN * 0.55,
+      );
+      const rising = target > this.facetVoiceGlass[k];
+      this.facetVoiceGlass[k] +=
+        (target - this.facetVoiceGlass[k]) *
+        Math.min(1, deltaTime * (rising ? 16 : 3.8));
+
+      if (this.facetVoiceGlass[k] > lag) {
+        const open =
+          ((this.facetVoiceGlass[k] - lag) / Math.max(1e-3, 1 - lag)) *
+          this.facetCrystal[k];
+        this.facetLive[k] = Math.min(
+          1,
+          this.facetLive[k] + open * deltaTime * clayOpenRate,
+        );
+      }
+    }
+  }
+
+  /**
+   * **主旋律の接線流（段A1 作り直し・2026-08-25）。半径方向へは 1 も動かさない。**
+   *
+   * 2026-08-25 の実機判定で、径方向の波は「I'm Yours でギリギリ / ロビンソンでほぼ /
+   * 修羅場で全く」見えなかった。実測（`wave_share.js`）で真因が確定している:
+   * 波は打点とまったく同じ `liveOffset`（法線方向スカラ）へ足し算で入っており、
+   * 句中の 波/打点 比は I'm Yours 0.42 / ロビンソン 0.17 / 修羅場 0.18。
+   * 打点と並ぶには waveAmp 5.5〜5.9 倍が要るが、波は持続成分なので
+   * その倍率は「常時うねり」（2026-08-19 に却下済み）の再来になる。
+   * **＝ゲインでは解けない。チャンネルを変えるしかない。**
+   *
+   * 打点は例外なく法線方向なので、接線方向は空いている。ここへ流すと
+   * 振幅を奪い合わずに済む。径方向の波を `cos`、接線流を `sin` にすると
+   * 両者は 90° 位相差の**表面波（Rayleigh 波）**になり、実在の表面の伝わり方と一致する。
+   * 体表の起伏を頂点ごと横へ運ぶので、シルエットを変えずに「表面が滑る」が見える。
+   *
+   * `out` は呼び出し側の使い回しバッファ（毎頂点で new しない）。
+   */
+  private phraseFlowFieldAt(
+    nx: number,
+    ny: number,
+    nz: number,
+    out: { x: number; y: number; z: number },
+  ) {
+    out.x = 0;
+    out.y = 0;
+    out.z = 0;
+    for (let k = 0; k < SoundSculpture.PHRASE_WAVE_SLOTS; k += 1) {
+      const a = this.phraseWaveAmp[k];
+      if (a <= 0.004) {
+        continue;
+      }
+      const kk = k * 3;
+      const gx = this.phraseWaveDir[kk];
+      const gy = this.phraseWaveDir[kk + 1];
+      const gz = this.phraseWaveDir[kk + 2];
+      const d = Math.max(-1, Math.min(1, nx * gx + ny * gy + nz * gz));
+      // 波源方向の接線成分（= 波源へ向かう向き）。真上・真裏では長さ 0 になり
+      // 向きが定まらないので落とす（特異点。ここは接線流が 0 で正しい）。
+      const px = gx - nx * d;
+      const py = gy - ny * d;
+      const pz = gz - nz * d;
+      const len = Math.hypot(px, py, pz);
+      if (len < 1e-4) {
+        continue;
+      }
+      const ang = Math.acos(d);
+      // 包絡は径方向の波（exp(-ang*1.1)）より**広い**。理由は 2 つ:
+      // (1) 剪断（隣接頂点との差）はメッシュを壊すが、広い包絡は同じ剪断でより多くの
+      //     面積を動かせるので「見える量 ÷ 壊れやすさ」が良い。
+      // (2) 径方向の波は痕跡（liveOffset → 永久層）を局在させたいので狭いままが正しい。
+      const envelope = Math.exp(-ang * 0.55);
+      // 径方向は cos。90° ずらした sin にすることで、粒子が楕円を描く表面波になる。
+      // 直流 0.45 を混ぜて「句のあいだ、皮が波源から外へ引かれ続ける」を出す。
+      // 直流成分は包絡なりに滑らかなので**剪断を増やさない**（＝ただで見える量が増える）。
+      const ripple = 0.45 + 0.55 * Math.sin(ang * 7 - this.phraseWavePhase[k]);
+      // 波源から遠ざかる向きを正にする（-1/len で反転）
+      const scale = (-a * envelope * ripple) / len;
+      out.x += px * scale;
+      out.y += py * scale;
+      out.z += pz * scale;
+    }
+  }
+
+  /** 接線流が動いているか（頂点ループを丸ごと skip するための早期判定） */
+  private phraseFlowActive() {
+    if (DEFAULT_PHRASE_FLOW_AMP * voiceTuning.flowAmp <= 1e-6) return false;
+    for (let k = 0; k < SoundSculpture.PHRASE_WAVE_SLOTS; k += 1) {
+      if (this.phraseWaveAmp[k] > 0.004) return true;
+    }
+    return false;
+  }
+
+  /**
+   * **melodyOnset を中音打点へ流すか（段A1 Phase 0・2026-08-29）。**
+   * `refreshVoicedMidGate()` を applyRhythmImpulses の先頭で呼ぶこと。
+   */
+  private refreshVoicedMidGate() {
+    if (!this.style.membrane.vita || this.completed || this.shapeHold) {
+      this.voicedLineBlocksMid = false;
+      liveDebug.voicedMidBlocked = 0;
+      return;
+    }
+    const ml = latestRhythm.melodyLine;
+    if (!ml) {
+      this.voicedLineBlocksMid = false;
+      liveDebug.voicedMidBlocked = 0;
+      return;
+    }
+    this.voicedLineBlocksMid =
+      ml.presence > 0.12 ||
+      ml.head > 0.28 ||
+      (ml.presence > 0.07 && ml.contour > 0.02);
+    liveDebug.voicedMidBlocked = this.voicedLineBlocksMid ? 1 : 0;
+  }
+
+  private melodyOnsetUsesMidChannel(): boolean {
+    return !this.voicedLineBlocksMid;
+  }
+
+  /** melodyOnset のうち mid チャンネルに載せる分だけ（voiced 時は 0） */
+  private melodyOnsetForMid(r: RhythmEvents) {
+    return this.melodyOnsetUsesMidChannel() ? r.melodyOnset : 0;
+  }
+
+  /**
+   * 句中抑揚 → 膜振幅（Phase 1）。presence（線）× contour（音節・強弱）の合成。
+   * contour は RhythmDetector で presence から分離して検出する。
+   */
+  private getVoiceContourDrive() {
+    const ml = latestRhythm.melodyLine;
+    if (!ml || ml.presence < 0.08) {
+      return 0;
+    }
+    const gain = DEFAULT_VOICE_CONTOUR_GAIN * voiceTuning.contour;
+    return clamp01(ml.presence * (0.18 + ml.contour * gain));
+  }
+
+  private phraseBulgeActive() {
+    if (!this.style.membrane.vita || this.completed || this.shapeHold) {
+      return false;
+    }
+    for (let k = 0; k < SoundSculpture.PHRASE_WAVE_SLOTS; k += 1) {
+      if (this.phraseWaveAmp[k] > 0.004) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 膜向けの広い句ローブ（符号なし・常に膨らむ） */
+  private phraseMembraneEnvelopeAt(nx: number, ny: number, nz: number) {
+    let sum = 0;
+    const cosMin = VOICE_MEMBRANE_COS;
+    for (let k = 0; k < SoundSculpture.PHRASE_WAVE_SLOTS; k += 1) {
+      const a = this.phraseWaveAmp[k];
+      if (a <= 0.004) {
+        continue;
+      }
+      const kk = k * 3;
+      const d =
+        nx * this.phraseWaveDir[kk] +
+        ny * this.phraseWaveDir[kk + 1] +
+        nz * this.phraseWaveDir[kk + 2];
+      if (d <= cosMin) {
+        continue;
+      }
+      const w = (d - cosMin) / (1 - cosMin);
+      const smooth = w * w * (3 - 2 * w);
+      sum += a * smooth;
+    }
+    return sum;
+  }
+
+  private voiceMembraneActive() {
+    if (!this.style.membrane.vita || this.completed || this.shapeHold) {
+      return false;
+    }
+    if (this.voiceHeadPulse > 0.004 || this.phraseBulgeActive()) {
+      return true;
+    }
+    const ml = latestRhythm.melodyLine;
+    return !!(ml && ml.presence > 0.08);
+  }
+
+  /**
+   * **膜だけの声（段A1・2026-08-31 改）。** 粘土と同じ法線膨らみは使わず、
+   * **句方向の接線流**＋ごく弱い句頭パフだけ。ドラムは core 側。
+   */
+  private applyVoiceMembraneMotion(positions: Float32Array, count: number) {
+    if (!this.voiceMembraneActive()) {
+      liveDebug.bulgeDisp = 0;
+      return;
+    }
+    const warm = smoothstep(0.35, 1, this.liveWarmup);
+    if (warm <= 1e-4) {
+      liveDebug.bulgeDisp = 0;
+      return;
+    }
+    const contourDrive = this.getVoiceContourDrive();
+    liveDebug.contourDrive = contourDrive;
+    const mucus = this.surfaceMaterial.uniforms.uMucus.value as number;
+    const flowGain =
+      DEFAULT_PHRASE_FLOW_AMP *
+      voiceTuning.bulge *
+      voiceTuning.flowAmp *
+      warm *
+      (0.32 + contourDrive * 1.08) *
+      (1 - mucus * DEFAULT_MUCUS_FLOW_DAMP * 0.85);
+    const flow = this.phraseFlowScratch;
+    let sum = 0;
+    for (let i = 0; i < count; i += 1) {
+      const index = i * 3;
+      const bx = this.baseSurfacePositions[index];
+      const by = this.baseSurfacePositions[index + 1];
+      const bz = this.baseSurfacePositions[index + 2];
+      const br = Math.hypot(bx, by, bz) || 1;
+      const nx = bx / br;
+      const ny = by / br;
+      const nz = bz / br;
+      this.phraseFlowFieldAt(nx, ny, nz, flow);
+      const localW = 0.38 + contourDrive * 0.72;
+      let fx = flow.x * flowGain * localW;
+      let fy = flow.y * flowGain * localW;
+      let fz = flow.z * flowGain * localW;
+      const raw = Math.hypot(fx, fy, fz);
+      if (raw > PHRASE_FLOW_CEIL * 0.62) {
+        const k = softCeil(raw, PHRASE_FLOW_CEIL) / raw;
+        fx *= k;
+        fy *= k;
+        fz *= k;
+      }
+      const env = this.phraseMembraneEnvelopeAt(nx, ny, nz);
+      // 句ローブ上の接線リップル。**法線パフは廃止**（2026-09-02: Fury ~28s の膨らみ）。
+      growthFlow(nx, ny, nz, this.vertexDeformSalt(i, 31.2), flow);
+      const dot = flow.x * nx + flow.y * ny + flow.z * nz;
+      const tx = flow.x - nx * dot;
+      const ty = flow.y - ny * dot;
+      const tz = flow.z - nz * dot;
+      const tLen = Math.hypot(tx, ty, tz) || 1;
+      const ripple = env * flowGain * (0.42 + contourDrive * 0.88);
+      positions[index] += fx + (tx / tLen) * ripple;
+      positions[index + 1] += fy + (ty / tLen) * ripple;
+      positions[index + 2] += fz + (tz / tLen) * ripple;
+      sum += Math.hypot(fx, fy, fz) + ripple;
+    }
+    liveDebug.bulgeDisp = sum / Math.max(1, count);
+  }
+
+  /**
+   * 段B1: 膜の同心円波紋（法線方向）。phraseWave の位相を伝播リングとして見せる。
+   * 待機 idle 波＋キック／スネアのリング。接線流（applyVoiceMembraneMotion）とは別チャンネル。
+   */
+  private applyMembraneWaterRipples(positions: Float32Array, count: number) {
+    if (!this.style.membrane.vita || this.completed || this.shapeHold) {
+      liveDebug.waterRipple = 0;
+      return;
+    }
+    const warm = smoothstep(0.35, 1, this.liveWarmup);
+    if (warm <= 1e-4) {
+      liveDebug.waterRipple = 0;
+      return;
+    }
+    const amp = DEFAULT_MEMBRANE_RIPPLE_AMP * warm;
+    const rings = DEFAULT_MEMBRANE_RIPPLE_RINGS;
+    const ceil = DEFAULT_MEMBRANE_RIPPLE_AMP * 1.85;
+    const phraseRippleDamp =
+      1 -
+      Math.min(
+        0.85,
+        Math.max(
+          (this.surfaceMaterial.uniforms.uVoiceGlass.value as number) * 0.52,
+          (this.surfaceMaterial.uniforms.uVoice.value as number) * 0.45,
+          this.voiceHeadPulse * 0.95,
+        ),
+      );
+    let sum = 0;
+    for (let i = 0; i < count; i += 1) {
+      const index = i * 3;
+      const bx = this.baseSurfacePositions[index];
+      const by = this.baseSurfacePositions[index + 1];
+      const bz = this.baseSurfacePositions[index + 2];
+      const br = Math.hypot(bx, by, bz) || 1;
+      const nx = bx / br;
+      const ny = by / br;
+      const nz = bz / br;
+      let h = 0;
+      for (let k = 0; k < SoundSculpture.PHRASE_WAVE_SLOTS; k += 1) {
+        const a = this.phraseWaveAmp[k];
+        if (a <= 0.004) {
+          continue;
+        }
+        const kk = k * 3;
+        const gx = this.phraseWaveDir[kk];
+        const gy = this.phraseWaveDir[kk + 1];
+        const gz = this.phraseWaveDir[kk + 2];
+        const d = Math.max(-1, Math.min(1, nx * gx + ny * gy + nz * gz));
+        const ang = Math.acos(d);
+        const envelope = Math.exp(-ang * 0.42);
+        h += a * envelope * Math.sin(ang * rings - this.phraseWavePhase[k] * 1.65) * phraseRippleDamp;
+      }
+      const angTop = Math.acos(Math.max(-1, Math.min(1, ny)));
+      h +=
+        this.idleWobbleAmp *
+        1.6 *
+        Math.exp(-angTop * 0.36) *
+        Math.sin(angTop * rings * 0.9 - this.idleTime * 2.1);
+      // 段A3: 遊泳位相で膜リングが流れる（B1 で残した「水面の流れ」）
+      if (this.swimAmp > 0.0008) {
+        h +=
+          this.swimAmp *
+          DEFAULT_SWIM_MEMBRANE *
+          swimTuning.membrane *
+          2.4 *
+          Math.exp(-angTop * 0.32) *
+          Math.sin(angTop * rings * 0.95 - this.swimPhase * 1.15);
+      }
+      if (this.kickRippleStrength > 0.008) {
+        h +=
+          this.kickRippleStrength *
+          Math.exp(-angTop * 0.28) *
+          Math.sin(angTop * rings * 1.05 - this.waterRipplePhase * 4.2);
+      }
+      if (this.snareRippleStrength > 0.008) {
+        h +=
+          this.snareRippleStrength *
+          Math.exp(-angTop * 0.52) *
+          Math.sin(angTop * rings * 1.18 - this.waterRipplePhase * 3.35 + 1.15);
+      }
+      let disp = h * amp;
+      if (Math.abs(disp) > ceil) {
+        disp = Math.sign(disp) * ceil;
+      }
+      positions[index] += nx * disp;
+      positions[index + 1] += ny * disp;
+      positions[index + 2] += nz * disp;
+      sum += Math.abs(disp);
+    }
+    liveDebug.waterRipple = sum / Math.max(1, count);
+  }
+
+  /** 段B1: 波紋位相とキック／スネアリング強度の更新 */
+  private updateMembraneWaterRipples(deltaTime: number) {
+    if (!this.style.membrane.vita || this.completed) {
+      return;
+    }
+    this.waterRipplePhase += deltaTime * (2.6 + this.idleWobbleAmp * 3.5 + this.swimAmp * 28);
+    const kickHit = this.kickImpulse * 0.75 + this.peakPunch * 0.35;
+    const snareHit = this.snareImpulse * 0.65 + this.snareFlash * 0.45;
+    this.kickRippleStrength = Math.max(
+      this.kickRippleStrength * Math.exp(-deltaTime * 5.2),
+      kickHit * DEFAULT_MEMBRANE_KICK_RIPPLE,
+    );
+    this.snareRippleStrength = Math.max(
+      this.snareRippleStrength * Math.exp(-deltaTime * 6.0),
+      snareHit * 0.42,
+    );
+  }
+
+  /**
+   * 句頭パフ（膜）の減衰と診断用 liveDebug 更新。
+   * 2026-08-31: 体全体の伸び・撓み（applyVoiceStretch）は廃止。膜は applyVoiceMembraneMotion。
+   */
+  private updateVoiceStretch(deltaTime: number) {
+    const active = this.style.membrane.vita && !this.completed && !this.shapeHold;
+    this.voiceHeadPulse *= Math.exp(-deltaTime * 12);
+    if (this.voiceHeadPulse < 0.004) {
+      this.voiceHeadPulse = 0;
+    }
+
+    let total = 0;
+    if (active) {
+      for (let k = 0; k < SoundSculpture.PHRASE_WAVE_SLOTS; k += 1) {
+        total += this.phraseWaveAmp[k];
+      }
+    }
+    if (this.completed) {
+      this.voiceHeadPulse = 0;
+      return;
+    }
+    liveDebug.phraseAmp = clamp01(total);
+    liveDebug.voiceHead = this.voiceHeadPulse;
+    liveDebug.voiceStretch = this.voiceHeadPulse;
+  }
+
   /** ヒット強度 0–1 → 弱い音は小さく、強い音は残す */
   private hitDynamics(strength: number, downbeat = false, busy = 0) {
     const s = clamp01(strength);
@@ -4398,8 +6670,10 @@ class SoundSculpture {
   private applyRhythmImpulses(deltaTime: number, bands: AudioBands) {
     const r = latestRhythm;
     const s = this.currentStructure;
+    this.refreshVoicedMidGate();
     this.refreshMixBusy(deltaTime);
     const busy = this.mixBusy;
+    const warm = smoothstep(0.35, 1, this.liveWarmup);
     // busyによる減衰の加速は「音数が多い曲を丸ごと弱く見せる」原因になっていたため
     // 大幅に緩めた（実測: Fury Of The Storm でbusy平均0.835。以前の係数のままだと
     // ほぼ曲全体で最大の抑制がかかり続けていた）。busyは短い密集の瞬間だけ軽く
@@ -4419,7 +6693,33 @@ class SoundSculpture {
     // カッティングは一瞬のフラッシュ。余韻のうねりにしない
     this.guitarFlash *= Math.exp(-(9.5 + busy * 0.9) * deltaTime);
     this.melodyPhraseImpulse *= Math.exp(-(5.5 + busy * 0.7) * deltaTime);
+    // 歌が主旋律線として出ている間、旧 mid 経路の phrase 余韻を早く消す（膜フラッシュの残留）
+    if (!this.melodyOnsetUsesMidChannel()) {
+      this.melodyPhraseImpulse *= Math.exp(-22 * deltaTime);
+    }
     this.primaryHitLock = Math.max(0, this.primaryHitLock - deltaTime);
+    // 主旋律の波（段A1）: 打点とは別の時間スケールでここで更新する
+    this.updatePhraseWaves(deltaTime, bands);
+    this.updateMembraneWaterRipples(deltaTime);
+    this.updateVoiceStretch(deltaTime);
+    this.updateKickContract(deltaTime);
+    // updateVoiceStretch の後も gate を最新 melodyLine で再同期（mid 打点分岐の直前）
+    this.refreshVoicedMidGate();
+    for (let k = 0; k < SoundSculpture.STRIKE_SLOTS; k += 1) {
+      if (this.strikeAmp[k] > 0) {
+        this.strikeAmp[k] *= Math.exp(-this.strikeFall[k] * deltaTime);
+        if (this.strikeAmp[k] < 0.002) this.strikeAmp[k] = 0;
+      }
+    }
+    const facetFall = Math.exp(-5.5 * deltaTime);
+    for (let k = 0; k < SoundSculpture.facetCount; k += 1) {
+      if (this.facetLive[k] > 0) {
+        this.facetLive[k] *= facetFall;
+        if (this.facetLive[k] < 0.002) this.facetLive[k] = 0;
+      }
+    }
+    this.midFlashSensitivity +=
+      (1 - this.midFlashSensitivity) * Math.min(1, deltaTime / 0.38);
     // ring はヒットの余韻だけ。busy でも大きく削らない（音数の多さ＝存在感の低下にしない）
     const ringFloor = (latestRhythm.pulseConfidence > 0.4 ? 0.012 : 0.028) * (1 - busy * 0.25);
     this.kickImpulse = Math.max(this.kickImpulse, r.kickRing * ringFloor);
@@ -4434,7 +6734,7 @@ class SoundSculpture {
     // 音数の多い曲ほどこの底上げが効いてほしいので、busyでの減衰はごく弱くする
     this.kickImpulse = Math.max(this.kickImpulse, r.salienceLow * 0.32 * (1 - busy * 0.2));
     this.peakPunch = Math.max(this.peakPunch, r.salienceLow * 0.16 * (1 - busy * 0.2));
-    this.guitarFlash = Math.max(this.guitarFlash, r.salienceMid * 0.34 * (1 - busy * 0.15));
+    this.guitarFlash = Math.max(this.guitarFlash, r.salienceMid * 0.34 * (1 - busy * 0.15) * warm);
     this.hatFlash = Math.max(this.hatFlash, r.salienceHigh * 0.3 * (1 - busy * 0.2));
     this.lastSalienceHighSpark += deltaTime;
     if (r.salienceHigh > 0.4 && this.lastSalienceHighSpark > 0.09) {
@@ -4454,12 +6754,20 @@ class SoundSculpture {
     const secondaryMul = this.primaryHitLock > 0 ? 0.45 + (1 - busy) * 0.25 : 1;
     const weakFloor = 0.07 + busy * 0.08;
 
+    const melodyOnsetMid = this.melodyOnsetForMid(r);
+
     // --- メロディ句頭: 人がフレーズの立ち上がりで感じる反応 ---
+    // **2026-08-29 Phase 0:** voiced 主旋律線が出ているときは Voice チャンネルへ。
+    // ここで guitarFlash / spawnStrike(1) に載せると歌がスネアに見える（段A1 根本問題）。
     if (
-      r.melodyOnset > 0.035 + busy * 0.04 &&
+      melodyOnsetMid > 0.035 + busy * 0.04 &&
       (bands.melodyFocus > 0.12 + busy * 0.1 || bands.melody > 0.08 + busy * 0.06)
     ) {
-      const phrase = this.hitDynamics(r.melodyOnset * (0.7 + bands.melodyFocus * 0.8), false, busy);
+      const phrase = this.hitDynamics(
+        melodyOnsetMid * (0.7 + bands.melodyFocus * 0.8),
+        false,
+        busy,
+      );
       if (phrase > weakFloor * 0.7) {
         this.melodyPhraseImpulse = Math.min(
           1,
@@ -4467,8 +6775,10 @@ class SoundSculpture {
         );
         this.guitarFlash = Math.min(
           1,
-          this.guitarFlash + phrase * 0.55 * M * (1 - busy * 0.4) * secondaryMul,
+          this.guitarFlash + phrase * 0.55 * M * (1 - busy * 0.4) * secondaryMul * this.midFlashSensitivity,
         );
+        this.midFlashSensitivity = Math.max(0.16, this.midFlashSensitivity * 0.62);
+        this.spawnStrike(1, phrase * 0.85, bands);
         this.guitarImpulse = Math.min(
           1,
           this.guitarImpulse + phrase * 1.4 * M * (1 - busy * 0.5) * secondaryMul,
@@ -4488,6 +6798,12 @@ class SoundSculpture {
         this.kickImpulse = Math.min(1, this.kickImpulse + dyn * kickGain * lengthBoost * M);
         this.peakPunch = Math.min(0.75, this.peakPunch + dyn * (0.28 + (r.downbeat ? 0.18 : 0)));
         this.injectMusicPierce(dyn * (0.72 + (r.downbeat ? 0.28 : 0)) * M, "kick");
+        this.spawnStrike(0, dyn * (0.85 + (r.downbeat ? 0.15 : 0)), bands);
+        if (DEFAULT_KICK_CONTRACT > 0) {
+          this.kickContractEnv = Math.min(1, Math.max(this.kickContractEnv, dyn * 1.05));
+          this.kickContractAge = 0;
+          liveDebug.acc.kickContractEvents += 1;
+        }
         this.primaryHitLock = Math.max(this.primaryHitLock, 0.09 + busy * 0.05);
         this.noteVisualEvent(1.1);
         if (s.phase !== "embryo" && dyn > 0.35) {
@@ -4509,6 +6825,8 @@ class SoundSculpture {
         this.fragmentSpawnCooldown = 0;
         this.separationTendency = Math.min(1, this.separationTendency + dyn * 0.42 * (1 - busy * 0.3));
         this.injectMusicPierce(dyn * 0.85 * M, "snare");
+        this.spawnStrike(1, dyn * 0.9, bands);
+        liveDebug.acc.snareOutEvents += 1;
         this.primaryHitLock = Math.max(this.primaryHitLock, 0.07 + busy * 0.05);
         this.noteVisualEvent(1);
         const origin = new THREE.Vector3(
@@ -4535,6 +6853,8 @@ class SoundSculpture {
           const hatMul = (1 - busy * 0.22) * Math.max(0.62, secondaryMul);
           this.hatImpulse = Math.min(1, this.hatImpulse + dyn * 4.8 * lengthBoost * M * hatMul);
           this.hatFlash = Math.min(1, this.hatFlash + dyn * 1.35 * hatMul);
+          this.spawnStrike(2, dyn * DEFAULT_HAT_STRIKE_AMP * hatMul, bands);
+          liveDebug.acc.hatSparkleEvents += 1;
           const burst = Math.min(
             Math.max(5, 16 - Math.floor(busy * 2)),
             5 +
@@ -4591,8 +6911,11 @@ class SoundSculpture {
         const dyn = this.hitDynamics(r.chop, false, busy);
         if (dyn > weakFloor * 0.75 && secondaryMul > 0.32) {
           const chopMul = (1 - busy * 0.4) * secondaryMul;
+          const sens = this.midFlashSensitivity;
           this.guitarImpulse = Math.min(1, this.guitarImpulse + dyn * 0.85 * M * chopMul);
-          this.guitarFlash = Math.min(1, this.guitarFlash + dyn * 1.85 * chopMul);
+          this.guitarFlash = Math.min(1, this.guitarFlash + dyn * 1.85 * chopMul * sens);
+          this.midFlashSensitivity = Math.max(0.16, sens * 0.5);
+          this.spawnStrike(1, dyn * 0.7 * chopMul, bands);
           this.peakPunch = Math.min(0.5, this.peakPunch + dyn * 0.1 * chopMul);
           this.noteVisualEvent(0.32);
         }
@@ -4637,6 +6960,12 @@ class SoundSculpture {
       const chugBed = clamp01(
         Math.max(bands.mid * 0.85, bands.melody * 1.2) * 0.95 - bands.bassFocus * 0.08,
       );
+      // 壁のように鳴り続ける音（チャグ・ディストーション・ロングトーン）から
+      // **立ち上がりだけ**を取り出す。速い包絡 − 遅い包絡。
+      // まばらな曲では chugBed 自体が小さいので、この経路の寄与も小さいまま（＝回帰しない）。
+      this.chugFast += (chugBed - this.chugFast) * Math.min(1, deltaTime * 24);
+      this.chugSlow += (chugBed - this.chugSlow) * Math.min(1, deltaTime * 1.5);
+      const chugOnset = clamp01((this.chugFast - this.chugSlow) * 3.4);
       const soloBias = clamp01(
         midLead * 1.1 +
           bands.melodyFocus * 1.0 +
@@ -4647,12 +6976,18 @@ class SoundSculpture {
           this.kickImpulse * 0.25 -
           r.kickRing * 0.14,
       );
+      // **レベルではなく立ち上がりで駆動する**（2026-08-20 [P0]）。
+      // 以前はここに `this.guitarFlash * 0.75`（＝自分自身のフィードバック）と
+      // `chugBed`（持続レベル）が入っていたため、歪みの壁のような曲では
+      // 一度上がった guitarFlash が二度と下がらなかった。
+      // 実測: Fury で **guitarFlash 平均 0.9935 / sd 0.0118 / 最小 0.947**（6.8 分ずっと最大）。
+      // `midFlash = clamp01(guitarFlash*1.05 + …)` なので膜の線 `uMelodyLine` / `uMid` /
+      // `uMelody` も同時に天井へ張り付き、**中音チャンネルが丸ごと「点きっぱなし」**だった。
       const eventGate = clamp01(
-        r.melodyOnset * 2.4 +
-          this.melodyPhraseImpulse * 1.35 +
-          this.guitarFlash * 0.75 +
-          chugBed * (0.45 - busy * 0.2) +
-          melodicRock * (0.35 - busy * 0.15),
+        melodyOnsetMid * 2.4 +
+          (this.melodyOnsetUsesMidChannel() ? this.melodyPhraseImpulse * 1.35 : 0) +
+          chugOnset * 1.35 +
+          melodicRock * (0.3 - busy * 0.12),
       );
       const guitarBody = clamp01(
         midLead *
@@ -4668,8 +7003,8 @@ class SoundSculpture {
           soloBias * 0.85 * eventGate +
           melodicRock * 0.25 +
           chugBed * 0.3 +
-          r.melodyOnset * 1.4 +
-          this.melodyPhraseImpulse * 0.55) *
+          melodyOnsetMid * 1.4 +
+          (this.melodyOnsetUsesMidChannel() ? this.melodyPhraseImpulse * 0.55 : 0)) *
         (1 - busy * 0.3);
       // うねり源の impulse は薄く。見た目は Flash（横パルス・膜ライン・粒子）
       this.guitarImpulse = Math.max(
@@ -4677,14 +7012,23 @@ class SoundSculpture {
         guitarBody * kickMute * soloGain * 0.35 * secondaryMul,
       );
       if (eventGate > 0.12 && guitarBody > 0.05) {
+        // 毎フレーム足す経路なので、フレームレートで量が変わらないよう dt を掛ける
+        // （60fps では従来と同値）。減衰側は元から時間ベース。
+        const step = Math.min(2, deltaTime * 60);
+        // **立ち上がりのときだけ足す**（[P0]）。ここが毎フレームの持続加算だったので、
+        // 壁のように鳴り続ける曲では flash が下がる暇が無かった。
+        // 小さな床（0.18）は残す＝鳴り続けている中音を完全に無音扱いにはしない。
         this.guitarFlash = Math.min(
           1,
           this.guitarFlash +
-            guitarBody * (0.38 + soloBias * 0.4 + eventGate * 0.45) * (1 - busy * 0.22) * secondaryMul,
+            guitarBody *
+              (0.38 + soloBias * 0.4 + eventGate * 0.45) *
+              (1 - busy * 0.22) *
+              secondaryMul *
+              step *
+              this.midFlashSensitivity *
+              (0.18 + chugOnset * 1.7),
         );
-      }
-      if (r.snare > 0.08 && (bands.melodyFocus > 0.22 || melodicRock > 0.5 || chugBed > 0.5)) {
-        this.guitarFlash = Math.min(1, this.guitarFlash + r.snare * 0.08 * (1 - busy * 0.35));
       }
     }
 
@@ -4695,6 +7039,7 @@ class SoundSculpture {
     this.refreshGrooveDrive();
 
     // スケール: キック縦／スネア横／カッティングは Flash 主導の横パルス
+    // 段A2 2巡: キック収縮＝ここ（シルエット）。径 liveOffset ではない。
     if (bandSoloAllows("low") || bandSoloAllows("mid") || bandSoloAllows("high")) {
       const groove = this.getGrooveBob() * M;
       const conf = r.pulseConfidence;
@@ -4703,28 +7048,45 @@ class SoundSculpture {
       // カッティング／スネア＝横のキレ。持続 wobble なし
       const chopPulse = (this.guitarFlash * 1.35 + this.snareFlash * 0.35) * M;
       const grooveAmp = 0.11 + conf * 0.08;
+      const kickSquash =
+        DEFAULT_KICK_CONTRACT > 0
+          ? Math.min(
+              DEFAULT_KICK_SQUASH,
+              this.kickContractEnv * DEFAULT_KICK_SQUASH + kickAccent * 0.04,
+            )
+          : kickAccent * 0.075;
       const targetY =
-        1 -
-        Math.min(0.12, groove * grooveAmp * 1.35 + kickAccent * 0.075);
+        1 - Math.min(0.22, groove * grooveAmp * 1.35 + kickSquash);
+      const kickXz =
+        DEFAULT_KICK_CONTRACT > 0
+          ? this.kickContractEnv * 0.07
+          : kickAccent * 0.012;
       const targetXz =
         1 +
         Math.min(
           0.16,
-          snareCrack * 0.13 +
-            groove * 0.018 +
-            kickAccent * 0.012 +
-            chopPulse * 0.13,
+          snareCrack * 0.13 + groove * 0.018 + kickXz + chopPulse * 0.13,
         );
       const onBeat =
         groove > 0.12 ||
         kickAccent > 0.14 ||
+        this.kickContractEnv > 0.12 ||
         snareCrack > 0.12 ||
         this.guitarFlash > 0.14 ||
         this.snareFlash > 0.16;
-      const attack = onBeat ? 48 : this.guitarFlash > 0.1 ? 36 : 8;
+      // キック収縮: 潰れは速く、戻りは kickContractEnv の解放に追従（遅い）
+      const squashHold = DEFAULT_KICK_CONTRACT > 0 && this.kickContractAge < KICK_CONTRACT_HOLD;
+      const attack = squashHold ? 62 : onBeat ? 48 : this.guitarFlash > 0.1 ? 36 : 8;
+      const yFollow = Math.min(
+        1,
+        deltaTime *
+          (DEFAULT_KICK_CONTRACT > 0 && this.kickContractEnv > 0.04 && !squashHold
+            ? 7.5
+            : attack),
+      );
       const follow = Math.min(1, deltaTime * attack);
       if (bandSoloAllows("low")) {
-        this.group.scale.y += (this.baseScale.y * targetY - this.group.scale.y) * follow;
+        this.group.scale.y += (this.baseScale.y * targetY - this.group.scale.y) * yFollow;
       }
       if (bandSoloAllows("mid") || bandSoloAllows("low")) {
         this.group.scale.x += (this.baseScale.x * targetXz - this.group.scale.x) * follow;
@@ -4799,6 +7161,11 @@ class SoundSculpture {
     // 振幅だけ止める。場の値は最終フレームのまま残して形を維持する
     this.idleWobbleAmp = 0;
     this.idlePokeImpulse = 0;
+    this.swimAmp = 0;
+    this.swimDuck = 1;
+    this.swimField.fill(0);
+    this.swimGroup.rotation.x = 0;
+    this.swimGroup.rotation.z = 0;
   }
 
   complete() {
@@ -4824,7 +7191,15 @@ class SoundSculpture {
     // ライブ／フロー／膜圧はゼロにせず、最終フレームの値で固定する
     this.idleWobbleAmp = 0;
     this.idlePokeImpulse = 0;
+    this.swimAmp = 0;
+    this.swimDuck = 1;
+    this.swimIntensity = 0;
+    this.swimField.fill(0);
+    this.swimGroup.rotation.x = 0;
+    this.swimGroup.rotation.z = 0;
     this.kickImpulse = 0;
+    this.kickContractEnv = 0;
+    this.kickContractAge = 0;
     this.snareImpulse = 0;
     this.hatImpulse = 0;
     this.waveImpulse = 0;
@@ -4833,7 +7208,19 @@ class SoundSculpture {
     this.hatFlash = 0;
     this.guitarImpulse = 0;
     this.guitarFlash = 0;
+    this.chugFast = 0;
+    this.chugSlow = 0;
+    this.midFlashSensitivity = 1;
     this.melodyPhraseImpulse = 0;
+    this.phraseWaveAmp.fill(0);
+    this.phraseWaveReleasing.fill(0);
+    this.phraseWaveSpawnCooldown = 0;
+    this.voiceHeadPulse = 0;
+    this.voicedLineBlocksMid = false;
+    this.liveWarmup = 0;
+    this.waterRipplePhase = 0;
+    this.kickRippleStrength = 0;
+    this.snareRippleStrength = 0;
     this.mixBusy = 0;
     this.primaryHitLock = 0;
     this.drumLiveGate = 0;
@@ -5206,6 +7593,12 @@ class SoundSculpture {
     // 天気シフトは環境側の状態なのでリセット後も維持
     this.idleWobbleField.fill(0);
     this.idleWobbleVector.fill(0);
+    this.swimAmp = 0;
+    this.swimDuck = 1;
+    this.swimIntensity = 0;
+    this.swimPhase = 0;
+    this.swimHeading = 0;
+    this.swimField.fill(0);
     resetClickRepulsionState(this.clickRepulsion);
     resetClickRepulsionState(this.surfaceClickRepulsion);
     this.waistCenterAlong = 0;
@@ -5225,6 +7618,8 @@ class SoundSculpture {
     this.lastSalienceIndexApplied = -1;
     this.lastPulseIndexApplied = -1;
     this.kickImpulse = 0;
+    this.kickContractEnv = 0;
+    this.kickContractAge = 0;
     this.snareImpulse = 0;
     this.hatImpulse = 0;
     this.waveImpulse = 0;
@@ -5233,7 +7628,19 @@ class SoundSculpture {
     this.hatFlash = 0;
     this.guitarImpulse = 0;
     this.guitarFlash = 0;
+    this.chugFast = 0;
+    this.chugSlow = 0;
+    this.midFlashSensitivity = 1;
     this.melodyPhraseImpulse = 0;
+    this.phraseWaveAmp.fill(0);
+    this.phraseWaveReleasing.fill(0);
+    this.phraseWaveSpawnCooldown = 0;
+    this.voiceHeadPulse = 0;
+    this.voicedLineBlocksMid = false;
+    this.liveWarmup = 0;
+    this.waterRipplePhase = 0;
+    this.kickRippleStrength = 0;
+    this.snareRippleStrength = 0;
     this.lastSalienceHighSpark = 10;
     this.mixBusy = 0;
     this.primaryHitLock = 0;
@@ -5289,6 +7696,7 @@ class SoundSculpture {
 
     this.group.quaternion.identity();
     this.group.rotation.set(0, 0, 0);
+    this.swimGroup.rotation.set(0, 0, 0);
     this.group.scale.copy(this.baseScale);
     this.innerCore.scale.setScalar(1);
 
@@ -5342,6 +7750,7 @@ class SoundSculpture {
     uniforms.uLive.value = 0;
     uniforms.uMelody.value = 0;
     uniforms.uGlow.value = 0;
+    uniforms.uVoice.value = 0;
     uniforms.uOpacity.value = SoundSculpture.INITIAL_MEMBRANE_OPACITY;
     uniforms.uPetrify.value = 0;
     uniforms.uBreath.value = 0;
@@ -5850,15 +8259,15 @@ class SoundSculpture {
     // **地（常時出ているうねり）と出来事（打点）を分ける**（[P1]）。
     // 地だけを熟成度で「完成後の呼吸ドライブ」へ寄せ、出来事はそのまま上に足す。
     // ＝曲が進むほど膜の常時の揺らぎが落ち着き、ヒットの読み取りは最後まで同じ。
-    const eventLive = ev.thump * 0.12 + ev.ting * 0.62 + ev.chatter * 0.78 + ev.sparkle * 0.12;
+    // 和ではなく「一番強いもの＋残りの4割」（[P0]）。3 チャンネルが同時に生きている
+    // 密な曲でも天井に張り付かない。
+    const eventLive = combineEvents(ev.chatter * 0.95, ev.sparkle * 0.08);
     const groundLive =
       w.high * t.liveHigh * fibRatio(2, 13) * audioPart * this.getDrumLiveMul(0.08) * 0.25 +
       this.getSpecies().membraneGain * fibUnit(1, 21) * audioPart * ev.listen * 0.55 +
       this.idleWobbleAmp * 5;
     const listenGate = 0.22 + ev.listen * 0.78;
-    const settledGround = 0.45 + this.breathWave * 0.6; // 完成後の breathe 分岐と同じ式
-    const m = this.getMaturity();
-    return groundLive * listenGate * (1 - m) + settledGround * m + eventLive * listenGate;
+    return groundLive * listenGate + eventLive * listenGate;
   }
 
   private getMembraneGlowTarget(bands: AudioBands) {
@@ -5878,16 +8287,8 @@ class SoundSculpture {
       ev.listen * 0.28 +
       this.separationTendency * 0.06 * audioPart +
       this.idleWobbleAmp * (3.2 + Math.sin(this.idleTime * 0.55) * 1.2);
-    const eventGlow =
-      // 中音：膜グローの主役
-      ev.ting * 0.55 +
-      ev.chatter * 0.95 +
-      // 高音：粒子が本線。膜はチッチの補助だけ
-      ev.sparkle * 0.4 +
-      ev.thump * 0.08;
-    const settledGlow = 0.4 + this.breathWave * 0.45; // 完成後の breathe 分岐と同じ式
-    const m = this.getMaturity();
-    return groundGlow * (1 - m) + settledGlow * m + eventGlow;
+    const eventGlow = combineEvents(ev.chatter * 0.88, ev.sparkle * 0.35);
+    return groundGlow + eventGlow;
   }
 
   applyLiveTuningNow() {
@@ -5916,7 +8317,11 @@ class SoundSculpture {
     this.coreMaterial.color.copy(this.targetCoreColor);
     this.coreMaterial.emissive.copy(this.targetCoreEmissive);
     this.coreMaterial.emissiveIntensity =
-      (bands.overall * 0.22 + bands.brightness * 0.12 + bands.contrast * t.coreEmissive * 0.1) *
+      (bands.overall * 0.22 +
+        bands.brightness * 0.12 +
+        bands.contrast * t.coreEmissive * 0.1 +
+        this.snareFlash * 0.42 +
+        this.snareImpulse * 0.28) *
       (t.coreEmissive / 0.1);
     this.coreMaterial.roughness = Math.min(
       1,
@@ -5924,23 +8329,23 @@ class SoundSculpture {
     );
 
     const uniforms = this.surfaceMaterial.uniforms;
-    // 中音フラッシュ＝ライン／フレネル。高音は uHigh 微信号のみ（粒子が本線）
-    const midFlash = clamp01(this.guitarFlash * 1.05 + this.snareFlash * 0.55);
-    const hatTick = clamp01(this.hatFlash * 1.05 + this.hatImpulse * 0.45);
+    // 中音フラッシュ＝solo のみ（スネアは core 側）。高音は uHigh → 粒子
+    const soloFlash = softCeil(this.guitarFlash * 1.05, 1);
+    const hatTick = softCeil(this.hatFlash * 1.05 + this.hatImpulse * 0.45, 1);
     uniforms.uMelodyLine.value =
-      t.membraneLine * (1 + midFlash * 1.65 + this.melodyPhraseImpulse * 0.4);
+      t.membraneLine * (1 + soloFlash * 1.35 + this.melodyPhraseImpulse * 0.35);
     uniforms.uMelodyFresnel.value =
-      t.membraneFresnel * (1 + midFlash * 0.75 + this.melodyPhraseImpulse * 0.25);
-    uniforms.uMelodyNoise.value = t.membraneNoise * (0.85 + midFlash * 0.35);
-    uniforms.uMelodyFlowAnim.value = 0.95 + t.liveHigh * 0.7 + midFlash * 0.65;
-    uniforms.uLive.value = Math.min(1.05, Math.max(0, this.getMembraneLiveTarget(bands)));
-    uniforms.uGlow.value = Math.min(1.2, Math.max(0, this.getMembraneGlowTarget(bands)));
-    // 帯域の持続よりフラッシュを優先（常時ラインを消す）
-    uniforms.uMid.value = clamp01(midFlash * 0.95 + bands.mid * 0.12);
-    uniforms.uMelody.value = clamp01(
-      this.guitarFlash * 0.9 + this.melodyPhraseImpulse * 0.55 + bands.melody * 0.1,
+      t.membraneFresnel * (1 + soloFlash * 0.65 + this.melodyPhraseImpulse * 0.2);
+    uniforms.uMelodyNoise.value = t.membraneNoise * (0.85 + soloFlash * 0.28);
+    uniforms.uMelodyFlowAnim.value = 0.95 + t.liveHigh * 0.7 + soloFlash * 0.45;
+    uniforms.uLive.value = softCeil(this.getMembraneLiveTarget(bands), 1.05);
+    uniforms.uGlow.value = softCeil(this.getMembraneGlowTarget(bands), 1.2);
+    uniforms.uMid.value = softCeil(soloFlash * 0.85 + bands.melody * 0.08, 1);
+    uniforms.uMelody.value = softCeil(
+      this.guitarFlash * 0.85 + this.melodyPhraseImpulse * 0.45 + bands.melody * 0.08,
+      1,
     );
-    uniforms.uHigh.value = clamp01(hatTick * 0.85 + bands.high * 0.12);
+    uniforms.uHigh.value = softCeil(hatTick * 0.85 + bands.high * 0.12, 1);
     // 結晶になる面の選択（音色軸）。core / 膜 / 幾何が共有する module uniform を更新。
     this.syncGemFacets();
 
@@ -6269,7 +8674,7 @@ class SoundSculpture {
     const mkz = this.facetAxes[kk + 2];
     // 面 { p : dot(p, m_k) = H } へ、法線 m_k に沿って寄せる（面上に載ると平らになる）。
     // refRadius はその層の平均半径: core と膜（半径が違う）で正しい距離の面へ寄せる。
-    const H = refRadius * this.facetLevels[bk];
+    const H = refRadius * this.facetLevels[bk] + this.facetLive[bk] * SoundSculpture.FACET_PLATE_GAIN * 0.6;
     const shift = (H - (x * mkx + y * mky + z * mkz)) * t;
     return { x: x + mkx * shift, y: y + mky * shift, z: z + mkz * shift };
   }
@@ -6284,7 +8689,16 @@ class SoundSculpture {
     // 面ドメイン平均なので球化しない → 上限を強め（0.85）にして輪郭をしっかり角ばらせる。
     // **結晶になっている面だけ**平らにする（生物の面は膜も丸いまま）。
     const t = mineralMix.facetStrength * 0.85 * smoothstep(0, 1, this.formDevelopment);
-    if (t <= 0.002 || this.anyCrystalFace <= 0.002) {
+    let glassDrive = this.anyCrystalFace;
+    if (glassDrive <= 0.002) {
+      for (let k = 0; k < SoundSculpture.facetCount; k += 1) {
+        if (this.facetVoiceGlass[k] > 0.02) {
+          glassDrive = 1;
+          break;
+        }
+      }
+    }
+    if (t <= 0.002 || glassDrive <= 0.002) {
       return;
     }
     const K = SoundSculpture.facetCount;
@@ -6345,8 +8759,18 @@ class SoundSculpture {
       const mkx = this.facetAxes[kk];
       const mky = this.facetAxes[kk + 1];
       const mkz = this.facetAxes[kk + 2];
-      const Havg = cnt[bk] > 0 ? sumDot[bk] / cnt[bk] : this.targetSurfaceMeanRadius;
-      const shift = (Havg - (x * mkx + y * mky + z * mkz)) * t * this.facetCrystal[bk];
+      // 帯ガラス面は**平均距離へ平らにスナップ**するだけ。facetLive の押し出しは膜では使わない
+      // （粘土側 facetLive は別経路）。ここで live を足すと「ブワッと膨らむ」。
+      const voiceGlass = this.facetVoiceGlass[bk];
+      const voiceDominant = voiceGlass > Math.max(0.1, this.facetCrystal[bk] * 0.35);
+      const livePush = voiceDominant
+        ? 0
+        : this.facetLive[bk] * SoundSculpture.FACET_PLATE_GAIN;
+      const Havg =
+        (cnt[bk] > 0 ? sumDot[bk] / cnt[bk] : this.targetSurfaceMeanRadius) + livePush;
+      const facetDrive = Math.max(this.facetCrystal[bk], voiceGlass * 3.2);
+      const tFace = t * (voiceDominant ? 1 + 0.35 * voiceGlass : 1);
+      const shift = (Havg - (x * mkx + y * mky + z * mkz)) * tFace * facetDrive;
       positions[idx] = x + mkx * shift;
       positions[idx + 1] = y + mky * shift;
       positions[idx + 2] = z + mkz * shift;
@@ -7153,8 +9577,6 @@ class SoundSculpture {
 
       const midBleed = growthModulateScalar(
         (this.surfaceLiveOffset[i] * midGate * t.liveMid +
-          this.snareFlash * 0.72 +
-          this.snareImpulse * 0.38 +
           this.guitarImpulse * 0.78 +
           this.guitarFlash * 0.58 +
           this.pierceAmount[i] * 0.22) *
@@ -7314,8 +9736,112 @@ class SoundSculpture {
    * 低解像度の三角形の平面へ吸い寄せられ、直したかった多角形がそのまま残る。
    * 理屈は `display-mesh.ts` の説明を参照。
    */
+  /**
+   * [P1] 表示へ渡す変位を 1-ring で平滑する（**位置ではなく変位**）。
+   * シミュレーション配列は読むだけで書き換えない＝蓄積・完成形は不変。
+   * 結晶面の上は `keepCrystal` ぶん弱めて稜を残す。
+   */
+  private smoothForDisplay(
+    positions: Float32Array,
+    base: Float32Array,
+    out: Float32Array,
+    tmp: Float32Array,
+    useCrystalMask: boolean,
+    mask: Float32Array | null,
+  ) {
+    const strength = displaySmooth.enabled ? displaySmooth.strength : 0;
+    if (strength <= 0.001) {
+      out.set(positions);
+      return out;
+    }
+    const n = this.accumulated.length;
+    const gemActive = useCrystalMask && this.anyCrystalFace > 0.002;
+    // 結晶面のマスクは 36 面の最寄り探索なので、**1 フレームに 1 回だけ**作って 2 パスで使い回す。
+    if (mask) {
+      if (gemActive) {
+        for (let i = 0; i < n; i += 1) {
+          const idx = i * 3;
+          const bx = base[idx];
+          const by = base[idx + 1];
+          const bz = base[idx + 2];
+          const r = Math.hypot(bx, by, bz) || 1;
+          mask[i] = 1 - this.nearestCrystalStrength(bx / r, by / r, bz / r) * displaySmooth.keepCrystal;
+        }
+      } else {
+        mask.fill(1);
+      }
+    }
+    // **Taubin 平滑（λ で縮めて μ で戻す）。**
+    // 単純なラプラシアン 1 パスだと高周波は落ちるが**体積も痩せる**
+    // （実測: 平滑 0.55 で完成形のシルエット面積が -10%＝棘が丸まった）。
+    // μ を負にした戻しパスを足すと、グリッド目だけ落ちて大きさは保たれる。
+    const lambda = strength;
+    const mu = -lambda / (1 - 0.14 * lambda);
+    this.laplacianDisplacementPass(positions, base, tmp, lambda, mask, n);
+    this.laplacianDisplacementPass(tmp, base, out, mu, mask, n);
+    return out;
+  }
+
+  /** 変位のラプラシアン 1 パス（`weight` が負なら戻しパス＝Taubin の μ） */
+  private laplacianDisplacementPass(
+    src: Float32Array,
+    base: Float32Array,
+    dst: Float32Array,
+    weight: number,
+    mask: Float32Array | null,
+    n: number,
+  ) {
+    const cap = SoundSculpture.membraneNeighborCap;
+    for (let i = 0; i < n; i += 1) {
+      const idx = i * 3;
+      const dx = src[idx] - base[idx];
+      const dy = src[idx + 1] - base[idx + 1];
+      const dz = src[idx + 2] - base[idx + 2];
+      let ax = 0;
+      let ay = 0;
+      let az = 0;
+      let k = 0;
+      for (let m = 0; m < cap; m += 1) {
+        const j = this.membraneNeighbors[i * cap + m];
+        if (j < 0) break;
+        const jj = j * 3;
+        ax += src[jj] - base[jj];
+        ay += src[jj + 1] - base[jj + 1];
+        az += src[jj + 2] - base[jj + 2];
+        k += 1;
+      }
+      if (k === 0) {
+        dst[idx] = src[idx];
+        dst[idx + 1] = src[idx + 1];
+        dst[idx + 2] = src[idx + 2];
+        continue;
+      }
+      const w = mask ? weight * mask[i] : weight;
+      dst[idx] = base[idx] + dx + (ax / k - dx) * w;
+      dst[idx + 1] = base[idx + 1] + dy + (ay / k - dy) * w;
+      dst[idx + 2] = base[idx + 2] + dz + (az / k - dz) * w;
+    }
+  }
+
   private syncDisplayGeometry(surfaceVisible: boolean) {
-    const corePositions = this.geometry.attributes.position.array as Float32Array;
+    const rawCore = this.geometry.attributes.position.array as Float32Array;
+    if (!this.displaySmoothCore || this.displaySmoothCore.length !== rawCore.length) {
+      this.displaySmoothCore = new Float32Array(rawCore.length);
+    }
+    if (!this.displaySmoothTmp || this.displaySmoothTmp.length !== rawCore.length) {
+      this.displaySmoothTmp = new Float32Array(rawCore.length);
+    }
+    if (!this.displaySmoothMask || this.displaySmoothMask.length !== this.accumulated.length) {
+      this.displaySmoothMask = new Float32Array(this.accumulated.length);
+    }
+    const corePositions = this.smoothForDisplay(
+      rawCore,
+      this.basePositions,
+      this.displaySmoothCore,
+      this.displaySmoothTmp,
+      true,
+      this.displaySmoothMask,
+    );
     syncDisplayPositions(
       this.displayBinding,
       corePositions,
@@ -7338,18 +9864,251 @@ class SoundSculpture {
     syncDisplayAttribute(this.displayBinding, this.pierceAmount, 1, this.displayPierce);
     this.displayGeometry.attributes.aPierce.needsUpdate = true;
 
-    if (!surfaceVisible) {
-      return;
+    if (surfaceVisible) {
+      const rawSurface = this.surfaceGeometry.attributes.position.array as Float32Array;
+      if (!this.displaySmoothSurface || this.displaySmoothSurface.length !== rawSurface.length) {
+        this.displaySmoothSurface = new Float32Array(rawSurface.length);
+      }
+      const surfacePositions = this.smoothForDisplay(
+        rawSurface,
+        this.baseSurfacePositions,
+        this.displaySmoothSurface,
+        this.displaySmoothTmp as Float32Array,
+        false,
+        null,
+      );
+      syncDisplayPositions(
+        this.displaySurfaceBinding,
+        surfacePositions,
+        this.baseSurfacePositions,
+        this.displaySurfacePositions,
+      );
+      this.displaySurfaceGeometry.attributes.position.needsUpdate = true;
+      this.displaySurfaceGeometry.computeVertexNormals();
     }
-    const surfacePositions = this.surfaceGeometry.attributes.position.array as Float32Array;
-    syncDisplayPositions(
-      this.displaySurfaceBinding,
-      surfacePositions,
-      this.baseSurfacePositions,
-      this.displaySurfacePositions,
-    );
-    this.displaySurfaceGeometry.attributes.position.needsUpdate = true;
-    this.displaySurfaceGeometry.computeVertexNormals();
+    if (liveProbe.on) {
+      this.recordLiveProbe(surfaceVisible);
+    }
+  }
+
+  /**
+   * [P0] 計測用。**打点イベントの量と、画面上で実際に動いた量を同じフレームで記録する。**
+   * `liveProbe.on`（`live_motion_probe.js` が立てる）のときだけ走る。
+   */
+  private recordLiveProbe(surfaceVisible: boolean) {
+    const bands = this.lastBands;
+    if (!bands) return;
+    const dt = Math.max(1e-3, this.probeDeltaTime);
+    const d = liveDebug;
+
+    // --- 実際の動き: 変形メッシュ頂点が 1 秒あたり何 world 単位動いたか ---
+    const core = this.geometry.attributes.position.array as Float32Array;
+    if (!this.probePrevCore || this.probePrevCore.length !== core.length) {
+      this.probePrevCore = new Float32Array(core);
+      d.coreMotion = 0;
+    } else {
+      const prev = this.probePrevCore;
+      let sum = 0;
+      const n = core.length / 3;
+      if (!this.probeMotionScratch || this.probeMotionScratch.length !== n) {
+        this.probeMotionScratch = new Float32Array(n);
+      }
+      const each = this.probeMotionScratch;
+      for (let i = 0; i < core.length; i += 3) {
+        const m = Math.hypot(core[i] - prev[i], core[i + 1] - prev[i + 1], core[i + 2] - prev[i + 2]);
+        each[i / 3] = m;
+        sum += m;
+      }
+      d.coreMotion = (sum / n) / dt;
+      d.coreMotionPeak = topFractionMean(each, 0.05) / dt;
+      prev.set(core);
+    }
+    if (surfaceVisible) {
+      const surf = this.surfaceGeometry.attributes.position.array as Float32Array;
+      if (!this.probePrevSurface || this.probePrevSurface.length !== surf.length) {
+        this.probePrevSurface = new Float32Array(surf);
+        d.membraneMotion = 0;
+      } else {
+        const prev = this.probePrevSurface;
+        let sum = 0;
+        const n = surf.length / 3;
+        if (!this.probeMotionScratch2 || this.probeMotionScratch2.length !== n) {
+          this.probeMotionScratch2 = new Float32Array(n);
+        }
+        const each = this.probeMotionScratch2;
+        for (let i = 0; i < surf.length; i += 3) {
+          const m = Math.hypot(surf[i] - prev[i], surf[i + 1] - prev[i + 1], surf[i + 2] - prev[i + 2]);
+          each[i / 3] = m;
+          sum += m;
+        }
+        d.membraneMotion = (sum / n) / dt;
+        d.membraneMotionPeak = topFractionMean(each, 0.05) / dt;
+        prev.set(surf);
+      }
+    }
+
+    let liveSum = 0;
+    let idleSum = 0;
+    let swimSum = 0;
+    for (let i = 0; i < this.liveOffset.length; i += 1) {
+      liveSum += Math.abs(this.liveOffset[i]);
+      idleSum += Math.abs(this.idleWobbleField[i]);
+      swimSum += Math.abs(this.swimField[i]);
+    }
+    d.liveAmp = liveSum / Math.max(1, this.liveOffset.length);
+    d.idleAmp = idleSum / Math.max(1, this.liveOffset.length);
+    d.swimAmp = this.swimAmp;
+    d.swimDuck = this.swimDuck;
+    d.swimPhase = this.swimPhase;
+    d.swimField = swimSum / Math.max(1, this.liveOffset.length);
+
+    // --- 変位場の粗さ（グリッド目の見え方）---
+    if (this.displaySmoothCore) {
+      d.coreRoughDisplay = this.measureFieldRoughness(
+        this.displaySmoothCore,
+        this.basePositions,
+        false,
+      ).all;
+    }
+    const rough = this.measureFieldRoughness(core, this.basePositions, true);
+    d.coreRough = rough.all;
+    d.coreRoughGem = rough.gem;
+    d.coreRoughClay = rough.clay;
+    if (surfaceVisible) {
+      const surf2 = this.surfaceGeometry.attributes.position.array as Float32Array;
+      d.membraneRough = this.measureFieldRoughness(surf2, this.baseSurfacePositions, false).all;
+    }
+
+    // --- 打点イベントの量 ---
+    const ev = this.getListeningEventDrive(bands);
+    d.kick = this.kickImpulse;
+    d.snare = this.snareImpulse;
+    d.hat = this.hatImpulse;
+    d.kickContract = this.kickContractEnv;
+    d.flash = this.guitarFlash;
+    d.phrase = this.melodyPhraseImpulse;
+    d.thump = ev.thump;
+    d.ting = ev.ting;
+    d.chatter = ev.chatter;
+    d.sparkle = ev.sparkle;
+    d.listen = ev.listen;
+    d.busy = this.mixBusy;
+    d.drawScale = this.getLiveDrawScale(bands);
+    d.maturity = this.getMaturity();
+    d.membraneLive = this.getMembraneLiveTarget(bands);
+    d.membraneGlow = this.getMembraneGlowTarget(bands);
+    // 膜の線・模様の強さ（`updateSurfaceGeometry` の midFlash と同じ式）
+    d.midFlash = clamp01(this.guitarFlash * 1.05 + this.snareFlash * 0.55);
+    d.rHat = latestRhythm.hat;
+    d.salHigh = latestRhythm.salienceHigh;
+    d.salMid = latestRhythm.salienceMid;
+    d.bandHigh = bands.high;
+    d.melodyBand = bands.melody;
+    d.melodyFocus = bands.melodyFocus;
+    d.melodyOnset = latestRhythm.melodyOnset;
+    d.melodyPresence = latestRhythm.melodyLine?.presence ?? 0;
+    d.melodyHead = latestRhythm.melodyLine?.head ?? 0;
+    d.melodyContour = latestRhythm.melodyLine?.contour ?? 0;
+    if (latestRhythm.hatIndex !== this.probeHatIndex) {
+      this.probeHatIndex = latestRhythm.hatIndex;
+      d.acc.hatEvents += 1;
+    }
+
+    // 打点の直後 0.18 秒を「打点フレーム」として、動きの差を測る。
+    // **これが 1.0 に近い＝打点が起きても画面が普段と同じ＝目で分からない。**
+    const hitNow = Math.max(this.kickImpulse, this.snareImpulse, ev.chatter * 0.6);
+    if (hitNow > 0.5 && this.probeHitAge > 0.18) {
+      this.probeHitAge = 0;
+    } else {
+      this.probeHitAge += dt;
+    }
+    if (this.probeHitAge <= 0.18) {
+      d.acc.hitFrames += 1;
+      d.acc.hitCore += d.coreMotion;
+      d.acc.hitMembrane += d.membraneMotion;
+    } else {
+      d.acc.calmFrames += 1;
+      d.acc.calmCore += d.coreMotion;
+      d.acc.calmMembrane += d.membraneMotion;
+    }
+
+    // --- 生波形（比較図用のリングバッファ）---
+    {
+      const j = d.traceIndex * 5;
+      d.trace[j] = dt;
+      d.trace[j + 1] = d.thump;
+      d.trace[j + 2] = d.chatter;
+      d.trace[j + 3] = d.sparkle;
+      d.trace[j + 4] = d.coreMotion;
+      d.traceIndex = (d.traceIndex + 1) % 900;
+    }
+    // --- ボーカル切り分けの長窓（段A0/A1 診断）---
+    {
+      const j = d.vocalIndex * 20;
+      d.vocalTrace[j] = dt;
+      d.vocalTrace[j + 1] = d.melodyBand;
+      d.vocalTrace[j + 2] = d.melodyFocus;
+      d.vocalTrace[j + 3] = d.melodyOnset;
+      d.vocalTrace[j + 4] = d.phrase;
+      d.vocalTrace[j + 5] = d.flash;
+      d.vocalTrace[j + 6] = d.chatter;
+      d.vocalTrace[j + 7] = d.kick;
+      d.vocalTrace[j + 8] = d.snare;
+      d.vocalTrace[j + 9] = d.membraneLive;
+      d.vocalTrace[j + 10] = d.melodyPresence;
+      d.vocalTrace[j + 11] = d.melodyHead;
+      d.vocalTrace[j + 12] = d.melodyContour;
+      d.vocalTrace[j + 13] = d.pulseDisp;
+      d.vocalTrace[j + 14] = d.waveDisp;
+      d.vocalTrace[j + 15] = d.flowDisp;
+      d.vocalTrace[j + 16] = d.flowPeak;
+      d.vocalTrace[j + 17] = d.voiceStretch;
+      d.vocalTrace[j + 18] = d.phraseAmp;
+      d.vocalTrace[j + 19] = d.voicedMidBlocked;
+      d.vocalIndex = (d.vocalIndex + 1) % 3600;
+    }
+
+    // --- 集計（飽和はフレーム単位で数える。ポーリングでは取りこぼす）---
+    const a = d.acc;
+    a.frames += 1;
+    a.seconds += dt;
+    const ceilings: Record<string, number> = {
+      thump: 1,
+      ting: 1,
+      chatter: 1,
+      sparkle: 1,
+      listen: 1,
+      kick: 1,
+      snare: 1,
+      hat: 1,
+      flash: 1,
+      phrase: 1,
+      membraneLive: 1.05,
+      membraneGlow: 1.2,
+      midFlash: 1,
+    };
+    const keys = [
+      "kick", "snare", "hat", "flash", "phrase",
+      "thump", "ting", "chatter", "sparkle",
+      "listen", "drawScale", "busy", "maturity",
+      "membraneLive", "membraneGlow", "midFlash",
+      "kickContract",
+      "swimAmp", "swimDuck", "swimField",
+      "rHat", "salHigh", "salMid", "bandHigh",
+      "coreMotion", "membraneMotion", "coreMotionPeak", "membraneMotionPeak", "liveAmp", "idleAmp",
+      "coreRough", "membraneRough", "coreRoughGem", "coreRoughClay", "coreRoughDisplay",
+    ] as const;
+    for (const k of keys) {
+      const v = d[k] as number;
+      a.sum[k] = (a.sum[k] ?? 0) + v;
+      a.sumSq[k] = (a.sumSq[k] ?? 0) + v * v;
+      a.max[k] = Math.max(a.max[k] ?? -Infinity, v);
+      a.min[k] = Math.min(a.min[k] ?? Infinity, v);
+      const ceil = ceilings[k];
+      if (ceil !== undefined && v >= ceil * 0.97) {
+        a.sat[k] = (a.sat[k] ?? 0) + 1;
+      }
+    }
   }
 
   private updateCoreGeometry(_bands: AudioBands, deltaTime: number) {
@@ -7358,6 +10117,9 @@ class SoundSculpture {
     // vectorField の頂点ごとの上限 (発散防止)。
     const maxVectorLen = 0.92;
     const maxVectorLenSq = maxVectorLen * maxVectorLen;
+    // 段A1 切り分けの一時診断: 打点(pulse)と主旋律の波(phraseWave)が、
+    // 同じ liveOffset へどれだけの変位を入れているか。判定後に消す。
+    let probePulseSum = 0;
 
     for (let i = 0; i < this.accumulated.length; i += 1) {
       const index = i * 3;
@@ -7372,12 +10134,42 @@ class SoundSculpture {
       const ev = this.completed
         ? { body: 0, crack: 0, phrase: 0, sparkle: 0, listen: 0, busy: 0, thump: 0, ting: 0, chatter: 0 }
         : this.getListeningEventDrive(_bands);
-      const pulseRaw =
-        this.completed ? 0 : growthPattern(nx, ny, nz, this.formingTime * 1.6) * (
-          (ev.thump * 0.48 + ev.ting * 0.18 + ev.chatter * 0.13) *
-          t.liveLow *
-          (0.018 + livePresence * 0.78)
-        );
+      // **同じ量の動きを「鳴った場所」へ寄せる**（[P0] 2026-08-20）。
+      // 打点の無い所は 0.5 倍、打点の場所は最大 2.2 倍。全球一様に脈打つのをやめると、
+      // 密な曲でも「今の一発」が形の変化として読める。振幅の上限は上げていない
+      // （＝打点を弱めていないし、常時うねりも増やしていない）。
+      // 段A2 2巡: キック＝縦潰れ（シルエット）。径はスネア外向きのみ。
+      // 1巡の径内向きは実機で不可視だった（膜越し・凹みは外向きバンプより読めない）。
+      const scaleLive =
+        t.liveLow * (0.018 + livePresence * 0.78);
+      let pulseRaw = 0;
+      if (!this.completed) {
+        const grain = growthPattern(nx, ny, nz, this.formingTime * 1.6);
+        if (DEFAULT_KICK_CONTRACT > 0) {
+          const kickField = this.strikeFieldAtKind(nx, ny, nz, 0);
+          const midField = this.strikeFieldAtKind(nx, ny, nz, 1);
+          const kickFocus = 0.32 + Math.min(1.25, kickField) * 1.85;
+          const midFocus = 0.8 + Math.min(1.25, midField) * 1.7;
+          const grainAbs = Math.abs(grain) * 0.55 + 0.45;
+          const kickDrive = Math.max(ev.thump * 0.72, this.kickContractEnv);
+          const contract =
+            DEFAULT_KICK_RADIAL_CONTRACT > 0
+              ? -grainAbs *
+                kickDrive *
+                DEFAULT_KICK_RADIAL_CONTRACT *
+                scaleLive *
+                kickFocus
+              : 0;
+          const crack =
+            grainAbs * ev.ting * DEFAULT_SNARE_CRACK_GAIN * scaleLive * midFocus;
+          pulseRaw = contract + crack;
+        } else {
+          const strike = this.strikeFieldAt(nx, ny, nz);
+          const strikeFocus = 0.8 + Math.min(1.25, strike) * 1.7;
+          pulseRaw =
+            grain * (ev.thump * 0.52 + ev.ting * 0.38) * scaleLive * strikeFocus;
+        }
+      }
       const pulse = growthModulateScalar(
         pulseRaw,
         nx,
@@ -7389,12 +10181,24 @@ class SoundSculpture {
 
       // 完成／ホールド中は liveOffset を動かさない（最終形を維持）
       if (!this.completed && !this.shapeHold) {
-        const rising = Math.abs(pulse) > Math.abs(this.liveOffset[i]);
-        // 立ち上がりは俊敏、平常への戻りは速め → 揺れが形を覆い隠さない
-        const liveFollow = rising
-          ? 6 + this.drumLiveGate * 10
-          : 11 + this.drumLiveGate * 6;
-        this.liveOffset[i] += (pulse - this.liveOffset[i]) * Math.min(1, deltaTime * liveFollow);
+        // 声の径方向波は core へ載せない（2026-08-31：ドラム＝粘土／声＝膜）
+        probePulseSum += Math.abs(pulse);
+        const liveTarget = pulse;
+        let liveFollow: number;
+        if (DEFAULT_KICK_RADIAL_CONTRACT > 0 && liveTarget < -1e-5) {
+          // 収縮: 引き込みは速く、戻りは遅く（2相）
+          const goingIn = liveTarget < this.liveOffset[i] - 1e-6;
+          liveFollow = goingIn
+            ? 14 + this.drumLiveGate * 10
+            : 5.2 + this.drumLiveGate * 3;
+        } else {
+          const rising = Math.abs(liveTarget) > Math.abs(this.liveOffset[i]);
+          // 立ち上がりは俊敏、平常への戻りは速め → 揺れが形を覆い隠さない
+          liveFollow = rising
+            ? 6 + this.drumLiveGate * 10
+            : 11 + this.drumLiveGate * 6;
+        }
+        this.liveOffset[i] += (liveTarget - this.liveOffset[i]) * Math.min(1, deltaTime * liveFollow);
       }
 
       const carve = this.detachmentCarve[i];
@@ -7466,7 +10270,8 @@ class SoundSculpture {
         const nz = z / radius;
         const live =
           this.liveOffset[i] * liveDraw * (1 - this.detachmentCarve[i] * 0.88) +
-          this.idleWobbleField[i];
+          this.idleWobbleField[i] +
+          this.swimField[i];
         if (
           Math.abs(live) < 1e-6 &&
           Math.abs(this.idleWobbleVector[index]) < 1e-6 &&
@@ -7497,6 +10302,53 @@ class SoundSculpture {
         positions[index + 1] += ny * liveScalar + wobbleVec.y;
         positions[index + 2] += nz * liveScalar + wobbleVec.z;
       }
+    }
+
+    // --- 主旋律の接線流（段A1 作り直し・2026-08-25）---
+    // **半径方向へは 1 も足さない。** 打点は全部法線方向なので、ここは空きチャンネル。
+    // liveOffset を経由しない（＝痕跡は径方向の波が担う）ので、positions へ直接足す。
+    // 句が出ていない間はループごと skip するので、無音・器楽では実質ゼロコスト。
+    let probeFlowSum = 0;
+    let probeFlowPeak = 0;
+    if (!this.completed && !this.shapeHold && this.phraseFlowActive()) {
+      const flowGain = DEFAULT_PHRASE_FLOW_AMP * voiceTuning.flowAmp;
+      const flow = this.phraseFlowScratch;
+      for (let i = 0; i < this.accumulated.length; i += 1) {
+        const index = i * 3;
+        const x = this.basePositions[index];
+        const y = this.basePositions[index + 1];
+        const z = this.basePositions[index + 2];
+        const radius = Math.hypot(x, y, z) || 1;
+        this.phraseFlowFieldAt(x / radius, y / radius, z / radius, flow);
+        let fx = flow.x * flowGain;
+        let fy = flow.y * flowGain;
+        let fz = flow.z * flowGain;
+        // メッシュ保護。頭打ちは softCeil なので、強い句ほど大きいという順序は残る。
+        const raw = Math.hypot(fx, fy, fz);
+        if (raw > PHRASE_FLOW_CEIL * 0.62) {
+          const k = softCeil(raw, PHRASE_FLOW_CEIL) / raw;
+          fx *= k;
+          fy *= k;
+          fz *= k;
+        }
+        positions[index] += fx;
+        positions[index + 1] += fy;
+        positions[index + 2] += fz;
+        const fm = Math.hypot(fx, fy, fz);
+        probeFlowSum += fm;
+        if (fm > probeFlowPeak) probeFlowPeak = fm;
+      }
+    }
+
+    // --- 主旋律: コアには LIVE 変形を掛けない（2026-08-31・声は膜だけ）---
+    // 径方向の波（痕跡）は liveOffset 経由のまま。
+
+    {
+      const n = Math.max(1, this.accumulated.length);
+      liveDebug.pulseDisp = probePulseSum / n;
+      liveDebug.waveDisp = 0;
+      liveDebug.flowDisp = probeFlowSum / n;
+      liveDebug.flowPeak = probeFlowPeak;
     }
 
     applyClickRepulsionToPositions(this.clickRepulsion, this.basePositions, positions as Float32Array);
@@ -7932,7 +10784,6 @@ class SoundSculpture {
       const sz = pos[index + 2];
       const surfaceRadius = Math.hypot(sx, sy, sz) || 1;
 
-      // 粘土表面のすぐ外側へ膜を引き寄せる目標点
       const targetRadius = coreRadius + filmGap;
       const cnx = cx / coreRadius;
       const cny = cy / coreRadius;
@@ -7944,7 +10795,6 @@ class SoundSculpture {
       const nx = sx / surfaceRadius;
       const ny = sy / surfaceRadius;
       const nz = sz / surfaceRadius;
-      // 圧力が強いほど強く張り付く（突き抜け時は特に粘土に引っ張られる）
       const pierceBoost = surfaceRadius < coreRadius ? 1.35 : 1;
       const adhesion = Math.min(
         0.92,
@@ -8281,17 +11131,24 @@ class SoundSculpture {
     const ev = this.completed
       ? { body: 0, crack: 0, phrase: 0, sparkle: 0, listen: 0, busy: 0, thump: 0, ting: 0, chatter: 0 }
       : this.getListeningEventDrive(bands);
-    const w = this.getBandLiveWeights(bands);
     const listen = ev.listen;
     const liveDraw = this.completed ? 1 : this.getLiveDrawScale(bands);
-    // 表面うねり LIVE: スネア寄りのみ。ギター／ハットは載せない（別表現）
-    const midDrive =
-      (ev.ting * 0.42 +
-        ev.thump * 0.06 +
-        w.mid * 0.18 * this.getDrumLiveMul(0.08)) *
-      t.liveMid *
-      (0.03 + listen * 0.4);
-    // surface は core より少し外側を覆うので vector offset を僅かに拡大。
+    const warm = smoothstep(0.35, 1, this.liveWarmup);
+    const ml = latestRhythm.melodyLine;
+    let bestPhrase = 0;
+    for (let k = 0; k < SoundSculpture.PHRASE_WAVE_SLOTS; k += 1) {
+      bestPhrase = Math.max(bestPhrase, this.phraseWaveAmp[k]);
+    }
+    const contourDrive = this.getVoiceContourDrive();
+    const voiceLine = ml
+      ? clamp01(ml.presence * (0.38 + ml.contour * 0.62) * bestPhrase)
+      : 0;
+    // **膜 LIVE：声＋ギターソロのみ**（ドラムの ting/thump は core へ）
+    const soloFlash = this.melodyOnsetUsesMidChannel()
+      ? ev.chatter
+      : clamp01(ev.chatter * 0.55 + voiceLine * 0.85);
+    const voiceDrive =
+      (voiceLine * 0.88 + soloFlash * 0.58 + contourDrive * 0.32) * warm * voiceTuning.bulge;
     const vectorScale = 1.04;
     const flowScale = 0.92;
 
@@ -8307,9 +11164,12 @@ class SoundSculpture {
       const flow = growthPattern(nx, ny, nz, this.formingTime * 2.8);
       const ripple = growthPattern(nx, ny, nz, this.formingTime * 3.6 + this.carvingPhase * 0.7);
       const surfacePattern = flow * 0.22 + ripple * 0.09;
+      // 膜は打点コーンを使わない（ドラムは core の strikeFieldAt のみ）
+      const phraseEnv = this.phraseMembraneEnvelopeAt(nx, ny, nz);
       const targetSurfaceLive =
-        midDrive * surfacePattern +
-        ev.ting * 0.35 * surfacePattern * (0.4 + listen * 0.55);
+        (voiceDrive * surfacePattern * (0.06 + listen * 0.48) +
+          phraseEnv * contourDrive * 0.045) *
+        t.liveMid;
       if (!this.completed && !this.shapeHold) {
         const rising = Math.abs(targetSurfaceLive) > Math.abs(this.surfaceLiveOffset[i]);
         const follow = rising ? 9 : 14;
@@ -8320,7 +11180,7 @@ class SoundSculpture {
       const deformSalt = this.vertexDeformSalt(i, 9.2);
       // ホールド／完成後は midDrive 由来の瞬時オフセットも足さない（形固定）
       const liveSurfaceNudge =
-        this.completed || this.shapeHold ? 0 : flow * midDrive * 0.02 * liveDraw;
+        this.completed || this.shapeHold ? 0 : flow * voiceDrive * 0.015 * liveDraw;
       const scalarDisp = growthModulateScalar(
         remembered * 0.98 + liveSurfaceNudge,
         nx,
@@ -8425,34 +11285,72 @@ class SoundSculpture {
     // 最後に膜を結晶ファセット化（要求 B: 輪郭を角ばらせる）。relax の後なので稜が残る。
     this.applyMembraneFacets(positions as Float32Array);
 
+    // **声は膜だけ**（段A1）。接着・ファセットの後に載せる（8 巡目: 引っ張りで消えていた）
+    this.applyVoiceMembraneMotion(
+      positions as Float32Array,
+      this.surfaceGeometry.attributes.position.count,
+    );
+    this.applyMembraneWaterRipples(
+      positions as Float32Array,
+      this.surfaceGeometry.attributes.position.count,
+    );
+
     const uniforms = this.surfaceMaterial.uniforms;
     // vita は無音時も膜の模様がゆっくり流れ続ける（idleTime は常に進む）
     uniforms.uTime.value = this.completed
       ? this.frozenTime
       : this.formingTime + (this.style.idleWobble > 0 ? this.idleTime * 0.3 : 0);
-    const midFlash = clamp01(this.guitarFlash * 1.05 + this.snareFlash * 0.55);
-    const hatTick = clamp01(this.hatFlash * 1.05 + this.hatImpulse * 0.45);
+    // **soloFlash のみ**（snareFlash は膜から除外。スネア＝core／group スケール）
+    const soloFlashUniform = softCeil(
+      this.guitarFlash * 1.05 +
+        (this.melodyOnsetUsesMidChannel() ? this.melodyPhraseImpulse * 0.45 : 0),
+      1,
+    ) * warm;
+    const hatTick = softCeil(this.hatFlash * 1.05 + this.hatImpulse * 0.45, 1);
     uniforms.uMelodyLine.value =
-      t.membraneLine * (1 + midFlash * 1.65 + this.melodyPhraseImpulse * 0.4);
+      t.membraneLine * (1 + soloFlashUniform * 1.35 + voiceLine * 0.55);
     uniforms.uMelodyFresnel.value =
-      t.membraneFresnel * (1 + midFlash * 0.75 + this.melodyPhraseImpulse * 0.25);
-    uniforms.uMelodyNoise.value = t.membraneNoise * (0.85 + midFlash * 0.35);
-    uniforms.uMelodyFlowAnim.value = 0.95 + t.liveHigh * 0.7 + midFlash * 0.65;
-    // フラッシュ追従を速く（中高音のキレ）
-    const midTarget = clamp01(midFlash * 0.95 + bands.mid * 0.12);
-    const melTarget = clamp01(
-      this.guitarFlash * 0.9 + this.melodyPhraseImpulse * 0.55 + bands.melody * 0.1,
+      t.membraneFresnel * (1 + soloFlashUniform * 0.65 + voiceLine * 0.35);
+    uniforms.uMelodyNoise.value = t.membraneNoise * (0.85 + soloFlashUniform * 0.28);
+    uniforms.uMelodyFlowAnim.value =
+      0.95 +
+      t.liveHigh * 0.7 +
+      soloFlashUniform * 0.45 +
+      voiceLine * 0.95 +
+      contourDrive * 0.62 +
+      bestPhrase * 0.35;
+    const midTarget = softCeil(soloFlashUniform * 0.85 + bands.melody * 0.08, 1);
+    const melTarget = softCeil(
+      this.guitarFlash * 0.85 +
+        (this.melodyOnsetUsesMidChannel() ? this.melodyPhraseImpulse * 0.45 : 0) +
+        bands.melody * 0.08,
+      1,
     );
-    const highTarget = clamp01(hatTick * 0.85 + bands.high * 0.12);
+    const highTarget = softCeil(hatTick * 0.85 + bands.high * 0.12, 1);
     uniforms.uMid.value += (midTarget - uniforms.uMid.value) * Math.min(1, deltaTime * 18);
     uniforms.uMelody.value += (melTarget - uniforms.uMelody.value) * Math.min(1, deltaTime * 18);
     uniforms.uHigh.value += (highTarget - uniforms.uHigh.value) * Math.min(1, deltaTime * 20);
+    this.syncVoiceBandUniforms(deltaTime);
+    this.syncMucusUniforms();
+    let phraseRippleGain = 0;
+    for (let k = 0; k < SoundSculpture.PHRASE_WAVE_SLOTS; k += 1) {
+      phraseRippleGain = Math.max(phraseRippleGain, this.phraseWaveAmp[k]);
+    }
+    uniforms.uWaterRipplePhase.value = this.waterRipplePhase;
+    uniforms.uWaterRippleGain.value = softCeil(
+      this.idleWobbleAmp * 2.2 +
+        this.kickRippleStrength +
+        this.snareRippleStrength * 0.85 +
+        phraseRippleGain * 0.65,
+      1.25,
+    );
+    uniforms.uPaletteBias.value = membranePalette.bias;
     const tension = this.membranePressureImpulse;
-    const targetLive = Math.min(1.05, Math.max(0, this.getMembraneLiveTarget(bands) + tension * 0.7));
+    const targetLive = softCeil(this.getMembraneLiveTarget(bands) + tension * 0.7, 1.05);
     const liveRising = targetLive > uniforms.uLive.value;
     uniforms.uLive.value +=
       (targetLive - uniforms.uLive.value) * Math.min(1, deltaTime * (liveRising ? 20 : 10));
-    const targetGlow = Math.min(1.2, Math.max(0, this.getMembraneGlowTarget(bands) + tension * 0.9));
+    const targetGlow = softCeil(this.getMembraneGlowTarget(bands) + tension * 0.9, 1.2);
     const glowRising = targetGlow > uniforms.uGlow.value;
     uniforms.uGlow.value +=
       (targetGlow - uniforms.uGlow.value) * Math.min(1, deltaTime * (glowRising ? 24 : 8));
@@ -8460,7 +11358,7 @@ class SoundSculpture {
     // ※ membraneGain は曲で organic が上がると 10 超になり得る → vita は粘土が見えるよう不透明度を上限する
     const sp = this.getSpecies();
     const stMembrane = this.style.membrane;
-    const initialGate = 0.5 + this.formDevelopment * 0.5;
+    const initialGate = 1;
     const rawMembraneOpacity =
       (this.completed
         ? stMembrane.completedOpacity
@@ -8472,7 +11370,7 @@ class SoundSculpture {
     // （[P1] step 3）。以前は完成の瞬間に 0.46 → 0.20 と半分以下に落ちていて、
     // 「LIVE は乳白の生きもの / 完成は磨かれた石」の落差の主因だった。
     // `opacityScale: 1.45` と `completedOpacity: 0.2` は動かしていない。
-    const liveOpacityCap = 0.46 + (stMembrane.completedOpacity - 0.46) * this.getMaturity();
+    const liveOpacityCap = 0.46;
     const membraneOpacity = stMembrane.vita
       ? Math.min(
           this.completed ? stMembrane.completedOpacity : liveOpacityCap,
@@ -8488,9 +11386,7 @@ class SoundSculpture {
     // 残り半分は完成の特権として残す。`freezeTarget` は 0.24 なので LIVE の最大は 0.12。
     const freezeTarget = this.completed
       ? stMembrane.freezeTarget
-      : stMembrane.vita
-        ? stMembrane.freezeTarget * this.getMaturity() * 0.5
-        : 0;
+      : 0;
     const freezeFollow = this.completed
       ? 0.55 + (1 - this.completionSettle) * 1.1
       : 2;
@@ -8638,9 +11534,9 @@ class SoundSculpture {
     // 新: 粒状 detachment は detachmentDust 側で更新する
   }
 
-  private updateGlowDust(_bands: AudioBands, deltaTime: number) {
-    // Scope 水色バー (scopeCyanDrive) と同じ波形エネルギーで半径・明度・不透明度を動かす
-    const drive = this.completed ? 0 : scopeCyanDrive(latestRhythm);
+  private updateGlowDust(bands: AudioBands, deltaTime: number) {
+    const drive = this.completed ? 0 : scopeHighDrive(latestRhythm, bands);
+    const shellDrive = this.completed ? 0 : scopeCyanDrive(latestRhythm) * 0.35;
     // 初期ロード／無音時はシェル周りの孤立した点としてゴミに見えるので隠す
     if (!this.style.particlesVisible || (!this.completed && drive < 0.018)) {
       this.glowDust.visible = false;
@@ -8650,8 +11546,12 @@ class SoundSculpture {
     this.glowDust.visible = true;
 
     const displayTime = this.completed ? this.frozenTime : this.formingTime;
-    const shellPulse = 1.34 + drive * 0.28 + Math.sin(displayTime * 1.4) * (0.012 + drive * 0.04);
+    const surfacePositions = this.surfaceGeometry.attributes.position.array as Float32Array;
+    const liveSurfaceMean = this.meanRadialLength(surfacePositions);
+    const shellBase = Math.max(this.targetSurfaceMeanRadius * 1.06, liveSurfaceMean * 1.04) + 0.08;
+    const shellPulse = shellBase + shellDrive * 0.28 + Math.sin(displayTime * 1.4) * (0.012 + drive * 0.04);
     const drift = displayTime * (0.28 + drive * 1.15);
+    const glowGain = DEFAULT_GLOW_DUST_GAIN;
 
     for (let i = 0; i < SoundSculpture.maxGlowDust; i += 1) {
       const idx = i * 3;
@@ -8664,17 +11564,18 @@ class SoundSculpture {
       this.glowDustPositions[idx + 1] = ny * radius;
       this.glowDustPositions[idx + 2] = nz * radius;
 
-      const glow = (0.18 + drive * 0.95) * (0.55 + seededUnit(i, 2.7) * 0.45);
-      this.glowDustColors[idx] = 0.38 * glow;
-      this.glowDustColors[idx + 1] = 0.7 * glow;
-      this.glowDustColors[idx + 2] = 1.0 * glow;
+      const sparkleBoost = seededUnit(i, 7.31) > 0.82 ? 2.15 : 1;
+      const glow = (0.18 + drive * 0.95 * glowGain) * (0.55 + seededUnit(i, 2.7) * 0.45) * sparkleBoost;
+      this.glowDustColors[idx] = 0.58 * glow;
+      this.glowDustColors[idx + 1] = 0.48 * glow;
+      this.glowDustColors[idx + 2] = 0.98 * glow;
     }
 
     const targetOpacity = this.completed
       ? this.style.completion.mode === "breathe"
         ? 0.24 + this.breathWave * 0.12
         : 0.12
-      : 0.12 + drive * 0.78;
+      : 0.1 + drive * 0.82 * glowGain;
     this.glowDustMaterial.opacity +=
       (targetOpacity - this.glowDustMaterial.opacity) * Math.min(1, deltaTime * 10);
     this.glowDustMaterial.size = 0.012 + drive * 0.028;
@@ -8714,9 +11615,10 @@ class SoundSculpture {
     // （toneMapped:false + 加算合成なので 1.0 を超えると本当に白飛びして「パッと弾ける」）
     const glow = 0.4 + drive * 0.5 + bands.high * 0.15;
     const hot = Math.max(0, drive - 0.35) * 1.4;
-    this.sparkleColors[idx] = 0.5 * glow + 0.75 * hot;
-    this.sparkleColors[idx + 1] = 0.78 * glow + 0.95 * hot;
-    this.sparkleColors[idx + 2] = 0.95 * glow + 1.1 * hot;
+    const sparkleBoost = seededUnit(index, 7.31) > 0.82 ? 2.2 : 1;
+    this.sparkleColors[idx] = (0.62 * glow + 0.7 * hot) * sparkleBoost;
+    this.sparkleColors[idx + 1] = (0.52 * glow + 0.75 * hot) * sparkleBoost;
+    this.sparkleColors[idx + 2] = (0.98 * glow + 1.05 * hot) * sparkleBoost;
     if (this.style.particlesVisible) {
       SoundSculpture.unparkPointsGeometry(this.sparkleGeometry, SoundSculpture.maxSparkles);
     }
@@ -8729,7 +11631,7 @@ class SoundSculpture {
   }
 
   private updateSparkles(bands: AudioBands, deltaTime: number) {
-    const drive = this.completed ? 0 : scopeCyanDrive(latestRhythm);
+    const drive = this.completed ? 0 : scopeHighDrive(latestRhythm, bands);
     const hatTick = this.completed
       ? 0
       : clamp01(this.hatFlash * 1.2 + this.hatImpulse * 0.75);
@@ -8762,11 +11664,12 @@ class SoundSculpture {
         continue;
       }
       // 常時分＝控えめな淡いシアン、チッチの瞬間だけ白熱させて星の明滅と区別する
-      const ambient = this.sparkleLife[i] * (0.32 + drive * 0.12);
-      const hot = this.sparkleLife[i] * hatTick * 1.5;
-      this.sparkleColors[idx] = 0.55 * ambient + 0.85 * hot;
-      this.sparkleColors[idx + 1] = 0.8 * ambient + 1.05 * hot;
-      this.sparkleColors[idx + 2] = 1.0 * ambient + 1.2 * hot;
+      const sparkleBoost = seededUnit(i, 7.31) > 0.82 ? 2.1 : 1;
+      const ambient = this.sparkleLife[i] * (0.32 + drive * 0.12) * sparkleBoost;
+      const hot = this.sparkleLife[i] * hatTick * 1.5 * sparkleBoost;
+      this.sparkleColors[idx] = (0.62 * ambient + 0.85 * hot);
+      this.sparkleColors[idx + 1] = (0.52 * ambient + 0.95 * hot);
+      this.sparkleColors[idx + 2] = (0.98 * ambient + 1.15 * hot);
     }
 
     const targetOpacity = this.completed ? 0.08 : 0.07 + drive * 0.1 + hatTick * 1.1;
@@ -8794,15 +11697,11 @@ class SoundSculpture {
     }
 
     if (!this.completed) {
-      // 熟成が進むほど新しい粒の湧きを少しだけ抑える（[P1]。完成で 0.5 秒に消える段差を和らげる）。
-      // **チラつきの強さ・吸着済みの粒・スパークル・グローダストは触っていない。**
-      const emissionSettle = 1 - this.getMaturity() * 0.3;
       this.particleEmission +=
         (Math.max(0, bands.high - 0.12) * deltaTime * 52 * this.getDetailScale() +
           Math.max(0, bands.melody - 0.1) * deltaTime * 28 * this.getDetailScale() +
           Math.max(0, bands.mid - 0.14) * deltaTime * 16 +
-          bands.contrast * deltaTime * 8) *
-        emissionSettle;
+          bands.contrast * deltaTime * 8);
 
       let spawnedThisFrame = 0;
       while (this.particleEmission >= 1 && spawnedThisFrame < 5) {
@@ -8985,6 +11884,7 @@ const styleEnvActive = true;
 const sceneEnv = visualStyle.env;
 const daytimeBackgroundInput = document.querySelector<HTMLInputElement>("#daytime-background");
 const liveWeatherInput = document.querySelector<HTMLInputElement>("#live-weather");
+const showHudChromeInput = document.querySelector<HTMLInputElement>("#show-hud-chrome");
 const liveWeatherStatusEl = document.querySelector<HTMLElement>("#live-weather-status");
 const weatherPreviewRoot = document.querySelector<HTMLElement>("#weather-preview");
 const weatherPreviewPresetSelect =
@@ -9039,12 +11939,16 @@ if (experienceStyleField) {
 if (growthAlgorithmField) {
   growthAlgorithmField.hidden = false;
 }
-if (devSurface && daytimePreviewRoot) {
+if (daytimePreviewRoot) {
   daytimePreviewRoot.hidden = false;
 }
-if (devSurface && weatherPreviewRoot) {
+if (weatherPreviewRoot) {
   weatherPreviewRoot.hidden = false;
 }
+// 雨量・風速スライダーは DEV のみ（本番は条件プリセットだけ）
+document.querySelectorAll<HTMLElement>(".weather-preview__field--dev").forEach((el) => {
+  el.hidden = !devSurface;
+});
 // vita: DEV 既定を「晴れ・昼〜夕方」に寄せて差し込み光を確認しやすくする
 if (devSurface && visualStyleId === "vita") {
   weatherPreviewPreset = "clear";
@@ -9074,15 +11978,139 @@ const populateGrowthAlgorithmSelect = () => {
   }
 };
 
+let uiLocale: UiLocale = readUiLocale();
+
 const applyGrowthAlgorithmUi = (id: GrowthAlgorithmId) => {
   growthAlgorithmSelect.value = id;
-  const meta = getGrowthAlgorithmMeta(id);
-  growthAlgorithmHint.hidden = false;
-  growthAlgorithmHint.textContent = meta.tagline;
+  growthAlgorithmHint.textContent = growthTagline(id, uiLocale);
 };
 
 populateGrowthAlgorithmSelect();
 applyGrowthAlgorithmUi(growthAlgorithmId);
+
+document.querySelectorAll<HTMLButtonElement>(".setting-help-toggle").forEach((button) => {
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const targetId = button.dataset.helpTarget;
+    if (!targetId) {
+      return;
+    }
+    const body = document.getElementById(targetId);
+    if (!body) {
+      return;
+    }
+    const nextOpen = body.hasAttribute("hidden");
+    body.toggleAttribute("hidden", !nextOpen);
+    button.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+  });
+});
+
+const localeJaButton = document.querySelector<HTMLButtonElement>("#locale-ja");
+const localeEnButton = document.querySelector<HTMLButtonElement>("#locale-en");
+
+type WeatherStatusKind =
+  | "hidden"
+  | "fetching"
+  | "applied"
+  | "appliedTokyo"
+  | "preview"
+  | "denied"
+  | "failed";
+
+let weatherStatusKind: WeatherStatusKind = "hidden";
+let weatherStatusDetail = "";
+
+const setLocalizedWeatherStatus = (
+  kind: WeatherStatusKind,
+  detail = "",
+  visible = kind !== "hidden",
+) => {
+  weatherStatusKind = kind;
+  weatherStatusDetail = detail;
+  if (!visible || kind === "hidden") {
+    setLiveWeatherStatus("", false);
+    return;
+  }
+  const detailSuffix = detail ? ` · ${detail}` : "";
+  switch (kind) {
+    case "fetching":
+      setLiveWeatherStatus(t("fetchingWeather", uiLocale));
+      break;
+    case "applied":
+      setLiveWeatherStatus(`${t("applied", uiLocale)}${detailSuffix}`);
+      break;
+    case "appliedTokyo":
+      setLiveWeatherStatus(`${t("appliedTokyo", uiLocale)}${detailSuffix}`);
+      break;
+    case "preview":
+      setLiveWeatherStatus(`${t("preview", uiLocale)}${detailSuffix}`);
+      break;
+    case "denied":
+      setLiveWeatherStatus(t("locationDenied", uiLocale));
+      break;
+    case "failed":
+      setLiveWeatherStatus(t("weatherFailed", uiLocale));
+      break;
+    default:
+      setLiveWeatherStatus("", false);
+  }
+};
+
+const refreshLocalizedWeatherStatus = () => {
+  if (weatherStatusKind === "hidden") {
+    return;
+  }
+  setLocalizedWeatherStatus(weatherStatusKind, weatherStatusDetail, true);
+};
+
+const applyUiLocale = (locale: UiLocale) => {
+  uiLocale = locale;
+  writeUiLocale(locale);
+  document.documentElement.lang = locale === "ja" ? "ja" : "en";
+
+  document.querySelectorAll<HTMLElement>("[data-i18n]").forEach((el) => {
+    const key = el.dataset.i18n as UiStringKey | undefined;
+    if (!key || !(key in UI_STRINGS)) {
+      return;
+    }
+    el.textContent = t(key, locale);
+  });
+
+  document.querySelectorAll<HTMLElement>("[data-i18n-aria]").forEach((el) => {
+    const key = el.dataset.i18nAria as UiStringKey | undefined;
+    if (!key || !(key in UI_STRINGS)) {
+      return;
+    }
+    el.setAttribute("aria-label", t(key, locale));
+  });
+
+  weatherPreviewPresetSelect?.querySelectorAll<HTMLOptionElement>("option").forEach((option) => {
+    const key = WEATHER_PRESET_I18N[option.value];
+    if (key) {
+      option.textContent = t(key, locale);
+    }
+  });
+
+  const defaultInputOption = audioInputSelect.querySelector<HTMLOptionElement>(
+    'option[value="default"]',
+  );
+  if (defaultInputOption && defaultInputOption.dataset.fromDevice !== "1") {
+    defaultInputOption.textContent = t("defaultInput", locale);
+  }
+
+  localeJaButton?.classList.toggle("is-active", locale === "ja");
+  localeEnButton?.classList.toggle("is-active", locale === "en");
+  localeJaButton?.setAttribute("aria-pressed", locale === "ja" ? "true" : "false");
+  localeEnButton?.setAttribute("aria-pressed", locale === "en" ? "true" : "false");
+
+  applyGrowthAlgorithmUi(growthAlgorithmId);
+  refreshLocalizedWeatherStatus();
+};
+
+localeJaButton?.addEventListener("click", () => applyUiLocale("ja"));
+localeEnButton?.addEventListener("click", () => applyUiLocale("en"));
+applyUiLocale(uiLocale);
 
 if (devSurface && startDevAudioButton) {
   startDevAudioButton.hidden = false;
@@ -9097,7 +12125,10 @@ if (devSurface && startDevAudioButton) {
       resolveInitialDevAudioTrack,
       writeStoredDevAudioTrackId,
       getDevAudioTrackById,
+      loadDevAudioTracks,
     } = await import("./dev-audio");
+    // カタログは dev サーバーのマニフェスト経由。使う前に読み込む
+    await loadDevAudioTracks();
 
     if (devAudioRow) {
       devAudioRow.hidden = DEV_AUDIO_TRACKS.length === 0;
@@ -9183,9 +12214,7 @@ const applyExperienceUi = (id: ExperienceId) => {
   appElement.classList.toggle("style-monolith", entry.visualStyleId === "monolith");
   appElement.classList.toggle("style-dither", entry.visualStyleId === "dither");
   appElement.classList.toggle("style-lumen", entry.visualStyleId === "lumen");
-  if (entry.visualStyleId === "dither") {
-    appElement.classList.toggle("theme-dark", false);
-  } else if (!daytimeBackgroundEnabled) {
+  if (entry.visualStyleId !== "dither" && !daytimeBackgroundEnabled) {
     appElement.classList.toggle("theme-dark", styleEnvActive && visualStyle.themeDark);
   }
 
@@ -9428,6 +12457,7 @@ const openControlPanel = () => {
   });
 
   toggleControlPanelButton.setAttribute("aria-expanded", "true");
+  syncHudChromeUi();
 };
 
 const closeControlPanel = async () => {
@@ -9435,7 +12465,98 @@ const closeControlPanel = async () => {
   await playControlPanelCloseAnimation();
   controlPanelShell.classList.add("is-collapsed");
   toggleControlPanelButton.setAttribute("aria-expanded", "false");
+  syncHudChromeUi();
+  if (!hudChromeEnabled) {
+    peekChromeToggle();
+  }
 };
+
+const HUD_CHROME_STORAGE_KEY = "sound-sculpture:hud-chrome";
+const CHROME_TOGGLE_PEEK_MS = 3000;
+
+const readHudChromeEnabled = () => {
+  try {
+    const stored = window.localStorage.getItem(HUD_CHROME_STORAGE_KEY);
+    if (stored === null) {
+      return true;
+    }
+    return stored === "1";
+  } catch {
+    return true;
+  }
+};
+
+const writeHudChromeEnabled = (enabled: boolean) => {
+  try {
+    window.localStorage.setItem(HUD_CHROME_STORAGE_KEY, enabled ? "1" : "0");
+  } catch {
+    // ignore
+  }
+};
+
+let hudChromeEnabled = readHudChromeEnabled();
+let chromeTogglePeekTimer: number | null = null;
+
+const clearChromeTogglePeekTimer = () => {
+  if (chromeTogglePeekTimer !== null) {
+    window.clearTimeout(chromeTogglePeekTimer);
+    chromeTogglePeekTimer = null;
+  }
+};
+
+const isControlPanelOpen = () => !controlPanelShell.classList.contains("is-collapsed");
+
+const syncHudChromeUi = () => {
+  appElement.classList.toggle("chrome-hidden", !hudChromeEnabled);
+  if (hudChromeEnabled) {
+    clearChromeTogglePeekTimer();
+    appElement.classList.remove("chrome-toggle-peek", "chrome-panel-open");
+    return;
+  }
+  if (isControlPanelOpen()) {
+    clearChromeTogglePeekTimer();
+    appElement.classList.remove("chrome-toggle-peek");
+    appElement.classList.add("chrome-panel-open");
+    return;
+  }
+  appElement.classList.remove("chrome-panel-open");
+};
+
+const peekChromeToggle = () => {
+  if (hudChromeEnabled || isControlPanelOpen()) {
+    return;
+  }
+  appElement.classList.add("chrome-toggle-peek");
+  clearChromeTogglePeekTimer();
+  chromeTogglePeekTimer = window.setTimeout(() => {
+    chromeTogglePeekTimer = null;
+    appElement.classList.remove("chrome-toggle-peek");
+  }, CHROME_TOGGLE_PEEK_MS);
+};
+
+const onChromeIdleActivity = () => {
+  if (hudChromeEnabled) {
+    return;
+  }
+  peekChromeToggle();
+};
+
+window.addEventListener("pointermove", onChromeIdleActivity, { passive: true });
+window.addEventListener("pointerdown", onChromeIdleActivity, { passive: true });
+window.addEventListener("keydown", onChromeIdleActivity);
+
+if (showHudChromeInput) {
+  showHudChromeInput.checked = hudChromeEnabled;
+  showHudChromeInput.addEventListener("change", () => {
+    hudChromeEnabled = Boolean(showHudChromeInput.checked);
+    writeHudChromeEnabled(hudChromeEnabled);
+    syncHudChromeUi();
+    if (!hudChromeEnabled) {
+      peekChromeToggle();
+    }
+  });
+}
+syncHudChromeUi();
 
 let panelToggleClickTimer: number | null = null;
 
@@ -9610,11 +12731,7 @@ if (daytimeBackgroundEnabled && visualStyleId !== "dither") {
   ).dark;
   appElement.classList.toggle("theme-dark", themeDarkActive);
 }
-if (visualStyleId === "dither") {
-  // 網点は時間帯で UI / 背景を沈めない
-  themeDarkActive = false;
-  appElement.classList.toggle("theme-dark", false);
-}
+// dither の theme-dark / UI インクは syncDaytimeEnvironmentTargets が背景輝度で決める
 
 const sceneBackground = new SceneBackground(sceneEnv, themeDarkActive);
 sceneBackground.setFromBackground(scene.background as THREE.Color, themeDarkActive, 0);
@@ -10276,7 +13393,7 @@ const pokeSculptureAtClient = (clientX: number, clientY: number) => {
     return;
   }
   sculptureHitLocal.copy(hits[0].point);
-  sculpture.group.worldToLocal(sculptureHitLocal);
+  hits[0].object.worldToLocal(sculptureHitLocal);
   sculpture.pokeSurface?.(sculptureHitLocal);
   sculpture.pokeIdle?.();
   if (ditherPass) {
@@ -10877,6 +13994,7 @@ const populateAudioDevices = async () => {
       if (device.deviceId === "default") {
         if (device.label && defaultOption) {
           defaultOption.textContent = device.label;
+          defaultOption.dataset.fromDevice = "1";
         }
         continue;
       }
@@ -10911,7 +14029,7 @@ const ensureMicPermission = (): Promise<boolean> => {
 
   micPermissionRequest = (async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await requireMediaDevices().getUserMedia({
         audio: true,
         video: false,
       });
@@ -11012,8 +14130,7 @@ const updateWeatherHud = () => {
     hudWeatherFieldEl.textContent = "---";
   } else {
     const active = getActiveWeatherSnapshot();
-    const prefix =
-      isDevSurface() && weatherPreviewPreset !== "live" ? "DEV/" : "";
+    const prefix = weatherPreviewPreset !== "live" ? "指定/" : "";
     hudWeatherFieldEl.textContent = active
       ? formatWeatherHudLabel(active, prefix)
       : "...";
@@ -11024,7 +14141,8 @@ const updateWeatherHud = () => {
 };
 
 const getActiveWeatherSnapshot = (): LiveWeatherSnapshot | null => {
-  if (isDevSurface() && weatherPreviewPreset !== "live") {
+  // 本番でも条件プリセットを使える（雨量・風速ノブは DEV のみ UI）
+  if (weatherPreviewPreset !== "live") {
     return createWeatherPreviewSnapshot(
       weatherPreviewPreset,
       weatherPreviewRainScale,
@@ -11037,8 +14155,7 @@ const getActiveWeatherSnapshot = (): LiveWeatherSnapshot | null => {
   return liveWeatherSnapshot;
 };
 
-const isWeatherFxActive = () =>
-  (isDevSurface() && weatherPreviewPreset !== "live") || liveWeatherEnabled;
+const isWeatherFxActive = () => weatherPreviewPreset !== "live" || liveWeatherEnabled;
 
 const snapshotToSceneWeather = (snapshot: LiveWeatherSnapshot | null): SceneWeatherState => {
   if (!snapshot || !isWeatherFxActive()) {
@@ -11118,11 +14235,15 @@ const clearDaytimeUiTokens = () => {
 const applyDaytimeUiTokens = (
   backgroundHex: number,
   sky?: { horizon: number; zenith: number },
+  contrastReadable = false,
 ) => {
-  const tokens = uiTokensFromBackground(backgroundHex, {
+  const opts = {
     horizonHex: sky?.horizon,
     zenithHex: sky?.zenith,
-  });
+  };
+  const tokens = contrastReadable
+    ? uiTokensForReadableContrast(backgroundHex, opts)
+    : uiTokensFromBackground(backgroundHex, opts);
   appElement.style.setProperty("--daytime-bg", `#${backgroundHex.toString(16).padStart(6, "0")}`);
   appElement.style.setProperty("--ui-ink", tokens.ink);
   appElement.style.setProperty("--ui-ink-soft", tokens.soft);
@@ -11138,22 +14259,35 @@ const syncDaytimeEnvironmentTargets = () => {
   const cloudCover =
     isWeatherFxActive() && activeWeather ? activeWeather.cloudCover : 0;
 
-  // 網点: 夜まで沈めず昼帯のトーンを維持（UI は CSS の multiply+#fff）
+  // 網点: シーン背景は従来どおり昼帯トーン（or 黒）。UI インクは forming 輝度で決めない
+  //（暗色インク＋黒キャンバスで潰れる）。intro/HUD は CSS の difference 反転。
   if (ditherStyle) {
     daytimeSkyActive = false;
     activeDaytimeLook = null;
-    appElement.classList.remove("daytime-linked");
-    clearDaytimeUiTokens();
     appElement.style.removeProperty("--dither-bg");
-    const dayLook = sampleActiveDaytimeAtmosphere(
-      daytimeBackgroundEnabled ? Math.min(Math.max(getActiveDaytimeHour(), 8), 16) : 11,
-    );
-    const forming = tintHexWithClouds(dayLook.forming, Math.min(cloudCover, 0.35));
-    const complete = tintHexWithClouds(dayLook.complete, Math.min(cloudCover, 0.35));
+    let forming: number;
+    let complete: number;
+    if (daytimeBackgroundEnabled) {
+      const dayLook = sampleActiveDaytimeAtmosphere(
+        Math.min(Math.max(getActiveDaytimeHour(), 8), 16),
+      );
+      forming = tintHexWithClouds(dayLook.forming, Math.min(cloudCover, 0.35));
+      complete = tintHexWithClouds(dayLook.complete, Math.min(cloudCover, 0.35));
+    } else {
+      forming = tintHexWithClouds(sceneEnv.background, cloudCover);
+      complete = tintHexWithClouds(sceneEnv.backgroundComplete, cloudCover);
+    }
     envBackgroundForming.setHex(forming);
     envBackgroundComplete.setHex(complete);
-    themeDarkActive = false;
-    appElement.classList.toggle("theme-dark", false);
+    appElement.classList.add("daytime-linked");
+    // パネル用トークンは明色固定（キャンバス上の文字は difference）。--daytime-bg はシーンと同色
+    applyDaytimeUiTokens(0x000000, undefined, true);
+    appElement.style.setProperty(
+      "--daytime-bg",
+      `#${forming.toString(16).padStart(6, "0")}`,
+    );
+    themeDarkActive = true;
+    appElement.classList.toggle("theme-dark", true);
     return;
   }
 
@@ -11235,7 +14369,7 @@ const refreshLiveWeather = async () => {
     return;
   }
   const seq = ++liveWeatherFetchSeq;
-  setLiveWeatherStatus("天気を取得しています…");
+  setLocalizedWeatherStatus("fetching");
   updateWeatherHud();
   try {
     const snapshot = await fetchLiveWeatherForUser();
@@ -11246,10 +14380,9 @@ const refreshLiveWeather = async () => {
     const nearTokyo =
       Math.abs(snapshot.latitude - 35.6812) < 0.05 &&
       Math.abs(snapshot.longitude - 139.7671) < 0.05;
-    setLiveWeatherStatus(
-      nearTokyo
-        ? `反映中（位置フォールバック・東京） · ${snapshot.label}`
-        : `反映中 · ${snapshot.label}`,
+    setLocalizedWeatherStatus(
+      nearTokyo ? "appliedTokyo" : "applied",
+      snapshot.label,
     );
     applyLiveWeatherToScene();
     syncDaytimeEnvironmentTargets();
@@ -11264,12 +14397,12 @@ const refreshLiveWeather = async () => {
         liveWeatherInput.checked = false;
       }
       stopLiveWeather();
-      setLiveWeatherStatus("位置情報が許可されなかったため Match local weather をOFFにしました");
+      setLocalizedWeatherStatus("denied");
       updateWeatherHud();
       return;
     }
     console.error(error);
-    setLiveWeatherStatus("天気の取得に失敗しました。しばらくして再試行します");
+    setLocalizedWeatherStatus("failed");
     updateWeatherHud();
   }
 };
@@ -11278,7 +14411,7 @@ const stopLiveWeather = () => {
   liveWeatherFetchSeq += 1;
   clearLiveWeatherRefreshTimer();
   liveWeatherSnapshot = null;
-  setLiveWeatherStatus("", false);
+  setLocalizedWeatherStatus("hidden");
   applyLiveWeatherToScene();
   syncDaytimeEnvironmentTargets();
 };
@@ -11307,7 +14440,7 @@ liveWeatherInput?.addEventListener("change", () => {
   } else {
     stopLiveWeather();
   }
-  // DEV プレビュー中はチェックOFFでも効果を維持
+  // 条件プリビュー中はチェックOFFでも効果を維持（DEV / 本番共通）
   if (weatherPreviewPreset !== "live") {
     applyLiveWeatherToScene();
     syncDaytimeEnvironmentTargets();
@@ -11344,20 +14477,23 @@ const applyWeatherPreviewSelection = () => {
   syncWeatherPreviewLabel();
   syncWeatherPreviewScaleLabels();
   if (weatherPreviewPreset !== "live") {
-    setLiveWeatherStatus(`DEV プレビュー · ${weatherPreviewValueEl?.textContent ?? ""}`);
+    setLocalizedWeatherStatus(
+      "preview",
+      weatherPreviewValueEl?.textContent ?? "",
+    );
     applyLiveWeatherToScene();
     syncDaytimeEnvironmentTargets();
     return;
   }
   if (liveWeatherEnabled) {
     if (liveWeatherSnapshot) {
-      setLiveWeatherStatus(`反映中 · ${liveWeatherSnapshot.label}`);
+      setLocalizedWeatherStatus("applied", liveWeatherSnapshot.label);
     } else {
-      setLiveWeatherStatus("天気を取得しています…");
+      setLocalizedWeatherStatus("fetching");
       void refreshLiveWeather();
     }
   } else {
-    setLiveWeatherStatus("", false);
+    setLocalizedWeatherStatus("hidden");
   }
   applyLiveWeatherToScene();
   syncDaytimeEnvironmentTargets();
@@ -11413,8 +14549,8 @@ weatherPreviewLiveButton?.addEventListener("click", () => {
   applyWeatherPreviewSelection();
 });
 
-if (isDevSurface()) {
-  syncWeatherPreviewLabel();
+syncWeatherPreviewLabel();
+if (devSurface) {
   syncWeatherPreviewScaleLabels();
 }
 
@@ -11465,11 +14601,30 @@ if (daytimeSkyActive) {
 } else {
   sceneBackground.setFromBackground(scene.background as THREE.Color, themeDarkActive, 0);
   if (vitaAtmosphere) {
+    sceneBackground.setAbyssSeaWeather(abyssSeaTintFromWeather(getActiveWeatherSnapshot()));
     sceneBackground.setAbyssSeaByHour(getActiveDaytimeHour());
   }
 }
 syncSceneFog();
 applyLiveWeatherToScene();
+
+/**
+ * [P1] 段3: **海に差し込む光の色を天気で変える。**
+ * 従来の青（`baseKey`）から `weatherLightTint` の色へ `amount` ぶん寄せる。
+ * 天気が取れないときは amount 0 ＝ 従来どおり。
+ */
+const weatherLightScratch = new THREE.Color();
+const applyWeatherLightColors = (baseKeyHex: number) => {
+  const tint = weatherLightTint(getActiveWeatherSnapshot());
+  const amount = Math.min(1, tint.amount * Math.max(0, envColorGain.weather) * 0.5);
+  keyLight.color.setHex(baseKeyHex).lerp(weatherLightScratch.setHex(tint.key), amount);
+  fillLight.color
+    .setHex(sceneEnv.fillColor ?? 0x2a5a78)
+    .lerp(weatherLightScratch.setHex(tint.fill), amount);
+  softFillLight.color.copy(fillLight.color);
+  ambientLight.color.setHex(0x6a98b8).lerp(weatherLightScratch.setHex(tint.ambient), amount);
+  ambientLight.groundColor.setHex(sceneEnv.hemisphereGround ?? 0x010408);
+};
 
 const updateEnvironmentCrossfade = (deltaTime: number) => {
   syncDaytimeEnvironmentTargets();
@@ -11491,6 +14646,12 @@ const updateEnvironmentCrossfade = (deltaTime: number) => {
   }
   renderer.setClearColor(scene.background as THREE.Color);
   const seaHour = getActiveDaytimeHour();
+  if (vitaAtmosphere) {
+    // **どちらの分岐でも効くように先に渡す。**
+    // `setDaytimeSky` → `setSkyGradient` の中でも `setAbyssSeaByHour` が呼ばれるので、
+    // else 側だけに置くと vita では一度も効かない（daytimeSkyActive は通常 true）。
+    sceneBackground.setAbyssSeaWeather(abyssSeaTintFromWeather(getActiveWeatherSnapshot()));
+  }
   if (daytimeSkyActive) {
     sceneBackground.setDaytimeSky(
       daytimeZenithColor,
@@ -11519,11 +14680,13 @@ const updateEnvironmentCrossfade = (deltaTime: number) => {
   }
   sculpture.applyWeatherClayTint?.(getActiveWeatherSnapshot(), seaHour);
   syncSceneFog();
-  const baseKey = envLerp(lightDev.key, lightDev.keyComplete);
-  const baseFill = envLerp(lightDev.fill, lightDev.fillComplete);
-  const baseAmbient = envLerp(lightDev.ambient, lightDev.ambientComplete);
-  const baseSoftFill = envLerp(lightDev.softFill, lightDev.softFillComplete);
-  const baseRim = envLerp(lightDev.rim, lightDev.rimComplete);
+  // 段2: 彫刻のライトだけを持ち上げる（背景ドームはライトを受けないので暗いまま）
+  const lightGain = visualStyle.membrane.vita ? sculptureLight.gain : 1;
+  const baseKey = envLerp(lightDev.key, lightDev.keyComplete) * lightGain;
+  const baseFill = envLerp(lightDev.fill, lightDev.fillComplete) * lightGain;
+  const baseAmbient = envLerp(lightDev.ambient, lightDev.ambientComplete) * lightGain;
+  const baseSoftFill = envLerp(lightDev.softFill, lightDev.softFillComplete) * lightGain;
+  const baseRim = envLerp(lightDev.rim, lightDev.rimComplete) * lightGain;
 
   if (daytimeSkyActive && activeDaytimeLook) {
     const li = activeDaytimeLook.lightIntensity;
@@ -11552,17 +14715,16 @@ const updateEnvironmentCrossfade = (deltaTime: number) => {
         ambientLight.color.setHex(0x5a7898);
         ambientLight.groundColor.setHex(0x010408);
       } else {
-        // 彫刻ライトは安定させ、背景の青明るさに任せる
-        const shaft = (0.28 + li * 0.65) * clearFactor * (0.4 + dayWindow * 0.55);
-        keyLight.intensity = baseKey * (0.55 + shaft * 0.75) + lightningFlash * 1.0;
-        fillLight.intensity = baseFill * (0.55 + (1 - clearFactor) * 0.3) * (0.7 + li * 0.2);
-        softFillLight.intensity = baseSoftFill * (0.5 + (1 - clearFactor) * 0.28);
-        ambientLight.intensity = baseAmbient * (0.68 + (1 - clearFactor) * 0.2 + li * 0.08);
-        rimLight.intensity = baseRim * (0.45 + clearFactor * 0.45 * dayWindow);
-        keyLight.color.setHex(0xc4e8ff);
-        fillLight.color.setHex(sceneEnv.fillColor ?? 0x2a5a78);
-        softFillLight.color.copy(fillLight.color);
-        ambientLight.color.setHex(0x6a98b8);
+        // 段C4: 雲は色（鋼・desat）を担当。彫刻の可読性は落とさない。
+        // 旧: clearFactor が雨・どんよりで 0.15 まで落ち、明るい昼の海に粘土が沈んだ。
+        const shaftKeep = Math.max(clearFactor, 0.48);
+        const shaft = (0.28 + li * 0.65) * shaftKeep * (0.4 + dayWindow * 0.55);
+        keyLight.intensity = baseKey * (0.78 + shaft * 0.55 + dayWindow * 0.16) + lightningFlash * 1.0;
+        fillLight.intensity = baseFill * (0.78 + (1 - clearFactor) * 0.16) * (0.88 + li * 0.12);
+        softFillLight.intensity = baseSoftFill * (0.68 + (1 - clearFactor) * 0.18);
+        ambientLight.intensity = baseAmbient * (0.88 + li * 0.08);
+        rimLight.intensity = baseRim * (0.58 + clearFactor * 0.32 * dayWindow);
+        applyWeatherLightColors(0xc4e8ff);
         ambientLight.groundColor.setHex(sceneEnv.hemisphereGround ?? 0x010408);
       }
     } else {
@@ -11592,10 +14754,7 @@ const updateEnvironmentCrossfade = (deltaTime: number) => {
       softFillLight.intensity = baseSoftFill + lightningFlash * 0.35;
       ambientLight.intensity = baseAmbient + lightningFlash * 0.7;
       rimLight.intensity = baseRim;
-      keyLight.color.setHex(0xc8ecff);
-      fillLight.color.setHex(sceneEnv.fillColor ?? 0x2a5a78);
-      softFillLight.color.copy(fillLight.color);
-      ambientLight.color.setHex(0x7eb4d8);
+      applyWeatherLightColors(0xc8ecff);
       ambientLight.groundColor.setHex(sceneEnv.hemisphereGround ?? 0x010408);
     } else {
       keyLight.intensity = baseKey + lightningFlash * 2.4;
@@ -12032,6 +15191,7 @@ beginRecordingButton.addEventListener("click", async () => {
         selected = await getSelectedDevAudioUrl();
       } else {
         const mod = await import("./dev-audio");
+        await mod.loadDevAudioTracks();
         const track = mod.resolveInitialDevAudioTrack();
         if (!track) {
           throw new Error("開発用音源がありません（src/music を確認してください）");
@@ -12046,9 +15206,11 @@ beginRecordingButton.addEventListener("click", async () => {
   } catch (error) {
     setStartButtonsEnabled(true);
     const message =
-      error instanceof Error
-        ? `${error.name}: ${error.message}`
-        : "Failed to start audio input";
+      error instanceof AudioInputNotice
+        ? error.message
+        : error instanceof Error
+          ? audioInputErrorMessage(error)
+          : "Failed to start audio input";
     setStatus(message);
     console.error(error);
   }
@@ -12184,9 +15346,11 @@ const advanceSculptureSimulation = (
   waveformMetrics: WaveformMetrics | null,
   deltaTime: number,
   rhythmBands: AudioBands = sculptureBands,
+  rawBands: RawBands = audioInput.getRawBands(),
 ) => {
-  // リズムはピーク正規化前の帯域で検出（曲の実際のアタックと揃える）
-  const rhythmEvents = rhythm.update(rhythmBands, waveformMetrics, deltaTime);
+  // リズムはピーク正規化前の帯域で検出（曲の実際のアタックと揃える）。
+  // `rawBands` はゲートが飽和した曲でオンセットを拾い直すためだけに渡す（[P0]）。
+  const rhythmEvents = rhythm.update(rhythmBands, waveformMetrics, deltaTime, rawBands);
   latestRhythm = rhythmEvents;
 
   const bands = applyWaveGate(sculptureBands, waveformMetrics);
@@ -12349,6 +15513,7 @@ const render = () => {
         step.waveform,
         step.deltaTime,
         step.rhythmBands,
+        step.rawBands,
       );
       displayBands = result.bands;
       rhythmEvents = result.rhythmEvents;
@@ -12389,6 +15554,16 @@ const render = () => {
     }
   } else {
     displayBands = emptyBands();
+    // **待機中も色を毎フレーム追従させる**（worklist vita [P1]「初期色が面白くない」）。
+    //
+    // ここが抜けていたのが「初期色が天気・時刻でほとんど変わらない」の真因だった
+    // （2026-08-21 実測）。`evolveSongColors` → `refreshEvolvingClayColors` は
+    // `advanceSculptureSimulation` の中だけにあり、**音を鳴らすまで一度も走らない。**
+    // 待機中の唯一の呼び出しは `applyWeatherClayTint` の
+    // `refreshEvolvingClayColors(0.05)` で、追従は 1 回あたり 10.5% しか進まない。
+    // 天気を変えても**目標の 1 割しか色が動かないまま止まっていた**
+    // （晴れ 15 時: 目標の色相 0.429 に対して実際 0.581）。
+    sculpture.evolveSongColors?.(audioInput.getProfile(), deltaTime);
     sculpture.update(
       displayBands,
       deltaTime,
@@ -12441,51 +15616,116 @@ const tuningSliderInputs = new Map<keyof SculptureTuning, HTMLInputElement>();
 const tuningSliderValueLabels = new Map<keyof SculptureTuning, HTMLElement>();
 
 const refreshTuningExport = () => {
-  // ノブ以外の dev パネル値も、パネルで追い込んだ値をそのままエージェントへ
-  // 渡せるようコピー用テキストに含める。
+  // `#dev-tuning-group` のスライダー値はすべてここに載せる（ルール: dev-tuning-copy.mdc）。
   const isVita = visualStyle.membrane.vita;
   tuningExportText.value = formatSculptureTuningForAgent(
     sculptureTuning,
     runtimeTuning,
     growthAlgorithmId,
-    bloomPass
-      ? { enabled: bloomPass.enabled, threshold: bloomPass.threshold, strength: bloomPass.strength }
-      : null,
-    abyssEnvironment ? { enabled: abyssEnvEnabled, intensity: abyssEnvIntensity } : null,
-    isVita
-      ? {
-          strength: clayGrainUniforms.uClayGrain.value,
-          scale: clayGrainUniforms.uClayGrainScale.value,
-        }
-      : null,
-    { hueSpan: songColorSpan.hue, satSpan: songColorSpan.sat },
-    isVita
-      ? {
-          enabled: membraneRelax.iterations > 0,
-          iterations: membraneRelax.iterations,
-          strength: membraneRelax.strength,
-        }
-      : null,
-    isVita
-      ? {
-          enabled: pearlColorMix.enabled,
-          spread: pearlColorMix.spread,
-          balance: pearlColorMix.balance,
-        }
-      : null,
-    isVita
-      ? {
-          axis: gemUniforms.uMineral.value,
-          axisOverride: mineralMix.axisOverride >= 0,
-          facetStrength: mineralMix.facetStrength,
-          gem: gemUniforms.uGem.value,
-          bodyDark: gemUniforms.uGemBodyDark.value,
-          ridge: gemUniforms.uGemRidge.value,
-          sparkle: gemUniforms.uGemSparkle.value,
-          through: gemUniforms.uGemThrough.value,
-          fire: gemUniforms.uGemFire.value,
-        }
-      : null,
+    {
+      lightRig: {
+        key: lightDev.key,
+        fill: lightDev.fill,
+        softFill: lightDev.softFill,
+        ambient: lightDev.ambient,
+        rim: lightDev.rim,
+        exposure: lightDev.exposure,
+        elevationDeg: lightDev.elevationDeg,
+        sideDeg: lightDev.sideDeg,
+        sculptureGain: sculptureLight.gain,
+      },
+      bloom: bloomPass
+        ? {
+            enabled: bloomPass.enabled,
+            threshold: bloomPass.threshold,
+            strength: bloomPass.strength,
+          }
+        : null,
+      environment: abyssEnvironment
+        ? { enabled: abyssEnvEnabled, intensity: abyssEnvIntensity }
+        : null,
+      clayGrain: isVita
+        ? {
+            strength: clayGrainUniforms.uClayGrain.value,
+            scale: clayGrainUniforms.uClayGrainScale.value,
+          }
+        : null,
+      songColor: { hueSpan: songColorSpan.hue, satSpan: songColorSpan.sat },
+      membraneRelax: isVita
+        ? {
+            enabled: membraneRelax.iterations > 0,
+            iterations: membraneRelax.iterations,
+            strength: membraneRelax.strength,
+          }
+        : null,
+      pearlColorMix: isVita
+        ? {
+            enabled: pearlColorMix.enabled,
+            spread: pearlColorMix.spread,
+            balance: pearlColorMix.balance,
+            hueNoise: pearlColorMix.hueNoise,
+            clayChroma: clayChroma.gain,
+            membraneBias: membranePalette.bias,
+          }
+        : null,
+      maturity: isVita
+        ? {
+            override: maturityMix.override >= 0,
+            overrideValue: maturityMix.override >= 0 ? maturityMix.override : 0.5,
+            current: maturityDebug.maturity,
+          }
+        : null,
+      voice: isVita
+        ? {
+            sense: voiceTuning.sense,
+            stretch: voiceTuning.stretch,
+            bend: voiceTuning.bend,
+            phraseLife: voiceTuning.phraseLife,
+            bulge: voiceTuning.bulge,
+            contour: voiceTuning.contour,
+            flowAmp: voiceTuning.flowAmp,
+            bandOpen: voiceTuning.bandOpen,
+            waveAmp: voiceTuning.waveAmp,
+            waveSpeed: voiceTuning.waveSpeed,
+            bandGain: voiceTuning.bandGain,
+          }
+        : null,
+      swim: isVita
+        ? {
+            amp: swimTuning.amp,
+            speed: swimTuning.speed,
+            waves: swimTuning.waves,
+            duck: swimTuning.duck,
+            sway: swimTuning.sway,
+            membrane: swimTuning.membrane,
+          }
+        : null,
+      displaySmooth: isVita
+        ? {
+            strength: displaySmooth.strength,
+            keepCrystal: displaySmooth.keepCrystal,
+          }
+        : null,
+      envColor: isVita
+        ? { weatherGain: envColorGain.weather, hourGain: envColorGain.hour }
+        : null,
+      gem: isVita
+        ? {
+            axis: gemUniforms.uMineral.value,
+            axisOverride: mineralMix.axisOverride >= 0,
+            facetStrength: mineralMix.facetStrength,
+            gem: gemUniforms.uGem.value,
+            bodyDark: gemUniforms.uGemBodyDark.value,
+            ridge: gemUniforms.uGemRidge.value,
+            sparkle: gemUniforms.uGemSparkle.value,
+            through: gemUniforms.uGemThrough.value,
+            fire: gemUniforms.uGemFire.value,
+            vein: gemUniforms.uGemVein.value,
+            haze: gemUniforms.uGemHaze.value,
+            disperse: gemUniforms.uGemDisperse.value,
+          }
+        : null,
+    },
   );
 };
 
@@ -12709,6 +15949,7 @@ const initLightRigPanel = () => {
       if (spec.key === "elevationDeg" || spec.key === "sideDeg") {
         updateKeyLight();
       }
+      refreshTuningExport();
     });
   }
 
@@ -12719,6 +15960,7 @@ const initLightRigPanel = () => {
       renderer.toneMappingExposure = lightDev.exposure;
     }
     updateKeyLight();
+    refreshTuningExport();
   });
 
   syncLightRigSlidersFromState();
@@ -12893,9 +16135,45 @@ const initEnvPanel = () => {
   row.append(label, input, valueLabel, help);
   root.appendChild(row);
 
+  // 段2: 本体の明るさ（彫刻のライトだけ。背景ドームはライトを受けないので暗いまま）
+  const lightRow = document.createElement("div");
+  lightRow.className = "tuning-slider";
+  const lightLabel = document.createElement("button");
+  lightLabel.className = "tuning-slider__label";
+  lightLabel.type = "button";
+  lightLabel.textContent = "本体の明るさ";
+  const lightHelp = document.createElement("div");
+  lightHelp.className = "tuning-slider__help";
+  lightHelp.textContent =
+    "彫刻に当たる光（key/fill/ambient/rim）をまとめて上げ下げする。背景ドームはライトを受けないので暗いまま。" +
+    "Lab の彩度は暗いと出ないので、色を澄ませる目的で上げる。上げ過ぎると白飛びして逆に彩度が落ちる。";
+  lightHelp.hidden = true;
+  const lightInput = document.createElement("input");
+  lightInput.type = "range";
+  lightInput.min = "0.6";
+  lightInput.max = "2.2";
+  lightInput.step = "0.05";
+  lightInput.value = String(sculptureLight.gain);
+  const lightValue = document.createElement("span");
+  lightValue.className = "tuning-slider__value";
+  lightValue.textContent = sculptureLight.gain.toFixed(2);
+  lightRow.append(lightLabel, lightInput, lightValue, lightHelp);
+  root.appendChild(lightRow);
+  lightLabel.addEventListener("click", (event) => {
+    event.preventDefault();
+    lightHelp.hidden = !lightHelp.hidden;
+  });
+  lightInput.addEventListener("input", () => {
+    sculptureLight.gain = Number(lightInput.value);
+    lightValue.textContent = sculptureLight.gain.toFixed(2);
+    refreshTuningExport();
+  });
+
   const syncFromState = () => {
     input.value = String(abyssEnvIntensity);
     valueLabel.textContent = abyssEnvIntensity.toFixed(2);
+    lightInput.value = String(sculptureLight.gain);
+    lightValue.textContent = sculptureLight.gain.toFixed(2);
     if (toggleButton) {
       toggleButton.textContent =
         (abyssEnvEnabled ? toggleButton.dataset.labelOn : toggleButton.dataset.labelOff) ?? "";
@@ -13404,6 +16682,52 @@ const initColorMixPanel = () => {
       reset: DEFAULT_PEARL_MIX_SPREAD,
     },
     {
+      key: "clayChroma" as const,
+      label: "粘土の彩度",
+      help:
+        "「色が濁る」の主因はここだった（2026-08-23 の層別実測: 彩度だけが本体の Lab 彩度を +4.5〜+8.7、" +
+        "他の要素は 1〜3）。1.0 が従来値。明度は上げないので派手ではなく澄む方向に動く。",
+      min: 0.6,
+      max: 2.6,
+      step: 0.05,
+      get: () => clayChroma.gain,
+      set: (v: number) => {
+        clayChroma.gain = v;
+      },
+      reset: DEFAULT_CLAY_CHROMA_GAIN,
+    },
+    {
+      key: "membraneBias" as const,
+      label: "膜への色乗り",
+      help:
+        "膜は本体を覆うので、ここが低いと球体はどの天気でも青緑になる（2026-08-11 案A の値が 0 相当）。" +
+        "上げるほど膜が「その日の色」に染まる。真珠白・電気シアンの芯と glint は残る。",
+      min: 0,
+      max: 1,
+      step: 0.05,
+      get: () => membranePalette.bias,
+      set: (v: number) => {
+        membranePalette.bias = v;
+      },
+      reset: DEFAULT_MEMBRANE_PALETTE_BIAS,
+    },
+    {
+      key: "hueNoise" as const,
+      label: "面内の色相ムラ",
+      min: 0,
+      max: 1.5,
+      step: 0.05,
+      help:
+        "真珠の干渉色のムラ（面内のランダムな色相の振れ）。1.0 が従来値で合計 ±0.35。" +
+        "天気・時刻が画面上で動かす幅（約 0.08）の 4 倍あるので、下げるほど「今日の色」が読めるようになる。" +
+        "彩度・明度のムラには掛からないので、下げても虹色の揺らぎ自体は残る。",
+      get: () => pearlColorMix.hueNoise,
+      set: (v: number) => {
+        pearlColorMix.hueNoise = v;
+      },
+      reset: DEFAULT_PEARL_HUE_NOISE,
+    },
+    {
       key: "balance" as const,
       label: "配分の偏り",
       help: "面内の寒側の面積。負で暖色寄り、正で寒色寄り。曲の明るさ・天気（雲/雨）でも自動で動く。",
@@ -13524,6 +16848,181 @@ const initColorMixPanel = () => {
  * **固定できないと、曲を最後まで聴かないと途中の見た目を確認できない**ので、
  * step 2 以降の追い込みはこのパネルでやる。
  */
+/**
+ * 天気・時刻の色の振れ幅の dev パネル（worklist vita [P1]「初期色が面白くない」）。**vita + dev。**
+ *
+ * 無音で仮値を決めない、というこのプロジェクトの原則どおり、**実機で振って決める**ためのノブ。
+ * 曲を鳴らさずに天気プレビュー・時刻プレビューを振りながら見る（曲の色の幅は別パネル）。
+ */
+/**
+ * 表示の滑らかさ（[P1]）。**vita + dev。** 変形の解像度は変えず、
+ * 表示へ渡す変位だけを平滑する強さを実機で決めるためのノブ。
+ */
+const initSmoothPanel = () => {
+  const panel = document.querySelector<HTMLElement>("#smooth-panel");
+  const root = document.querySelector<HTMLElement>("#smooth-sliders");
+  const resetButton = document.querySelector<HTMLButtonElement>("#reset-smooth");
+  if (!panel || !root || !visualStyle.membrane.vita || !devSurface) return;
+  panel.hidden = false;
+
+  const specs = [
+    {
+      key: "strength" as const,
+      label: "変位の平滑",
+      help: "0 で従来どおり（表示メッシュは変位を線形補間するだけなので、変形メッシュの三角形ごとの折れ目が残る）。実測では隣り合う頂点の変位の食い違いが変位の 13〜18%。",
+      get: () => displaySmooth.strength,
+      set: (v: number) => {
+        displaySmooth.strength = v;
+      },
+      reset: DEFAULT_DISPLAY_SMOOTH,
+    },
+    {
+      key: "keepCrystal" as const,
+      label: "結晶の稜を残す",
+      help: "結晶面の上で平滑を弱める割合。1 で結晶面はまったく平滑しない（稜が最大限残る）。軸 0 の曲では効かない。",
+      get: () => displaySmooth.keepCrystal,
+      set: (v: number) => {
+        displaySmooth.keepCrystal = v;
+      },
+      reset: DEFAULT_DISPLAY_SMOOTH_KEEP_CRYSTAL,
+    },
+  ];
+
+  const inputs = new Map<string, HTMLInputElement>();
+  const valueLabels = new Map<string, HTMLElement>();
+  for (const spec of specs) {
+    const row = document.createElement("div");
+    row.className = "tuning-slider";
+    const label = document.createElement("button");
+    label.className = "tuning-slider__label";
+    label.type = "button";
+    label.textContent = spec.label;
+    const help = document.createElement("div");
+    help.className = "tuning-slider__help";
+    help.textContent = spec.help;
+    help.hidden = true;
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = "0";
+    input.max = "1";
+    input.step = "0.05";
+    input.value = String(spec.get());
+    const valueLabel = document.createElement("span");
+    valueLabel.className = "tuning-slider__value";
+    valueLabel.textContent = spec.get().toFixed(2);
+    row.append(label, input, valueLabel, help);
+    root.appendChild(row);
+    inputs.set(spec.key, input);
+    valueLabels.set(spec.key, valueLabel);
+    label.addEventListener("click", (event) => {
+      event.preventDefault();
+      help.hidden = !help.hidden;
+    });
+    input.addEventListener("input", () => {
+      const value = Number(input.value);
+      spec.set(value);
+      valueLabel.textContent = value.toFixed(2);
+      refreshTuningExport();
+    });
+  }
+
+  resetButton?.addEventListener("click", () => {
+    for (const spec of specs) {
+      spec.set(spec.reset);
+      const input = inputs.get(spec.key);
+      const valueLabel = valueLabels.get(spec.key);
+      if (input) input.value = String(spec.reset);
+      if (valueLabel) valueLabel.textContent = spec.reset.toFixed(2);
+    }
+    refreshTuningExport();
+  });
+};
+
+const initEnvColorPanel = () => {
+  const panel = document.querySelector<HTMLElement>("#envcolor-panel");
+  const root = document.querySelector<HTMLElement>("#envcolor-sliders");
+  const resetButton = document.querySelector<HTMLButtonElement>("#reset-envcolor");
+  if (!panel || !root || !visualStyle.membrane.vita || !devSurface) return;
+  panel.hidden = false;
+
+  const specs = [
+    {
+      key: "weather" as const,
+      label: "天気の振れ幅",
+      help: "晴れ→琥珀寄り / 雨→水色 / 曇り→緑 などの効き。1.0 が従来値。実測では待機時の画面上の色相の広がりが 0.06 しかない。",
+      get: () => envColorGain.weather,
+      set: (v: number) => {
+        envColorGain.weather = v;
+      },
+      reset: DEFAULT_ENV_COLOR_WEATHER_GAIN,
+    },
+    {
+      key: "hour" as const,
+      label: "時刻の振れ幅",
+      help: "深夜→冷たく暗め / 昼→明るく / 夕→暖色 の効き。1.0 が従来値。天気の 1/4 しか動いていない（実測 0.03）。",
+      get: () => envColorGain.hour,
+      set: (v: number) => {
+        envColorGain.hour = v;
+      },
+      reset: DEFAULT_ENV_COLOR_HOUR_GAIN,
+    },
+  ];
+
+  const valueLabels = new Map<string, HTMLElement>();
+  const inputs = new Map<string, HTMLInputElement>();
+  for (const spec of specs) {
+    const row = document.createElement("div");
+    row.className = "tuning-slider";
+    const label = document.createElement("button");
+    label.className = "tuning-slider__label";
+    label.type = "button";
+    label.textContent = spec.label;
+    const help = document.createElement("div");
+    help.className = "tuning-slider__help";
+    help.textContent = spec.help;
+    help.hidden = true;
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = "0";
+    input.max = "5";
+    input.step = "0.1";
+    input.value = String(spec.get());
+    const valueLabel = document.createElement("span");
+    valueLabel.className = "tuning-slider__value";
+    valueLabel.textContent = spec.get().toFixed(1);
+    row.append(label, input, valueLabel, help);
+    root.appendChild(row);
+    inputs.set(spec.key, input);
+    valueLabels.set(spec.key, valueLabel);
+    label.addEventListener("click", (event) => {
+      event.preventDefault();
+      help.hidden = !help.hidden;
+    });
+    input.addEventListener("input", () => {
+      const value = Number(input.value);
+      spec.set(value);
+      valueLabel.textContent = value.toFixed(1);
+      // 天気・時刻の再適用（プレビュー中でも実天気でも同じ経路）
+      applyLiveWeatherToScene();
+      syncDaytimeEnvironmentTargets();
+      refreshTuningExport();
+    });
+  }
+
+  resetButton?.addEventListener("click", () => {
+    for (const spec of specs) {
+      spec.set(spec.reset);
+      const input = inputs.get(spec.key);
+      const valueLabel = valueLabels.get(spec.key);
+      if (input) input.value = String(spec.reset);
+      if (valueLabel) valueLabel.textContent = spec.reset.toFixed(1);
+    }
+    applyLiveWeatherToScene();
+    syncDaytimeEnvironmentTargets();
+    refreshTuningExport();
+  });
+};
+
 const initMaturityPanel = () => {
   const panel = document.querySelector<HTMLElement>("#maturity-panel");
   const root = document.querySelector<HTMLElement>("#maturity-sliders");
@@ -13572,6 +17071,7 @@ const initMaturityPanel = () => {
     if (overrideOn) {
       maturityMix.override = overrideValue;
     }
+    refreshTuningExport();
   });
 
   const syncToggle = () => {
@@ -13586,6 +17086,7 @@ const initMaturityPanel = () => {
     overrideOn = !overrideOn;
     maturityMix.override = overrideOn ? overrideValue : -1;
     syncToggle();
+    refreshTuningExport();
   });
 
   resetButton?.addEventListener("click", () => {
@@ -13596,9 +17097,448 @@ const initMaturityPanel = () => {
     input.value = String(overrideValue);
     valueLabel.textContent = overrideValue.toFixed(2);
     syncToggle();
+    refreshTuningExport();
   });
 
   syncToggle();
+};
+
+
+/**
+ * 主旋律チャンネル（段A1）の dev パネル。
+ * **2026-08-25 に新設。** それまで index.html に #voice-panel の箱だけがあり、
+ * #voice-sliders は一度も埋められていなかった（A1 下書きの取りこぼし）。
+ * 実機で追い込めないと仮値のまま外すので、判定より先にここを塞ぐ。
+ * 値は `.cursor/rules/dev-tuning-copy.mdc` どおり DevTuningExport.voice に載る。
+ */
+const initVoicePanel = () => {
+  const panel = document.querySelector<HTMLElement>("#voice-panel");
+  const root = document.querySelector<HTMLElement>("#voice-sliders");
+  const resetButton = document.querySelector<HTMLButtonElement>("#reset-voice");
+  if (!panel || !root || !visualStyle.membrane.vita || !devSurface) return;
+  panel.hidden = false;
+
+  // 検出が出ているかを数値で出す。**見えないと「検出が無い」のか「表示が弱い」のか
+  // 切り分けられない**（2026-08-24 の A0 で一度これに時間を溶かしている）。
+  const readout = document.createElement("div");
+  readout.className = "tuning-slider__help";
+  root.appendChild(readout);
+  const refreshReadout = () => {
+    readout.textContent =
+      `presence ${liveDebug.melodyPresence.toFixed(2)}` +
+      ` / head ${liveDebug.melodyHead.toFixed(2)}` +
+      ` / 抑揚 ${liveDebug.melodyContour.toFixed(2)}` +
+      ` / 駆動 ${liveDebug.contourDrive.toFixed(2)}` +
+      ` ｜ **句 ${liveDebug.phraseAmp.toFixed(2)} / 句頭 ${liveDebug.voiceHead.toFixed(2)} / 隆起 ${liveDebug.bulgeDisp.toFixed(3)}**` +
+      ` / mid遮断 ${liveDebug.voicedMidBlocked ? "ON" : "off"}` +
+      ` ｜ 打点 ${liveDebug.pulseDisp.toFixed(3)} / 径波 ${liveDebug.waveDisp.toFixed(3)}` +
+      ` / 接線流 ${liveDebug.flowDisp.toFixed(3)}`;
+    requestAnimationFrame(refreshReadout);
+  };
+  refreshReadout();
+
+  const inputsByKey = new Map<
+    string,
+    {
+      input: HTMLInputElement;
+      valueLabel: HTMLSpanElement;
+      spec: { set: (v: number) => void; reset: number };
+    }
+  >();
+
+  const specs = [
+    {
+      key: "sense" as const,
+      label: "検出感度（拾う句の量）",
+      help:
+        "主旋律の線をどれだけ拾うか。上げると句が増えるが、伴奏まで句として拾い始める。" +
+        "上の presence / head を見ながら決める（head が出ていないなら表示ではなく検出の問題）。",
+      min: 0.2,
+      max: 3,
+      step: 0.05,
+      get: () => voiceTuning.sense,
+      set: (v: number) => {
+        voiceTuning.sense = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "bulge" as const,
+      label: "膜の流れ（句中・声／ソロ）",
+      help:
+        "句方向へ**膜表面が滑る**量（粘土の法線パルスとは別）。声・ギターソロ用。" +
+        "ドラムは内側の粘土が担う。",
+      min: 0,
+      max: 3,
+      step: 0.05,
+      get: () => voiceTuning.bulge,
+      set: (v: number) => {
+        voiceTuning.bulge = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "contour" as const,
+      label: "句中抑揚 → 膜（Phase 1）",
+      help:
+        "歌の**強弱・音節**（contour）が膜の流れの振幅に効く倍率。" +
+        "presence は「歌っているか」、contour は「句の中で浮いているか」。" +
+        "上の 抑揚 が動いているのに膜が平坦ならここを上げる。",
+      min: 0,
+      max: 3,
+      step: 0.05,
+      get: () => voiceTuning.contour,
+      set: (v: number) => {
+        voiceTuning.contour = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "stretch" as const,
+      label: "膜の句頭パフ",
+      help:
+        "句頭の一瞬だけ、句方向側の**膜**が法線方向へ膨らむ量（0.2〜0.4 秒で消える）。" +
+        "句中の持続は「膜の隆起」が担う。キック／スネアとは別経路。",
+      min: 0,
+      max: 3,
+      step: 0.05,
+      get: () => voiceTuning.stretch,
+      set: (v: number) => {
+        voiceTuning.stretch = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "phraseLife" as const,
+      label: "句の長さ（うねって見えたらここ）",
+      help:
+        "1 つの句がどれだけ続くか（既定 2 秒の倍率）。句頭は 5〜10 秒に 1 回なので、" +
+        "短いほど**休みが長くなり「句」として読める**。長いと出っぱなしになって" +
+        "常時うねりに見える（2026-08-28 の実機判定の原因がこれ）。" +
+        "**うねって見えたら、伸びの強さより先にここを下げる。**",
+      min: 0.2,
+      max: 2.5,
+      step: 0.05,
+      get: () => voiceTuning.phraseLife,
+      set: (v: number) => {
+        voiceTuning.phraseLife = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "bend" as const,
+      label: "撓みの強さ",
+      help:
+        "伸びた体が端ほど大きく曲がる量。0 にすると真っ直ぐ伸びるだけで機械的に見える。" +
+        "曲がる向きはゆっくり回るので、毎回同じ方向にはならない。",
+      min: 0,
+      max: 3,
+      step: 0.05,
+      get: () => voiceTuning.bend,
+      set: (v: number) => {
+        voiceTuning.bend = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "flowAmp" as const,
+      label: "接線流の強さ（既定 0・2026-08-25 に不採用）",
+      help:
+        "体表が波源から横へ滑る量。**実機で「全くわからない」と判定され、既定 0 にした。**" +
+        "接線移動は表面を貼り直すだけで、vita には運ぶもの（動く模様）が無いため、" +
+        "ノブ最大でも見え方が変わらないことを実測済み。上げても無駄なので触らなくてよい。",
+      min: 0,
+      max: 4,
+      step: 0.05,
+      get: () => voiceTuning.flowAmp,
+      set: (v: number) => {
+        voiceTuning.flowAmp = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "bandOpen" as const,
+      label: "膜を透かす量（副役・痕跡）",
+      help:
+        "句が通ったところで膜のアルファを下げる。**中音打点と混ざりやすいので主役ではない**（2026-08-29）。" +
+        "動きは「局所隆起」と「句頭スナップ」で読む。0 で無効。",
+      min: 0,
+      max: 3,
+      step: 0.05,
+      get: () => voiceTuning.bandOpen,
+      set: (v: number) => {
+        voiceTuning.bandOpen = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "waveAmp" as const,
+      label: "径の波の強さ（補助・痕跡）",
+      help:
+        "法線方向の波。打点と同じチャンネルなので密な曲では見えないが、" +
+        "liveOffset を経由する唯一の経路＝**完成形に声の痕跡を残すのはこれ**。" +
+        "接線流とは 90° 位相差で組になり、合わせて表面波になる。0 にすると痕跡が消える。",
+      min: 0,
+      max: 3,
+      step: 0.05,
+      get: () => voiceTuning.waveAmp,
+      set: (v: number) => {
+        voiceTuning.waveAmp = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "waveSpeed" as const,
+      label: "波の速さ",
+      help: "波・接線流が体表を巡る速さ。速いと粒立ち、遅いとうねる。両方に同じ値が効く。",
+      min: 0.2,
+      max: 3,
+      step: 0.05,
+      get: () => voiceTuning.waveSpeed,
+      set: (v: number) => {
+        voiceTuning.waveSpeed = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "bandGain" as const,
+      label: "帯の発光（残り）",
+      help:
+        "帯の白い加算発光。2026-08-25 に主役を降りた（打点フラッシュと同じ土俵で負けるため）。" +
+        "帯の先端が水面のように光を拾うぶんだけ残してある。上げると旧実装に戻る。",
+      min: 0,
+      max: 3,
+      step: 0.05,
+      get: () => voiceTuning.bandGain,
+      set: (v: number) => {
+        voiceTuning.bandGain = v;
+      },
+      reset: 1,
+    },
+  ];
+
+  for (const spec of specs) {
+    const row = document.createElement("div");
+    row.className = "tuning-slider";
+    const label = document.createElement("button");
+    label.className = "tuning-slider__label";
+    label.type = "button";
+    label.textContent = spec.label;
+    const help = document.createElement("div");
+    help.className = "tuning-slider__help";
+    help.textContent = spec.help;
+    help.hidden = true;
+    help.id = `voice-help-${spec.key}`;
+    label.setAttribute("aria-expanded", "false");
+    label.setAttribute("aria-controls", help.id);
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = String(spec.min);
+    input.max = String(spec.max);
+    input.step = String(spec.step);
+    input.value = String(spec.get());
+    const valueLabel = document.createElement("span");
+    valueLabel.className = "tuning-slider__value";
+    valueLabel.textContent = spec.get().toFixed(2);
+    row.append(label, input, valueLabel, help);
+    root.appendChild(row);
+
+    label.addEventListener("click", (event) => {
+      event.preventDefault();
+      const next = help.hidden;
+      help.hidden = !next;
+      label.setAttribute("aria-expanded", next ? "true" : "false");
+    });
+
+    input.addEventListener("input", () => {
+      const value = Number(input.value);
+      spec.set(value);
+      valueLabel.textContent = value.toFixed(2);
+      refreshTuningExport();
+    });
+
+    inputsByKey.set(spec.key, { input, valueLabel, spec });
+  }
+
+  resetButton?.addEventListener("click", () => {
+    for (const [, entry] of inputsByKey) {
+      entry.spec.set(entry.spec.reset);
+      entry.input.value = String(entry.spec.reset);
+      entry.valueLabel.textContent = entry.spec.reset.toFixed(2);
+    }
+    refreshTuningExport();
+  });
+};
+
+/**
+ * 段A3 遊泳の地の dev パネル。
+ * 旧うねりに見えたら「振幅」を 0。値は DevTuningExport.swim に載る。
+ */
+const initSwimPanel = () => {
+  const panel = document.querySelector<HTMLElement>("#swim-panel");
+  const root = document.querySelector<HTMLElement>("#swim-sliders");
+  const resetButton = document.querySelector<HTMLButtonElement>("#reset-swim");
+  if (!panel || !root || !visualStyle.membrane.vita || !devSurface) return;
+  panel.hidden = false;
+
+  const readout = document.createElement("div");
+  readout.className = "tuning-slider__help";
+  root.appendChild(readout);
+  const refreshReadout = () => {
+    readout.textContent =
+      `swimAmp ${liveDebug.swimAmp.toFixed(4)}` +
+      ` / duck ${liveDebug.swimDuck.toFixed(2)}` +
+      ` / field ${liveDebug.swimField.toFixed(4)}` +
+      ` / phase ${liveDebug.swimPhase.toFixed(1)}`;
+    requestAnimationFrame(refreshReadout);
+  };
+  refreshReadout();
+
+  const inputsByKey = new Map<
+    string,
+    {
+      input: HTMLInputElement;
+      valueLabel: HTMLSpanElement;
+      spec: { set: (v: number) => void; reset: number };
+    }
+  >();
+
+  const specs = [
+    {
+      key: "amp" as const,
+      label: "遊泳の振幅",
+      help:
+        "体スケールのマントル進行波の強さ。0 で A3 off（旧うねりに見えたらここを 0）。" +
+        "打点と同じ liveOffset には入れない。永久層にも刻まない。",
+      min: 0,
+      max: 2.5,
+      step: 0.05,
+      get: () => swimTuning.amp,
+      set: (v: number) => {
+        swimTuning.amp = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "speed" as const,
+      label: "遊泳の速さ（拍同期）",
+      help: "BPM に対するうねり回数の倍率。速いと忙しない＝旧うねりに寄る。遅いほど生き物の泳ぎ。",
+      min: 0.2,
+      max: 2.5,
+      step: 0.05,
+      get: () => swimTuning.speed,
+      set: (v: number) => {
+        swimTuning.speed = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "waves" as const,
+      label: "体を一周する波の数",
+      help: "1 前後＝体スケール。上げると表面ノイズに見える（旧うねり側）。",
+      min: 0.4,
+      max: 3,
+      step: 0.05,
+      get: () => swimTuning.waves,
+      set: (v: number) => {
+        swimTuning.waves = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "duck" as const,
+      label: "打点での退き（duck）",
+      help: "キック／スネア／句頭のとき遊泳が退く量。打点が薄いと感じたら上げる。",
+      min: 0,
+      max: 1.5,
+      step: 0.05,
+      get: () => swimTuning.duck,
+      set: (v: number) => {
+        swimTuning.duck = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "sway" as const,
+      label: "体の姿勢揺れ",
+      help: "group の微少回転。泳ぎの向きが変わる感じ。大きすぎるとカメラ酔い。",
+      min: 0,
+      max: 2.5,
+      step: 0.05,
+      get: () => swimTuning.sway,
+      set: (v: number) => {
+        swimTuning.sway = v;
+      },
+      reset: 1,
+    },
+    {
+      key: "membrane" as const,
+      label: "膜リングへの載せ",
+      help: "水膜の同心円を遊泳位相で流す量。0 でコア遊泳のみ。",
+      min: 0,
+      max: 2.5,
+      step: 0.05,
+      get: () => swimTuning.membrane,
+      set: (v: number) => {
+        swimTuning.membrane = v;
+      },
+      reset: 1,
+    },
+  ];
+
+  for (const spec of specs) {
+    const row = document.createElement("div");
+    row.className = "tuning-slider";
+    const label = document.createElement("button");
+    label.className = "tuning-slider__label";
+    label.type = "button";
+    label.textContent = spec.label;
+    const help = document.createElement("div");
+    help.className = "tuning-slider__help";
+    help.textContent = spec.help;
+    help.hidden = true;
+    help.id = `swim-help-${spec.key}`;
+    label.setAttribute("aria-expanded", "false");
+    label.setAttribute("aria-controls", help.id);
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = String(spec.min);
+    input.max = String(spec.max);
+    input.step = String(spec.step);
+    input.value = String(spec.get());
+    const valueLabel = document.createElement("span");
+    valueLabel.className = "tuning-slider__value";
+    valueLabel.textContent = spec.get().toFixed(2);
+    row.append(label, input, valueLabel, help);
+    root.appendChild(row);
+
+    label.addEventListener("click", (event) => {
+      event.preventDefault();
+      const next = help.hidden;
+      help.hidden = !next;
+      label.setAttribute("aria-expanded", next ? "true" : "false");
+    });
+
+    input.addEventListener("input", () => {
+      const value = Number(input.value);
+      spec.set(value);
+      valueLabel.textContent = value.toFixed(2);
+      refreshTuningExport();
+    });
+
+    inputsByKey.set(spec.key, { input, valueLabel, spec });
+  }
+
+  resetButton?.addEventListener("click", () => {
+    for (const [, entry] of inputsByKey) {
+      entry.spec.set(entry.spec.reset);
+      entry.input.value = String(entry.spec.reset);
+      entry.valueLabel.textContent = entry.spec.reset.toFixed(2);
+    }
+    refreshTuningExport();
+  });
+
+  refreshTuningExport();
 };
 
 const initMineralPanel = () => {
@@ -13824,6 +17764,7 @@ const initMineralPanel = () => {
       const value = Number(input.value);
       spec.set(value);
       valueLabel.textContent = value.toFixed(2);
+      refreshTuningExport();
     });
   }
 
@@ -13831,6 +17772,7 @@ const initMineralPanel = () => {
     overrideOn = !overrideOn;
     mineralMix.axisOverride = overrideOn ? overrideValue : -1;
     syncToggle();
+    refreshTuningExport();
   });
 
   resetButton?.addEventListener("click", () => {
@@ -13854,10 +17796,20 @@ const initMineralPanel = () => {
       if (valueLabel) valueLabel.textContent = spec.reset.toFixed(2);
     }
     syncToggle();
+    refreshTuningExport();
   });
 
   syncToggle();
 };
+
+// [P0] LIVE の動きの読み出し（`live_motion_probe.js`）。dev だけ。**消さないこと。**
+if (devSurface) {
+  (window as unknown as { __clay?: typeof clayDebug }).__clay = clayDebug;
+  (window as unknown as { __live?: typeof liveDebug }).__live = liveDebug;
+  (window as unknown as { __liveProbe?: typeof liveProbe }).__liveProbe = liveProbe;
+  (window as unknown as { __voiceGlassDiag?: typeof voiceGlassDiag }).__voiceGlassDiag =
+    voiceGlassDiag;
+}
 
 initBloomPanel();
 initEnvPanel();
@@ -13865,8 +17817,12 @@ initGrainPanel();
 initMembraneRelaxPanel();
 initSongColorPanel();
 initColorMixPanel();
+initSmoothPanel();
+initEnvColorPanel();
 initMaturityPanel();
 initMineralPanel();
+initVoicePanel();
+initSwimPanel();
 initCapturePanel();
 updateKeyLight();
 render();

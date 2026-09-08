@@ -170,6 +170,8 @@ uniform vec3 uGemPlanesWorld[${GEM_FACET_COUNT}];
 float gGemMask;
 /** 面の境界（稜）0..1 */
 float gGemRidge;
+/** 面境界のギャップ（gGemMask 無し。帯ガラス稜用） */
+float gFacetGap;
 /** その面の法線（ビュー空間） */
 vec3 gGemFaceView;
 /** 面ごとの分散色（uGemFire で白へ寄せてある） */
@@ -196,6 +198,7 @@ vec3 gemHash33(vec3 p) {
 void gemResolveFace() {
   gGemMask = 0.0;
   gGemRidge = 0.0;
+  gFacetGap = 0.0;
   gGemFaceView = vec3(0.0, 0.0, 1.0);
   gGemFire = vec3(1.0);
   gGemFaceObj = vec3(0.0, 0.0, 1.0);
@@ -239,6 +242,7 @@ void gemResolveFace() {
   // 面の境界だけ隣の面のフラグと混ぜて、結晶↔生物の境目がジャギらないようにする
   float blend = smoothstep(0.0, 0.035, gap);
   float flag = mix(mix(best.w, f2, 0.5), best.w, blend);
+  gFacetGap = 1.0 - smoothstep(0.0, 0.016, gap);
   gGemMask = clamp(flag * uGem, 0.0, 1.0);
   // 稜は**細く鋭く**（2026-08-18: 0.022 → 0.011）。太い白線は金属の面取りに見える。
   gGemRidge = (1.0 - smoothstep(0.0, 0.011, gap)) * gGemMask;
@@ -376,25 +380,36 @@ if (gGemMask > 0.001) {
 export const GEM_MEMBRANE_FRAGMENT = /* glsl */ `
 {
   gemResolveFace();
-  float gemM = gGemMask;
+  float gemCrystal = gGemMask;
+  float gemVoice = max(0.0, clamp(voiceGlassBoost, 0.0, 0.88) - gemCrystal * 0.15);
+  float gemM = max(gemCrystal, clamp(voiceGlassBoost, 0.0, 0.88));
   if (gemM > 0.001) {
     vec3 gemV = normalize(-vViewPosition);
-    vec3 gemN = normalize(mix(normalize(vNormal), gGemFaceView, gemM * uGemFlatten));
+    float voiceFlat = max(gemM, gemVoice * 0.88) * uGemFlatten;
+    vec3 gemN = normalize(mix(normalize(vNormal), gGemFaceView, voiceFlat));
     float gemNV = max(dot(gemN, gemV), 0.0);
     vec3 gemL1 = normalize(vec3(0.35, 0.75, 0.55));
-    // 平らな板の鏡面（面ごとに一枚ずつ光る）
-    float gemSpec = pow(max(dot(gemN, normalize(gemL1 + gemV)), 0.0), 60.0);
-    // 稜（板の縁）と、板の縁のフレネル
+    float gemSpec = pow(max(dot(gemN, normalize(gemL1 + gemV)), 0.0), 48.0);
     float gemEdge = gGemRidge;
     vec3 gemGlass = mix(vec3(0.88, 0.95, 1.0), gGemFire, 0.5);
-    // **結晶の板は「白く盛る」のではなく「透かす」。** 乳白色の膜が被さったままだと
-    // 下の宝石が見えない（2026-08-12 に実際そうなった）。板の面は薄くして芯を見せ、
-    // 稜と鏡面だけを鋭く出す＝水晶の板。
-    color = mix(color, color * 0.5, gemM * 0.8);
+    color = mix(color, color * 0.5, gemCrystal * 0.8);
     color += gemGlass * (gemSpec * 1.35 + gemEdge * uGemRidge * 0.7
-      + pow(1.0 - gemNV, 4.0) * 0.45) * gemM * uGemSparkle;
-    alpha *= mix(1.0, 0.45, gemM);
-    alpha += (gemSpec * 0.22 + gemEdge * 0.14) * gemM;
+      + pow(1.0 - gemNV, 4.0) * 0.45) * gemCrystal * uGemSparkle;
+    alpha *= mix(1.0, 0.45, gemCrystal);
+    alpha += (gemSpec * 0.22 + gemEdge * 0.14) * gemCrystal;
+    // 帯由来の先行ガラス: 平ら＋**稜線**（gFacetGap）。板内は水波紋より滑らか。
+    if (gemVoice > 0.001) {
+      float plateAlign = smoothstep(0.18, 0.62, dot(gGemFaceObj, normalize(uVoiceDir)));
+      float plate = gemVoice * max(plateAlign, 0.42);
+      float plateInterior = plate * (1.0 - gFacetGap * 0.92);
+      float voiceRim = pow(1.0 - gemNV, 2.2);
+      float voiceRidgeLine = gFacetGap * plate * (0.55 + 0.45 * (1.0 - gemCrystal));
+      color = mix(color, vec3(0.46, 0.56, 0.66), plateInterior * 0.48);
+      color += vec3(0.74, 0.86, 0.95) * voiceRim * 0.18 * plateInterior;
+      color += vec3(0.82, 0.91, 0.97) * voiceRidgeLine * uGemRidge * 1.85;
+      alpha = max(alpha, plateInterior * 0.58 + voiceRidgeLine * 0.34);
+      color = min(color, vec3(0.94));
+    }
   }
 }
 `;

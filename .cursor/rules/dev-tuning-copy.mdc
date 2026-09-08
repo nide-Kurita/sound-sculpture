@@ -1,0 +1,30 @@
+---
+description: 開発チューニングパネルの値は必ず「調整結果（コピー用）」に載せる
+alwaysApply: true
+---
+
+# 開発チューニングは必ずコピーできるようにする
+
+Settings の **開発チューニング**（`#dev-tuning-group`）にスライダー・トグル・数値ノブを足したら、
+**同じ変更で**「調整結果（コピー用）」にも載せる。後回しにしない。
+
+ユーザーはパネルで追い込んだ値をコピーしてエージェントに渡す。載っていないと焼き込みを忘れる。
+
+## やる場所（2つセット）
+
+1. `src/sculpture-tuning.ts` の `DevTuningExport` にフィールドを足し、
+   `formatSculptureTuningForAgent` が JSON ブロックを出す。
+2. `src/main.ts` の `refreshTuningExport()` が **いまのパネル値** を渡す。
+   そのパネルの `input` / toggle / reset から `refreshTuningExport()` を呼ぶ。
+
+キャプチャボタンなど「値ではない UI」はコピーに入れない。
+
+## 書いてよいこと
+
+- 焼き込み先（`DEFAULT_*` や `visual-style.ts` のどの値か）
+- 診断用の値なら、焼かない旨（例: 熟成度 override、音色軸は曲の値）
+
+## やってはいけないこと
+
+- パネルだけ足してコピーを忘れる
+- コピー文面をチャットや handoff だけに書く（正本は `formatSculptureTuningForAgent`）

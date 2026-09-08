@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!--
+    Sound Sculpture favicon
+    色は ?style=monolith を AM4:00 で撮った実画面から採った（2026-09-08）。
+    背景 #121214〜#17181a（夜明け前の空。真っ黒にしない）
+    球   #efefeb ハイライト → #ecede9 中央 → #cfd0c7 陰
+  -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#17181b"/>
+      <stop offset="1" stop-color="#101013"/>
+    </linearGradient>
+    <radialGradient id="stone" cx="0.36" cy="0.30" r="0.82">
+      <stop offset="0" stop-color="#f4f4f0"/>
+      <stop offset="0.45" stop-color="#eceee9"/>
+      <stop offset="0.78" stop-color="#dedfd7"/>
+      <stop offset="1" stop-color="#c9cac1"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" fill="url(#sky)"/>
+  <circle cx="32" cy="32" r="21" fill="url(#stone)"/>
+</svg>

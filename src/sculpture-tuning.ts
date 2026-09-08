@@ -276,11 +276,14 @@ export type MembraneRelaxTuningSnapshot = {
   strength: number;
 };
 
-/** vita の面内混色（`main.ts` の pearlColorMix）の現在値 */
+/** vita の面内混色（`main.ts` の pearlColorMix / clayChroma / membranePalette）の現在値 */
 export type PearlColorMixTuningSnapshot = {
   enabled: boolean;
   spread: number;
   balance: number;
+  hueNoise: number;
+  clayChroma: number;
+  membraneBias: number;
 };
 
 /**
@@ -298,91 +301,123 @@ export type GemTuningSnapshot = {
   sparkle: number;
   through: number;
   fire: number;
+  vein: number;
+  haze: number;
+  disperse: number;
 };
+
+/** DEV 光源リグ（`main.ts` の lightDev。焼き込み先は visual-style の env） */
+export type LightRigTuningSnapshot = {
+  key: number;
+  fill: number;
+  softFill: number;
+  ambient: number;
+  rim: number;
+  exposure: number;
+  elevationDeg: number;
+  sideDeg: number;
+  /**
+   * 本体の明るさの倍率（`main.ts` の `sculptureLight.gain`。
+   * 焼き込み先は `DEFAULT_SCULPTURE_LIGHT_GAIN`）。
+   * 上の key/fill/ambient/rim にまとめて掛かる。背景ドームには効かない。
+   */
+  sculptureGain?: number;
+};
+
+/** 表示の滑らかさ（`main.ts` の DEFAULT_DISPLAY_SMOOTH_*） */
+export type DisplaySmoothTuningSnapshot = {
+  strength: number;
+  keepCrystal: number;
+};
+
+/** 天気・時刻の色の振れ幅（`clay-color.ts` の DEFAULT_ENV_COLOR_*_GAIN） */
+export type EnvColorTuningSnapshot = {
+  weatherGain: number;
+  hourGain: number;
+};
+
+/** 熟成度パネル。override は診断用で DEFAULT には焼かない。current はいま効いている値。 */
+export type MaturityTuningSnapshot = {
+  override: boolean;
+  overrideValue: number;
+  current: number;
+};
+
+/**
+ * 主旋律チャンネル（vita 段A1・main.ts の DEFAULT_* への倍率）。
+ * 焼き込み先: sense → DEFAULT_MELODY_LINE_SENSE / stretch → DEFAULT_VOICE_STRETCH /
+ * bend → DEFAULT_VOICE_BEND /
+ * bulge → DEFAULT_PHRASE_FLOW_AMP（膜の流れ） /
+ * contour → DEFAULT_VOICE_CONTOUR_GAIN /
+ * phraseLife → PHRASE_HOLD・PHRASE_LIFE /
+ * flowAmp → DEFAULT_PHRASE_FLOW_AMP /
+ * bandOpen → DEFAULT_VOICE_BAND_OPEN / waveAmp → DEFAULT_PHRASE_WAVE_AMP /
+ * waveSpeed → DEFAULT_PHRASE_WAVE_SPEED / bandGain → DEFAULT_VOICE_BAND_GAIN。
+ * 2026-08-25 に flowAmp（接線流＝声の本線）と bandOpen（膜を透かす）を追加。
+ */
+export type VoiceTuningSnapshot = {
+  sense: number;
+  /** 2026-08-29 → 2026-08-31 膜の隆起（句中） */
+  stretch: number;
+  bend: number;
+  /** 膜の隆起倍率（句中の法線膨らみ＋句方向押し出し） */
+  bulge: number;
+  /** 句中抑揚（contour）→ 膜振幅（Phase 1） */
+  contour: number;
+  /** 2026-08-28 句の長さの倍率。うねって見えたらまずここ */
+  phraseLife: number;
+  /** 2026-08-25 に不採用。既定 0（実機で見えないと確定） */
+  flowAmp: number;
+  bandOpen: number;
+  waveAmp: number;
+  waveSpeed: number;
+  bandGain: number;
+};
+
+/**
+ * 段A3 遊泳の地。焼き込み先: DEFAULT_SWIM_*（main.ts）。
+ * 旧うねりに見えたら amp を 0 へ（bleed しない表示専用チャンネル）。
+ */
+export type SwimTuningSnapshot = {
+  amp: number;
+  speed: number;
+  waves: number;
+  duck: number;
+  sway: number;
+  membrane: number;
+};
+
+/**
+ * `#dev-tuning-group` のパネル値。スライダーを足したらここにフィールドを足す。
+ * キャプチャボタンなど「値ではない UI」は入れない。
+ */
+export type DevTuningExport = {
+  bloom?: BloomTuningSnapshot | null;
+  environment?: EnvTuningSnapshot | null;
+  clayGrain?: ClayGrainTuningSnapshot | null;
+  songColor?: SongColorTuningSnapshot | null;
+  membraneRelax?: MembraneRelaxTuningSnapshot | null;
+  pearlColorMix?: PearlColorMixTuningSnapshot | null;
+  gem?: GemTuningSnapshot | null;
+  lightRig?: LightRigTuningSnapshot | null;
+  displaySmooth?: DisplaySmoothTuningSnapshot | null;
+  envColor?: EnvColorTuningSnapshot | null;
+  maturity?: MaturityTuningSnapshot | null;
+  voice?: VoiceTuningSnapshot | null;
+  swim?: SwimTuningSnapshot | null;
+};
+
+const jsonBlock = (title: string, value: object | null | undefined, note?: string) =>
+  value == null
+    ? []
+    : ["", title, ...(note ? [note] : []), "", "```json", JSON.stringify(value, null, 2), "```"];
 
 export const formatSculptureTuningForAgent = (
   knobs: SculptureTuning = sculptureTuning,
   runtime: RuntimeSculptureTuning = runtimeTuning,
   growthAlgorithm = "fibonacci",
-  bloom: BloomTuningSnapshot | null = null,
-  environment: EnvTuningSnapshot | null = null,
-  clayGrain: ClayGrainTuningSnapshot | null = null,
-  songColor: SongColorTuningSnapshot | null = null,
-  membraneRelax: MembraneRelaxTuningSnapshot | null = null,
-  pearlColorMix: PearlColorMixTuningSnapshot | null = null,
-  gem: GemTuningSnapshot | null = null,
+  extra: DevTuningExport = {},
 ) => {
-  const bloomLines = bloom
-    ? [
-        "",
-        "ブルーム（vita・bloom-pass.ts の DEFAULT_BLOOM_* へ焼き込む値）:",
-        "",
-        "```json",
-        JSON.stringify(bloom, null, 2),
-        "```",
-      ]
-    : [];
-  const environmentLines = environment
-    ? [
-        "",
-        "映り込み（vita・visual-style.ts の VITA.env.envMapIntensity へ焼き込む値）:",
-        "",
-        "```json",
-        JSON.stringify(environment, null, 2),
-        "```",
-      ]
-    : [];
-  const clayGrainLines = clayGrain
-    ? [
-        "",
-        "粘土の肌理（vita・clay-grain.ts の DEFAULT_CLAY_GRAIN_* へ焼き込む値）:",
-        "",
-        "```json",
-        JSON.stringify(clayGrain, null, 2),
-        "```",
-      ]
-    : [];
-  const songColorLines = songColor
-    ? [
-        "",
-        "曲の色の幅（audio-palette.ts の DEFAULT_SONG_*_SPAN へ焼き込む値）:",
-        "",
-        "```json",
-        JSON.stringify(songColor, null, 2),
-        "```",
-      ]
-    : [];
-  const membraneRelaxLines = membraneRelax
-    ? [
-        "",
-        "膜の折り重なり（vita・main.ts の DEFAULT_MEMBRANE_RELAX_* へ焼き込む値）:",
-        "",
-        "```json",
-        JSON.stringify(membraneRelax, null, 2),
-        "```",
-      ]
-    : [];
-  const pearlColorMixLines = pearlColorMix
-    ? [
-        "",
-        "混色の広がり（vita・main.ts の DEFAULT_PEARL_MIX_* へ焼き込む値）:",
-        "",
-        "```json",
-        JSON.stringify(pearlColorMix, null, 2),
-        "```",
-      ]
-    : [];
-  const gemLines = gem
-    ? [
-        "",
-        "宝石の面（vita・gem-material.ts の DEFAULT_GEM_* へ焼き込む値）:",
-        "**axis は鳴らしていた曲の音色軸。0 なら結晶の面が1枚も無いので、何を上げても出ない。**",
-        "",
-        "```json",
-        JSON.stringify(gem, null, 2),
-        "```",
-      ]
-    : [];
   const lines = [
     "Sound Sculpture — 開発チューニング（AI agent 用）",
     "",
@@ -409,13 +444,59 @@ export const formatSculptureTuningForAgent = (
     "- mineral: 棘・結晶",
     "",
     `スライダー中央 F₈/F₉ ≈ ${FIB_SLIDER_DEFAULT.toFixed(3)} で従来の既定挙動。`,
-    ...bloomLines,
-    ...environmentLines,
-    ...clayGrainLines,
-    ...songColorLines,
-    ...membraneRelaxLines,
-    ...pearlColorMixLines,
-    ...gemLines,
+    ...jsonBlock(
+      "光源（DEV・visual-style.ts の VITA.env ライト値へ焼き込む目安）:",
+      extra.lightRig ?? null,
+    ),
+    ...jsonBlock(
+      "ブルーム（vita・bloom-pass.ts の DEFAULT_BLOOM_* へ焼き込む値）:",
+      extra.bloom ?? null,
+    ),
+    ...jsonBlock(
+      "映り込み（vita・visual-style.ts の VITA.env.envMapIntensity へ焼き込む値）:",
+      extra.environment ?? null,
+    ),
+    ...jsonBlock(
+      "粘土の肌理（vita・clay-grain.ts の DEFAULT_CLAY_GRAIN_* へ焼き込む値）:",
+      extra.clayGrain ?? null,
+    ),
+    ...jsonBlock(
+      "膜の折り重なり（vita・main.ts の DEFAULT_MEMBRANE_RELAX_* へ焼き込む値）:",
+      extra.membraneRelax ?? null,
+    ),
+    ...jsonBlock(
+      "曲の色の幅（audio-palette.ts の DEFAULT_SONG_*_SPAN へ焼き込む値）:",
+      extra.songColor ?? null,
+    ),
+    ...jsonBlock(
+      "混色の広がり（vita・main.ts の DEFAULT_PEARL_MIX_* / DEFAULT_CLAY_CHROMA_GAIN / DEFAULT_MEMBRANE_PALETTE_BIAS へ焼き込む値）:",
+      extra.pearlColorMix ?? null,
+    ),
+    ...jsonBlock(
+      "熟成度（診断。override は DEFAULT に焼かない。current はいま効いている値）:",
+      extra.maturity ?? null,
+    ),
+    ...jsonBlock(
+      "主旋律チャンネル（vita 段A1・main.ts の DEFAULT_MELODY_LINE_SENSE / DEFAULT_PHRASE_WAVE_AMP / DEFAULT_PHRASE_WAVE_SPEED / DEFAULT_VOICE_BAND_GAIN へ焼き込む倍率）:",
+      extra.voice ?? null,
+    ),
+    ...jsonBlock(
+      "遊泳の地（vita 段A3・main.ts の DEFAULT_SWIM_* へ焼き込む倍率。旧うねりに見えたら amp=0）:",
+      extra.swim ?? null,
+    ),
+    ...jsonBlock(
+      "表示の滑らかさ（vita・main.ts の DEFAULT_DISPLAY_SMOOTH_* へ焼き込む値）:",
+      extra.displaySmooth ?? null,
+    ),
+    ...jsonBlock(
+      "天気・時刻の色の振れ幅（clay-color.ts の DEFAULT_ENV_COLOR_*_GAIN へ焼き込む値）:",
+      extra.envColor ?? null,
+    ),
+    ...jsonBlock(
+      "宝石の面（vita・gem-material.ts の DEFAULT_GEM_* / main.ts の DEFAULT_MINERAL_FACET_STRENGTH へ焼き込む値）:",
+      extra.gem ?? null,
+      "**axis は鳴らしていた曲の音色軸。0 なら結晶の面が1枚も無いので、何を上げても出ない。**",
+    ),
   ];
   return lines.join("\n");
 };

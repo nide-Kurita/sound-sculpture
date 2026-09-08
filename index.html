@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Sound Sculpture</title>
+    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   </head>
   <body>
     <main id="app" class="mode-classic style-vita theme-dark">
@@ -12,13 +15,13 @@
         <span class="intro-rule" aria-hidden="true"></span>
         <p id="intro-title" class="intro-subtitle">音の彫刻</p>
         <p id="intro-description" class="description">
-          Fed by sound, a life-form grows. Its membrane gleams like a pearl, remembering the pulse of sound as it continues to breathe.
+          Sound settles onto a clay-like core. Its membrane gleams like a pearl, and when the song ends, what remains is a sculpture of that one song alone.
         </p>
         <p id="intro-description-ja" class="description-ja">
-          音を糧に、深海のような闇の中で生命体が育つ。<br>
+          聴かせた音が、粘土のような核へ降り積もる。<br>
           膜は真珠のように輝き、<br>
-          完成後も音の鼓動を記憶して<br>
-          呼吸し続けます。
+          曲が終わると、その一曲だけの<br>
+          彫刻として残ります。
         </p>
       </header>
 
@@ -99,6 +102,15 @@
 
       <aside class="control-panel-shell is-collapsed" id="control-panel-shell">
         <section class="control-panel" id="control-panel" aria-label="Controls">
+        <div class="locale-toggle" role="group" aria-label="Language">
+          <button type="button" id="locale-ja" class="locale-toggle__btn is-active" aria-pressed="true">
+            JA
+          </button>
+          <span class="locale-toggle__sep" aria-hidden="true">/</span>
+          <button type="button" id="locale-en" class="locale-toggle__btn" aria-pressed="false">
+            EN
+          </button>
+        </div>
         <details class="control-group" open>
           <summary class="control-group__summary">Recording</summary>
           <div class="control-group__body">
@@ -229,19 +241,31 @@
         </details>
 
         <details class="control-group" open>
-          <summary class="control-group__summary">Settings</summary>
+          <summary class="control-group__summary" data-i18n="settings">設定</summary>
           <div class="control-group__body">
             <label class="sculpture-mode" id="experience-style-field">
-              Style
+              <span data-i18n="style">スタイル</span>
               <select id="experience-style" class="sculpture-mode__select">
               </select>
             </label>
             <label class="sculpture-mode" id="growth-algorithm-field">
-              Growth Algorithm
+              <span class="setting-label-row">
+                <span data-i18n="growthAlgorithm">成長アルゴリズム</span>
+                <button
+                  type="button"
+                  class="setting-help-toggle"
+                  data-help-target="growth-algorithm-hint"
+                  data-i18n-aria="aboutGrowth"
+                  aria-expanded="false"
+                  aria-label="成長アルゴリズムについて"
+                >
+                  ?
+                </button>
+              </span>
+              <p id="growth-algorithm-hint" class="growth-algorithm-hint setting-help-body" hidden></p>
               <select id="growth-algorithm" class="sculpture-mode__select growth-algorithm__select">
               </select>
             </label>
-            <p id="growth-algorithm-hint" class="growth-algorithm-hint"></p>
             <details class="band-test-panel" id="band-test-panel" hidden>
               <summary class="band-test-panel__summary">Band Test</summary>
               <div class="band-test-panel__body">
@@ -263,25 +287,89 @@
             <label class="daytime-bg-option">
               <input id="daytime-background" type="checkbox" />
               <span class="daytime-bg-option__text">
-                <span class="daytime-bg-option__title">Match local time of day</span>
-                <span class="daytime-bg-option__hint">朝・昼・夕・夜で色が変わり、文字色も反転します</span>
+                <span class="daytime-bg-option__title-row">
+                  <span class="daytime-bg-option__title" data-i18n="matchTime">時刻に合わせる</span>
+                  <button
+                    type="button"
+                    class="setting-help-toggle"
+                    data-help-target="hint-daytime"
+                    data-i18n-aria="aboutTime"
+                    aria-expanded="false"
+                    aria-label="時刻設定について"
+                  >
+                    ?
+                  </button>
+                </span>
+                <span
+                  id="hint-daytime"
+                  class="daytime-bg-option__hint setting-help-body"
+                  data-i18n="hintTime"
+                  hidden
+                >
+                  朝・昼・夕・夜で色が変わります。
+                </span>
               </span>
             </label>
             <label class="daytime-bg-option">
               <input id="live-weather" type="checkbox" />
               <span class="daytime-bg-option__text">
-                <span class="daytime-bg-option__title">Match local weather</span>
-                <span class="daytime-bg-option__hint">位置情報と天気APIで晴れ・曇り・雨・風を反映します</span>
+                <span class="daytime-bg-option__title-row">
+                  <span class="daytime-bg-option__title" data-i18n="matchWeather">天気に合わせる</span>
+                  <button
+                    type="button"
+                    class="setting-help-toggle"
+                    data-help-target="hint-weather"
+                    data-i18n-aria="aboutWeather"
+                    aria-expanded="false"
+                    aria-label="天気設定について"
+                  >
+                    ?
+                  </button>
+                </span>
+                <span
+                  id="hint-weather"
+                  class="daytime-bg-option__hint setting-help-body"
+                  data-i18n="hintWeather"
+                  hidden
+                >
+                  位置情報と天気で、晴れ・曇り・雨・風を反映します。
+                </span>
+              </span>
+            </label>
+            <label class="daytime-bg-option">
+              <input id="show-hud-chrome" type="checkbox" checked />
+              <span class="daytime-bg-option__text">
+                <span class="daytime-bg-option__title-row">
+                  <span class="daytime-bg-option__title" data-i18n="showOverlays">画面表示</span>
+                  <button
+                    type="button"
+                    class="setting-help-toggle"
+                    data-help-target="hint-overlays"
+                    data-i18n-aria="aboutOverlays"
+                    aria-expanded="false"
+                    aria-label="画面表示について"
+                  >
+                    ?
+                  </button>
+                </span>
+                <span
+                  id="hint-overlays"
+                  class="daytime-bg-option__hint setting-help-body"
+                  data-i18n="hintOverlays"
+                  hidden
+                >
+                  タイトル・メーター・ステータス・スティック・あしらいを表示します。オフ時は操作パネルボタンだけ、操作で一時表示します。
+                </span>
               </span>
             </label>
             <p id="live-weather-status" class="live-weather-status" hidden></p>
             <div class="daytime-preview" id="weather-preview" hidden>
               <p class="daytime-preview__label">
-                天気プレビュー（DEV）
+                <span data-i18n="weather">天気</span>
                 <span id="weather-preview-value">LIVE</span>
               </p>
               <label class="weather-preview__field">
-                <span class="weather-preview__field-label">条件</span>
+                <span class="weather-preview__field-label" data-i18n="condition">条件</span>
                 <select id="weather-preview-preset" class="weather-preview__select">
                   <option value="live">LIVE（実天気）</option>
                   <option value="clear">晴れ</option>
@@ -297,8 +385,11 @@
                   <option value="thunderstorm">雷雨</option>
                 </select>
               </label>
-              <label class="weather-preview__field">
-                <span class="weather-preview__field-label">雨量 <span id="weather-preview-rain-value">1.0</span></span>
+              <label class="weather-preview__field weather-preview__field--dev" hidden>
+                <span class="weather-preview__field-label"
+                  ><span data-i18n="rainAmount">雨量</span>
+                  <span id="weather-preview-rain-value">1.0</span></span
+                >
                 <input
                   id="weather-preview-rain"
                   class="daytime-preview__slider"
@@ -309,8 +400,11 @@
                   value="1"
                 />
               </label>
-              <label class="weather-preview__field">
-                <span class="weather-preview__field-label">風速 <span id="weather-preview-wind-value">1.0</span></span>
+              <label class="weather-preview__field weather-preview__field--dev" hidden>
+                <span class="weather-preview__field-label"
+                  ><span data-i18n="windAmount">風速</span>
+                  <span id="weather-preview-wind-value">1.0</span></span
+                >
                 <input
                   id="weather-preview-wind"
                   class="daytime-preview__slider"
@@ -322,12 +416,14 @@
                 />
               </label>
               <div class="daytime-preview__actions">
-                <button id="weather-preview-live" type="button">実天気に戻す</button>
+                <button id="weather-preview-live" type="button" data-i18n="useLiveWeather">
+                  実天気に戻す
+                </button>
               </div>
             </div>
             <div class="daytime-preview" id="daytime-preview" hidden>
               <p class="daytime-preview__label">
-                時刻プレビュー（DEV）
+                <span data-i18n="timeOfDay">時刻</span>
                 <span id="daytime-preview-value">LIVE</span>
               </p>
               <input
@@ -340,7 +436,9 @@
                 value="12"
               />
               <div class="daytime-preview__actions">
-                <button id="daytime-preview-live" type="button">実時刻に戻す</button>
+                <button id="daytime-preview-live" type="button" data-i18n="useLiveTime">
+                  実時刻に戻す
+                </button>
               </div>
             </div>
             <section class="audio-scope" aria-label="Audio scope" hidden>
@@ -470,6 +568,39 @@
                 <button id="reset-maturity" type="button">既定に戻す</button>
               </div>
             </div>
+            <div class="daytime-preview songcolor-panel" id="smooth-panel" hidden>
+              <p class="daytime-preview__label">
+                表示の滑らかさ（DEV・vitaのみ）
+                <span id="smooth-hint">即時反映</span>
+              </p>
+              <p class="capture-panel__note">
+                変形メッシュ（detail 10）で計算した変位を、表示メッシュ（detail 20）へ渡す前に
+                1-ring で平滑します。**蓄積・完成形の中身は触りません**（描画の再構成だけ）。
+                0 で従来どおり。上げるほどグリッド目が消えて動きが滑らかになりますが、
+                上げ過ぎると棘が丸くなり曲ごとのシルエット差が減ります。
+                「結晶の稜を残す」は結晶面の上で平滑を弱める割合です。
+              </p>
+              <div id="smooth-sliders" class="songcolor-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="reset-smooth" type="button">既定に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview songcolor-panel" id="envcolor-panel" hidden>
+              <p class="daytime-preview__label">
+                天気・時刻の色の振れ幅（DEV・vitaのみ）
+                <span id="envcolor-hint">即時反映</span>
+              </p>
+              <p class="capture-panel__note">
+                原則では色の第一目的は「気候・時間・作った環境」です。1.0 が従来値。
+                実測では待機時の画面上の色相の広がりが天気で 0.06 / 時刻で 0.03 しかなく、
+                面内の真珠ノイズ（±0.35）に埋もれていました。曲を鳴らさずに天気・時刻プレビューを
+                振りながら決めてください（曲の色の幅は別パネルで、ここでは動きません）。
+              </p>
+              <div id="envcolor-sliders" class="songcolor-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="reset-envcolor" type="button">既定に戻す</button>
+              </div>
+            </div>
             <div class="daytime-preview songcolor-panel" id="mineral-panel" hidden>
               <p class="daytime-preview__label">
                 音色で形（鉱物/丸み・DEV・vitaのみ）
@@ -486,6 +617,38 @@
                   軸=自動
                 </button>
                 <button id="reset-mineral" type="button">既定に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview songcolor-panel" id="voice-panel" hidden>
+              <p class="daytime-preview__label">
+                主旋律チャンネル（声・リード・DEV・vitaのみ）
+                <span id="voice-hint">即時反映</span>
+              </p>
+              <p class="capture-panel__note">
+                ボーカルやリード楽器の「句」に反応します。句のあいだ、体表が横へ滑り（接線流）、
+                膜が透けて下の粘土が見えます。打点（キック／スネア）は法線方向・加算発光なので、
+                声とはチャンネルが分かれていて奪い合いません。
+                上の presence / head が 0 のままなら検出の問題、出ているのに見えないなら表示の問題です。
+                曲を鳴らしながら追い込んでください。
+              </p>
+              <div id="voice-sliders" class="songcolor-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="reset-voice" type="button">既定に戻す</button>
+              </div>
+            </div>
+            <div class="daytime-preview songcolor-panel" id="swim-panel" hidden>
+              <p class="daytime-preview__label">
+                遊泳の地（DEV・vitaのみ・段A3）
+                <span id="swim-hint">即時反映</span>
+              </p>
+              <p class="capture-panel__note">
+                出来事と独立した、体スケールの滑らかな遊泳。BPM と激しさに追従し、
+                キック／スネアでは退きます（duck）。永久層には刻みません。
+                「常時うねり」に見えたら振幅を 0 へ。idle のホヨホヨとは別チャンネルです。
+              </p>
+              <div id="swim-sliders" class="songcolor-sliders"></div>
+              <div class="daytime-preview__actions">
+                <button id="reset-swim" type="button">既定に戻す</button>
               </div>
             </div>
             <div class="daytime-preview capture-panel" id="capture-panel" hidden>

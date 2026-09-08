@@ -52,6 +52,7 @@ body {
   line-height: 1.2;
   pointer-events: none;
   backdrop-filter: blur(6px);
+  transition: opacity 0.7s ease, visibility 0.7s ease;
 }
 
 .surface-badge[data-surface="public"] {
@@ -145,6 +146,52 @@ body {
   color: var(--ui-ink-soft);
 }
 
+/*
+ * 網点: 画面はほぼ黒（パレットによっては紙色）。オーバーレイ文字は白＋ difference で
+ * 背景に対して反転し、常に読めるようにする。パネル類は不透明なので通常の暗色 UI。
+ */
+#app.style-dither .intro-heading,
+#app.style-dither .intro-subtitle,
+#app.style-dither .description,
+#app.style-dither .description-ja,
+#app.style-dither.is-complete .description,
+#app.style-dither.is-complete .description-ja,
+#app.style-dither .hud,
+#app.style-dither .hud-corner,
+#app.style-dither .hud-panel-toggle,
+#app.style-dither .surface-badge {
+  color: #ffffff;
+  mix-blend-mode: difference;
+}
+
+#app.style-dither.daytime-linked .intro-heading,
+#app.style-dither.daytime-linked .intro-subtitle,
+#app.style-dither.daytime-linked .description,
+#app.style-dither.daytime-linked .description-ja,
+#app.style-dither.daytime-linked.is-complete .description,
+#app.style-dither.daytime-linked.is-complete .description-ja,
+#app.style-dither.daytime-linked .hud,
+#app.style-dither.daytime-linked .hud-corner,
+#app.style-dither.daytime-linked .hud-panel-toggle,
+#app.style-dither.daytime-linked .surface-badge,
+#app.style-dither.daytime-linked.theme-dark .intro-heading,
+#app.style-dither.daytime-linked.theme-dark .intro-subtitle,
+#app.style-dither.daytime-linked.theme-dark .description,
+#app.style-dither.daytime-linked.theme-dark .description-ja,
+#app.style-dither.daytime-linked.theme-dark.is-complete .description,
+#app.style-dither.daytime-linked.theme-dark.is-complete .description-ja,
+#app.style-dither.daytime-linked.theme-dark .hud,
+#app.style-dither.daytime-linked.theme-dark .hud-panel-toggle,
+#app.style-dither.daytime-linked.theme-dark .surface-badge {
+  color: #ffffff;
+  mix-blend-mode: difference;
+}
+
+#app.style-dither .surface-badge {
+  border-color: rgb(255 255 255 / 55%);
+  background: transparent;
+}
+
 /* 時間帯リンク中はテーマ固定色よりトークンを優先 */
 #app.daytime-linked.theme-dark .intro-heading,
 #app.daytime-linked.theme-dark .intro-subtitle {
@@ -228,6 +275,7 @@ body {
   top: clamp(1.5rem, 4.5vw, 3.2rem);
   left: clamp(1.5rem, 4.5vw, 3.2rem);
   pointer-events: none;
+  transition: opacity 0.7s ease, visibility 0.7s ease;
 }
 
 .intro-heading {
@@ -240,7 +288,7 @@ body {
   line-height: 1.16;
   text-transform: uppercase;
   color: #161616;
-  transition: color 0.85s ease;
+  transition: color 0.85s ease, opacity 0.9s ease;
 }
 
 .intro-rule {
@@ -250,6 +298,7 @@ body {
   margin: 1.1rem 0 0;
   background: currentcolor;
   opacity: 0.75;
+  transition: opacity 0.9s ease;
 }
 
 .intro-subtitle {
@@ -266,7 +315,7 @@ body {
   writing-mode: vertical-rl;
   color: #161616;
   margin-top: 8px;
-  transition: color 0.85s ease;
+  transition: color 0.85s ease, opacity 0.9s ease;
 }
 
 .description {
@@ -277,7 +326,7 @@ body {
   font-size: 0.72rem;
   letter-spacing: 0.14em;
   line-height: 2;
-  transition: color 0.85s ease;
+  transition: color 0.85s ease, opacity 0.9s ease;
 }
 
 .description-ja {
@@ -293,7 +342,7 @@ body {
   line-height: 2;
   writing-mode: vertical-rl;
   margin-top: 12px;
-  transition: color 0.85s ease;
+  transition: color 0.85s ease, opacity 0.9s ease;
 }
 
 /* --- HUD (計測風あしらい) --- */
@@ -305,7 +354,20 @@ body {
   pointer-events: none;
   font-family: var(--hud-mono);
   color: #3d3a34;
-  transition: color 0.85s ease;
+  transition: color 0.85s ease, opacity 0.7s ease, visibility 0.7s ease;
+}
+
+/* Settings でオフ: intro・HUD・バッジなど画面上のテキスト／あしらいをフェードアウト */
+#app.chrome-hidden .intro,
+#app.chrome-hidden .hud,
+#app.chrome-hidden .surface-badge {
+  opacity: 0;
+  visibility: hidden;
+}
+
+#app.chrome-hidden .hud .hud-reticle,
+#app.chrome-hidden .hud .hud-reticle__handle {
+  pointer-events: none !important;
 }
 
 .hud-corner {
@@ -615,8 +677,28 @@ body {
   transition:
     left 480ms cubic-bezier(0.22, 1, 0.36, 1),
     top 480ms cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 160ms ease,
+    opacity 320ms ease,
+    visibility 320ms ease,
     color 0.85s ease;
+}
+
+/* chrome 非表示時はトグルも隠す。操作で peek / パネル開中だけ再表示 */
+#app.chrome-hidden .hud-panel-toggle {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+#app.chrome-hidden.chrome-toggle-peek .hud-panel-toggle,
+#app.chrome-hidden.chrome-panel-open .hud-panel-toggle {
+  opacity: 0.7;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+#app.chrome-hidden.chrome-toggle-peek .hud-panel-toggle:hover,
+#app.chrome-hidden.chrome-panel-open .hud-panel-toggle:hover {
+  opacity: 1;
 }
 
 .hud-panel-toggle.is-dragging {
@@ -665,6 +747,7 @@ body {
 }
 
 .control-panel {
+  position: relative;
   width: min(22rem, calc(100vw - 3rem));
   min-width: 0;
   min-height: 0;
@@ -814,11 +897,88 @@ body {
 }
 
 .growth-algorithm-hint {
-  margin: -0.55rem 0 1rem;
+  margin: 0.15rem 0 0;
   color: #8a857c;
   font-size: 0.72rem;
   line-height: 1.45;
   letter-spacing: 0.02em;
+}
+
+.sculpture-mode .growth-algorithm-hint + .sculpture-mode__select {
+  margin-top: 0.35rem;
+}
+
+.locale-toggle {
+  position: absolute;
+  top: 0.55rem;
+  right: 1rem;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.2rem;
+  margin: 0;
+  opacity: 0.42;
+  transition: opacity 180ms ease;
+  pointer-events: auto;
+}
+
+.locale-toggle:hover,
+.locale-toggle:focus-within {
+  opacity: 0.72;
+}
+
+.locale-toggle__sep {
+  color: #9a958c;
+  font-size: 0.58rem;
+  letter-spacing: 0;
+  user-select: none;
+}
+
+.locale-toggle__btn {
+  margin: 0;
+  padding: 0.1rem 0.15rem;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #8a857c;
+  font-family: var(--hud-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.locale-toggle__btn:hover {
+  color: #5e594f;
+}
+
+.locale-toggle__btn.is-active,
+.locale-toggle__btn[aria-pressed="true"] {
+  color: #3d3a34;
+  opacity: 1;
+}
+
+.theme-dark .locale-toggle__sep {
+  color: #6a7180;
+}
+
+.theme-dark .locale-toggle__btn {
+  color: #7a8496;
+  background: transparent;
+  border: none;
+}
+
+.theme-dark .locale-toggle__btn:hover {
+  color: #c5cbd8;
+}
+
+.theme-dark .locale-toggle__btn.is-active,
+.theme-dark .locale-toggle__btn[aria-pressed="true"] {
+  color: #d5dbe8;
+  background: transparent;
+  border: none;
 }
 
 .playback-volume {
@@ -969,8 +1129,42 @@ body {
   gap: 0.22rem;
 }
 
+.daytime-bg-option__title-row,
+.setting-label-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
 .daytime-bg-option__title {
   letter-spacing: 0.06em;
+}
+
+.setting-help-toggle {
+  flex: 0 0 auto;
+  width: 1.15rem;
+  height: 1.15rem;
+  padding: 0;
+  border: 1px solid rgb(22 22 22 / 28%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 55%);
+  color: #6b675f;
+  font-family: var(--hud-mono);
+  font-size: 0.62rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.setting-help-toggle:hover,
+.setting-help-toggle[aria-expanded="true"] {
+  border-color: rgb(22 22 22 / 45%);
+  color: #3d3a34;
+  background: rgb(255 255 255 / 82%);
+}
+
+.setting-help-body {
+  margin: 0.15rem 0 0;
 }
 
 .daytime-bg-option__hint {
@@ -1677,6 +1871,19 @@ input[type="range"] {
   border-color: rgb(255 255 255 / 40%);
 }
 
+.theme-dark .setting-help-toggle {
+  border-color: rgb(170 178 194 / 28%);
+  background: rgb(8 12 18 / 55%);
+  color: #aab2c2;
+}
+
+.theme-dark .setting-help-toggle:hover,
+.theme-dark .setting-help-toggle[aria-expanded="true"] {
+  border-color: rgb(170 178 194 / 45%);
+  background: rgb(12 16 24 / 78%);
+  color: #ece9e1;
+}
+
 .theme-dark .daytime-bg-option__hint {
   color: #7e8798;
 }
@@ -1968,6 +2175,11 @@ input[type="range"] {
 
   .control-group__body {
     padding: 0 0.85rem 0.85rem;
+  }
+
+  .locale-toggle {
+    top: 0.55rem;
+    right: 0.85rem;
   }
 
   .actions__row--input {

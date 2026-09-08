@@ -603,6 +603,16 @@ class BackgroundDome {
    * 0–3 暗め / 4–11 赤みなし / 12–15 明るい青・赤みなし
    * 15–18 赤みが時間とともに出て 18 で消える / 18–24 徐々に暗く夜へ
    */
+  /**
+   * 天気ぶんの海水の色味。**色相はここまでハードコードだった**（0.58 固定）ので、
+   * 「天気で作った環境が色に出る」が背景側で成立していなかった（2026-08-21 実測 幅 0.002）。
+   * 明度は触らない（夜が潰れる）。
+   */
+  setAbyssSeaWeather(tint: { hue: number; sat: number } | null) {
+    this.seaWeatherTint.hue = tint?.hue ?? 0;
+    this.seaWeatherTint.sat = tint?.sat ?? 0;
+  }
+
   setAbyssSeaByHour(hour: number) {
     if (!(this.material.uniforms.uAbyss?.value > 0.5)) {
       return;
@@ -653,9 +663,14 @@ class BackgroundDome {
     const haloStrength = lerp(a.haloStr, b.haloStr, t);
     const sunset = lerp(a.sunset, b.sunset, t);
 
-    top.setHSL(0.58, 0.52, topL);
-    bottom.setHSL(0.62, 0.38, bottomL);
-    halo.setHSL(0.57, 0.44, haloL);
+    // 天気ぶんの色味（`abyssSeaTintFromWeather`）。色相と彩度だけ動かす。
+    const wrap = (v: number) => ((v % 1) + 1) % 1;
+    const clamp01v = (v: number) => Math.min(1, Math.max(0, v));
+    const wxH = this.seaWeatherTint.hue;
+    const wxS = this.seaWeatherTint.sat;
+    top.setHSL(wrap(0.58 + wxH), clamp01v(0.52 + wxS), topL);
+    bottom.setHSL(wrap(0.62 + wxH * 0.85), clamp01v(0.38 + wxS * 0.8), bottomL);
+    halo.setHSL(wrap(0.57 + wxH * 1.1), clamp01v(0.44 + wxS), haloL);
     this.baseHaloStrength = haloStrength;
     this.material.uniforms.uHaloStrength.value = this.baseHaloStrength;
     if (this.material.uniforms.uSunset) {
@@ -678,6 +693,8 @@ class BackgroundDome {
       (this.material.uniforms.uCameraPos.value as THREE.Vector3).copy(camera);
     }
   }
+
+  private readonly seaWeatherTint = { hue: 0, sat: 0 };
 
   setWeatherAtmosphere(cloudCover: number, fogHaze: number, lightningFlash: number) {
     if (!this.material.uniforms.uCloudCover) {
@@ -2449,13 +2466,23 @@ export class SceneBackground {
     this.studioFloor?.setFromBackground(horizon, envMix);
   }
 
-  /** 深海の海水塊を時刻で調整 */
+  /** 深海の海水塊を時刻で調整（天気ぶんの色味は `setAbyssSeaWeather` で先に渡す） */
   setAbyssSeaByHour(hour: number) {
     if (!this.abyssVariant) {
       return;
     }
     this.dome.setAbyssSeaByHour(hour);
     this.innerDome?.setAbyssSeaByHour(hour);
+  }
+
+  /** 深海の海水塊の天気ぶんの色味（色相・彩度のみ） */
+  setAbyssSeaWeather(tint: { hue: number; sat: number } | null) {
+    if (!this.abyssVariant) {
+      return;
+    }
+    this.dome.setAbyssSeaWeather(tint);
+    // 内側ドームは効きを半分に（奥行きが潰れないように）
+    this.innerDome?.setAbyssSeaWeather(tint ? { hue: tint.hue * 0.6, sat: tint.sat * 0.6 } : null);
   }
 
   /** 深海ドームの差し込み光条（太陽方向・強度） */
