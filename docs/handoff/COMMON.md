@@ -90,8 +90,9 @@
   「音楽を形としてみる、ブラウザのインタラクティブ3D作品。音への反応は消えず形に蓄積され、一曲を聴き終えるとその曲だけの立体が残ります。」
   （AICA2026 制作過程資料の要約。画面イントロとは別。出し分けなし）
 - `apple-touch-icon.png` は `public/` に 180×180 で既存。新規作成不要
-- charset を gtag の直後へ。gtag は Google 指定どおり `<head>` 直下
-- og:url / og:image は公開 URL・専用画像が無いので未設定
+- `public/og-image.png` = AICA の `thumbnail-cloudy-4am.png` をコピー（1920×1080）
+- `og:url` / `og:image` / `canonical` = `https://soundsculpture.art/`
+- `twitter:card` = `summary_large_image`
 
 ### 2026-09-08 ビルド — 500KB チャンク警告を既定どおり黙らせる
 
