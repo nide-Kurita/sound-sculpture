@@ -12218,19 +12218,8 @@ const applyExperienceUi = (id: ExperienceId) => {
     appElement.classList.toggle("theme-dark", styleEnvActive && visualStyle.themeDark);
   }
 
-  if (entry.id === "vita") {
-    document.title = "Sound Sculpture — 生命";
-  } else if (entry.id === "monolith") {
-    document.title = "Sound Sculpture — 彫刻";
-  } else if (entry.id === "metamorphosis") {
-    document.title = "Sound Sculpture — 変容";
-  } else if (entry.id === "dither") {
-    document.title = "Sound Sculpture — 網点";
-  } else if (entry.id === "lumen") {
-    document.title = "Sound Sculpture — 発光";
-  } else {
-    document.title = "Sound Sculpture";
-  }
+  // 検索結果・タブはスタイル名ではなく副題を「音の彫刻」に揃える
+  document.title = "Sound Sculpture — 音の彫刻";
 
   const introTitleEl = document.querySelector<HTMLElement>("#intro-title");
   const introDescEl = document.querySelector<HTMLElement>("#intro-description");
