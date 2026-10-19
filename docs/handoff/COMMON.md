@@ -81,6 +81,35 @@
 
 ## 3. 直近の変更（新しいものを上に）
 
+### 2026-10-19 入力 — システム音声（getDisplayMedia）で 4〜9 秒で COMPLETE する不具合を修正
+
+症状: 本番で「Use System Audio」→ 画面全体＋システム音声共有、Spotify で
+Alone Again (Naturally) を再生すると 4〜9 秒で完成してしまう。
+
+**原因（実測）:** ループバック音声が **約 -40 dBFS** で届いていた（波形 RMS 0.008–0.010、
+peak ≈ 0.023）。スペクトル側の raw overall は 0.2–0.3 と十分あるのに、
+`applyWaveGate` の波形ゲート（マイクの部屋鳴り用: RMS 0.008→0.03 / peak 0.03→0.12）が
+約 1/60 に潰し、ゲート後 overall が 0.005–0.015 ＝ `SILENCE_THRESHOLD`(0.025) 未満に張り付いた。
+→ 無音カウンタが 2.4 秒に達して完成。トラックは live/unmuted、AudioContext は running のまま
+（音が途切れたのではない）。さらに 8bit 波形（`getByteTimeDomainData`）は 1/128 ≒ -42 dBFS
+刻みで、この音量は測れていなかった。
+
+**修正（`src/main.ts` AudioInput）:** `startDisplayAudio` のときだけ
+- 波形は `getFloatTimeDomainData` で測る
+- 波形ゲートを RMS 0.0005→0.003 / peak 0.002→0.012（≈ -60 dBFS）に下げる（`getWaveGateRange()`）。
+  ループバックは無音＝デジタルゼロなので誤爆しない（実測: 一時停止後 RMS は厳密に 0）。
+
+マイク／Dev Audio（決定論経路）は従来どおり。
+
+**検証（同じ曲・同じ共有で再生中に測定）:** 修正前はゲート後 overall ≈ 0.01、
+開始 ~4 秒で COMPLETE。修正後は 148 秒再生してゲート後 overall 0.23–1.0、
+無音カウンタ最大 0.07 秒で COMPLETE は出ず。一時停止→完成の挙動は今回未確認
+（一時停止後は RMS=0 なので従来どおり 2.4 秒で完成するはず）。
+
+残課題: ループバックが小さいと、波形ベースのリズム検出（peakDelta 等）や
+スペクトル帯域の振れも小さめになる。必要なら入力の自動メイクアップゲインを検討
+（-40 dBFS の原因は OS／Spotify 側の音量の可能性が高いが、サイト側で吸収すべき）。
+
 ### 2026-09-15 UI — head に description / OGP を追加。title は「Sound Sculpture — 音の彫刻」
 
 ユーザー: 検索結果の副題は「音の彫刻」。ページは一つなので description は出し分け不要。meta description は必要。

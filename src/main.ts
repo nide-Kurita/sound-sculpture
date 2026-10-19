@@ -2354,6 +2354,13 @@ class AudioInput {
   private monitoringConnected = false;
   private data: Uint8Array<ArrayBuffer> | null = null;
   private timeData: Uint8Array<ArrayBuffer> | null = null;
+  private floatTimeData: Float32Array<ArrayBuffer> | null = null;
+  /**
+   * getDisplayMedia のシステム音声（ループバック）を解析中か。
+   * ループバックは OS／アプリの音量が下がっていると -40 dBFS 前後で届くことがあり、
+   * マイク向けの波形ゲートでは曲全体が「無音」扱いになる（[COMMON] 2026-10-19）。
+   */
+  private isDisplayCapture = false;
   /** 直近フレームのグリット（歪み/ザラつき）= プレゼンス帯のスペクトル平坦度。音色軸の主信号。 */
   private spectralFlatness = 0;
   private stream: MediaStream | null = null;
@@ -2525,6 +2532,7 @@ class AudioInput {
     }
 
     this.connectStream(stream);
+    this.isDisplayCapture = true;
     await this.ensureContextRunning();
   }
 
@@ -2778,6 +2786,8 @@ class AudioInput {
     this.monitoringConnected = false;
     this.data = new Uint8Array(this.analyser.frequencyBinCount);
     this.timeData = new Uint8Array(this.analyser.fftSize);
+    this.floatTimeData = new Float32Array(this.analyser.fftSize);
+    this.isDisplayCapture = false;
     this.resetProfile();
   }
 
@@ -2789,6 +2799,16 @@ class AudioInput {
     return this.timeData;
   }
 
+  /**
+   * 波形ゲート（applyWaveGate）のしきい値。マイクは部屋鳴りを落とすため高め。
+   * ループバックは無音＝デジタルゼロなので、-60 dBFS 付近まで下げても誤爆しない。
+   */
+  getWaveGateRange() {
+    return this.isDisplayCapture
+      ? { rmsFrom: 0.0005, rmsTo: 0.003, peakFrom: 0.002, peakTo: 0.012 }
+      : { rmsFrom: 0.008, rmsTo: 0.03, peakFrom: 0.03, peakTo: 0.12 };
+  }
+
   getWaveformMetrics(): WaveformMetrics | null {
     const timeData = this.getWaveformBytes();
     if (!timeData) {
@@ -2797,10 +2817,20 @@ class AudioInput {
 
     let sumSq = 0;
     let peak = 0;
-    for (let i = 0; i < timeData.length; i += 1) {
-      const v = (timeData[i] - 128) / 128;
-      sumSq += v * v;
-      peak = Math.max(peak, Math.abs(v));
+    if (this.isDisplayCapture && this.analyser && this.floatTimeData) {
+      // 8bit 波形は 1/128（≒ -42 dBFS）刻みで、小さく届くループバックを測れない
+      this.analyser.getFloatTimeDomainData(this.floatTimeData);
+      for (let i = 0; i < this.floatTimeData.length; i += 1) {
+        const v = this.floatTimeData[i];
+        sumSq += v * v;
+        peak = Math.max(peak, Math.abs(v));
+      }
+    } else {
+      for (let i = 0; i < timeData.length; i += 1) {
+        const v = (timeData[i] - 128) / 128;
+        sumSq += v * v;
+        peak = Math.max(peak, Math.abs(v));
+      }
     }
     const rms = Math.sqrt(sumSq / timeData.length);
     const peakDelta = Math.max(0, peak - this.prevWavePeak);
@@ -15244,9 +15274,10 @@ window.addEventListener("resize", resize);
 const applyWaveGate = (rawBands: AudioBands, waveformMetrics: WaveformMetrics | null): AudioBands => {
   const bands: AudioBands = { ...rawBands };
   if (waveformMetrics) {
+    const g = audioInput.getWaveGateRange();
     const waveGate = Math.max(
-      smoothstep(0.008, 0.03, waveformMetrics.rms),
-      smoothstep(0.03, 0.12, waveformMetrics.peak) * 0.75,
+      smoothstep(g.rmsFrom, g.rmsTo, waveformMetrics.rms),
+      smoothstep(g.peakFrom, g.peakTo, waveformMetrics.peak) * 0.75,
     );
     bands.sub *= waveGate;
     bands.low *= waveGate;
